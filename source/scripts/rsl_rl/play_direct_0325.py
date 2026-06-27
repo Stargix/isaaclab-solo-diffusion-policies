@@ -16,6 +16,8 @@ import os
 import re
 import statistics
 import sys
+import torch
+
 import threading
 import time
 from dataclasses import dataclass
