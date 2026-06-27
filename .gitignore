@@ -2,6 +2,7 @@
 .claude/
 .openclaw/
 .worktrees/
+.env
 
 # C++
 **/cmake-build*/
