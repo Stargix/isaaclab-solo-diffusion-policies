@@ -48,7 +48,7 @@ class Solo12CrouchEnvCfg(Solo12EnvCfg):
 @configclass
 class Solo12CrouchPPORunnerCfg(Solo12PPORunnerCfg):
     experiment_name = "solo12_rsl_rl_crouch_runs"
-    run_name = "solo12_crouch_v3"
+    run_name = "solo12_crouch_v4_symmetry"
 
 
 class Solo12CrouchEnv(Solo12Env):
