@@ -18,30 +18,28 @@ class Solo12CrouchEnvCfg(Solo12EnvCfg):
     command_lin_vel_y_range = (-0.2, 0.2)
     command_ang_vel_z_range = (-0.5, 0.5)
 
-    # --- FIX 1: Sharper tracking gaussian ---
-    # sqrt(0.25)=0.5 was too forgiving: robot got 70% reward standing still.
-    # sqrt(0.1)=0.316 makes standing still yield only ~40%, forcing locomotion.
+    # --- CaT-inspired height termination ---
+    # Max allowed height. If exceeded, episode is terminated (after warmup).
+    crouch_height_limit = 0.21
+    # Target height for a gentle centering guide reward.
+    target_base_height = 0.18
+    base_height_reward_scale = -20.0  # Softer guide penalty
+
+    # --- Sharper tracking to reward movement ---
     tracking_std = math.sqrt(0.1)
+    track_lin_vel_xy_reward_scale = 3.0  # Was 1.5. Doubled.
+    track_ang_vel_z_reward_scale = 1.5   # Was 0.75. Doubled.
 
-    # --- FIX 2: Activate feet air time reward ---
-    # Was 0.0 — no incentive to lift feet. Now rewards stepping.
-    feet_air_time_reward_scale = 1.0
-    feet_air_time_threshold = 0.25  # Lower threshold for short crouched steps
+    # --- Activate feet air time reward ---
+    feet_air_time_reward_scale = 2.0
+    feet_air_time_threshold = 0.08  # Low threshold: reward short steps typical of crouching
 
-    # --- FIX 3: Reduce movement penalties ---
-    # Crouched gaits require faster, shorter steps that incur more action_rate
-    # and foot_contact penalties. Halving them gives room to explore walking.
-    action_rate_reward_scale = -0.01   # Was -0.05
-    foot_contact_reward_scale = -0.5e-3  # Was -1.0e-3
-
-    # --- FIX 4: Crouch height at 0.17m ---
-    # 0.16m was biomechanically too extreme. 0.17m is still very visibly
-    # crouched (erect = 0.24m) but gives just enough joint range for steps.
-    target_base_height = 0.17
-    base_height_reward_scale = -80.0  # Slightly softer to allow gait oscillation
+    # --- Reduce movement penalties ---
+    action_rate_reward_scale = -0.005    # Was -0.05
+    foot_contact_reward_scale = -0.25e-3  # Was -1.0e-3
 
     # Relax tilt penalty to allow natural pitch while crouched
-    base_tilt_penalty_reward_scale = -0.1
+    base_tilt_penalty_reward_scale = -0.05
 
     # Train on flat terrain for simplicity
     tricky_terrain = False
@@ -50,7 +48,7 @@ class Solo12CrouchEnvCfg(Solo12EnvCfg):
 @configclass
 class Solo12CrouchPPORunnerCfg(Solo12PPORunnerCfg):
     experiment_name = "solo12_rsl_rl_crouch_runs"
-    run_name = "solo12_crouch_v2"
+    run_name = "solo12_crouch_v3"
 
 
 class Solo12CrouchEnv(Solo12Env):
@@ -65,7 +63,7 @@ class Solo12CrouchEnv(Solo12Env):
         # Get base rewards computed by Solo12Env
         reward = super()._get_rewards()
 
-        # Calculate specialized base height penalty
+        # Calculate specialized base height penalty (gentle centering guide)
         base_height = self._robot.data.root_pos_w[:, 2]
         height_error = torch.square(base_height - self.cfg.target_base_height)
         height_penalty = height_error * self.cfg.base_height_reward_scale * self.step_dt
@@ -81,4 +79,20 @@ class Solo12CrouchEnv(Solo12Env):
             self.extras["log"]["RewardsPerStep/total"] += torch.mean(height_penalty).item()
 
         return reward
+
+    def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        # Get default terminations (base contact, timeouts...)
+        terminated, time_out = super()._get_dones()
+
+        # CaT-style height termination:
+        # Robot spawns at 0.35m in USD and falls. Give 30 steps (~0.6s) of warmup
+        # to settle and crouch before activating the height limit termination.
+        base_height = self._robot.data.root_pos_w[:, 2]
+        warmup_done = self.episode_length_buf > 30
+        too_tall = (base_height > self.cfg.crouch_height_limit) & warmup_done
+
+        # Combine terminations
+        terminated = terminated | too_tall
+        return terminated, time_out
+
 
