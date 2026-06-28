@@ -33,7 +33,16 @@ for _path in (str(_UPSTREAM_RSL_SCRIPT_DIR), str(_UPSTREAM_SKRL_HELPERS_DIR)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
+# Early imports to prevent CUDA context collision with Omniverse Kit on Windows
+import torch
+import tensordict
+try:
+    from rsl_rl.runners import DistillationRunner, OnPolicyRunner
+except ImportError:
+    DistillationRunner, OnPolicyRunner = None, None
+
 from isaaclab.app import AppLauncher
+
 
 import cli_args  # isort: skip
 from helpers import _wandb_snapshot  # isort: skip
@@ -273,6 +282,7 @@ def _is_solo12_race_task_name(task_name: str | None) -> bool:
 
 _SOLO12_DIRECT_SYMMETRY_TASKS = {
     "solo12-v0",
+    "solo12-crouch-v0",
     "Isaac-Solo12-Laas-Direct-v0",
     "solo12-IMU-based-teacher",
     "solo12-IMU-student-rl",
@@ -346,8 +356,10 @@ if version.parse(installed_version) < version.parse(RSL_RL_VERSION):
 import logging
 
 import gymnasium as gym
-import torch
-from rsl_rl.runners import DistillationRunner, OnPolicyRunner
+# Redundant late imports removed to prevent CUDA context collision
+# import torch
+# from rsl_rl.runners import DistillationRunner, OnPolicyRunner
+
 
 from continual_backprop import build_continual_backprop_manager, collect_actor_critic_cbp_specs
 from isaaclab.envs import DirectMARLEnv, DirectMARLEnvCfg, DirectRLEnvCfg, ManagerBasedRLEnvCfg, multi_agent_to_single_agent

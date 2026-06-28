@@ -15,7 +15,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from skrl import config, logger
-from skrl.agents.torch.ppo import PPO, PPO_DEFAULT_CONFIG
+try:
+    from skrl.agents.torch.ppo import PPO, PPO_DEFAULT_CONFIG
+except ImportError:
+    from skrl.agents.torch.ppo import PPO, PPO_CFG as PPO_DEFAULT_CONFIG
+
 from skrl.envs.wrappers.torch import MultiAgentEnvWrapper, Wrapper
 from skrl.memories.torch import Memory
 from skrl.models.torch import Model

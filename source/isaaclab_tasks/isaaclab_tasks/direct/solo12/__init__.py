@@ -14,7 +14,7 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.solo12_env_cfg:Solo12EnvCfg",
-        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg_fast.yaml",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:Solo12PPORunnerCfg",
         "rsl_rl_with_symmetry_cfg_entry_point": (
             f"{agents.__name__}.rsl_rl_ppo_cfg:Solo12PPORunnerWithSymmetryCfg"
@@ -41,3 +41,16 @@ _register("solo12-IMU-student-rl", "Solo12BaseImuStudentRlEnvCfg", "Solo12BaseIm
 _register("solo12-IMU-student-dagger", "Solo12BaseImuStudentDaggerEnvCfg", "Solo12BaseImuTeacherPPORunnerCfg")
 _register("Isaac-Solo12-BaseIMU-Teacher-Direct-v0", "Solo12BaseImuTeacherEnvCfg", "Solo12BaseImuTeacherPPORunnerCfg")
 _register("Isaac-Solo12-BaseIMU-StudentRL-Direct-v0", "Solo12BaseImuStudentRlEnvCfg", "Solo12BaseImuStudentRlPPORunnerCfg")
+
+gym.register(
+    id="solo12-crouch-v0",
+    entry_point=f"{__name__}.solo12_crouch_env:Solo12CrouchEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.solo12_crouch_env:Solo12CrouchEnvCfg",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg_fast.yaml",
+        "rsl_rl_cfg_entry_point": f"{__name__}.solo12_crouch_env:Solo12CrouchPPORunnerCfg",
+    },
+)
+
+
