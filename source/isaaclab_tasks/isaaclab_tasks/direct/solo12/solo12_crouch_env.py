@@ -44,6 +44,20 @@ class Solo12CrouchEnvCfg(Solo12EnvCfg):
     # Train on flat terrain for simplicity
     tricky_terrain = False
 
+    # --- Actuator gains (KP/KD) ---
+    # Higher stiffness and damping optimized for crouching and agile gait.
+    kp = 15.0
+    kd = 0.5
+
+    def __post_init__(self):
+        super().__post_init__()
+        # Sync actuator gains from config into the robot articulation actuators
+        # (Fixes the static instantiation bug in base class)
+        if "legs" in self.robot.actuators:
+            self.robot.actuators["legs"].stiffness = self.kp
+            self.robot.actuators["legs"].damping = self.kd
+
+
 
 @configclass
 class Solo12CrouchPPORunnerCfg(Solo12PPORunnerCfg):
