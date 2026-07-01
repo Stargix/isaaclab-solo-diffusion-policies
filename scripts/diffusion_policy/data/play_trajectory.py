@@ -38,6 +38,9 @@ parser.add_argument("--num_loops", type=int, default=1, help="Number of times to
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
+# Strip parsed arguments from sys.argv so Hydra doesn't crash on them
+sys.argv = [sys.argv[0]] + hydra_args
+
 # Force headless = False to show the GUI window unless explicitly overridden
 args_cli.headless = False if args_cli.headless is None else args_cli.headless
 app_launcher = AppLauncher(args_cli)
