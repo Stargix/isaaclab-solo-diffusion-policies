@@ -114,3 +114,7 @@ tests/
 # TacSL sensor
 **/tactile_record/*
 **/gelsight_r15_data/*
+
+# Datasets and large binary files
+**/*.hdf5
+scripts/diffusion_policy/data/datasets/
