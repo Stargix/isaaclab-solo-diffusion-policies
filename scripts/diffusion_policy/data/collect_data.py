@@ -183,7 +183,7 @@ def main(env_cfg: Any, agent_cfg: Any):
     # Transition logs to verify survival filtering
     last_transition_step = np.zeros(args_cli.num_envs, dtype=int)
     has_transitioned = np.zeros(args_cli.num_envs, dtype=bool)
-
+    
     # Initialize environment commands
     for i in range(args_cli.num_envs):
         resample_env_command(i, current_policies[i], raw_env._commands, device)
@@ -268,12 +268,24 @@ def main(env_cfg: Any, agent_cfg: Any):
                 last_transition_step[i] = len(trajectory_buffers[i])
                 has_transitioned[i] = True
 
-            # 4. Check resets and apply Survival Filtering
+            # 3.5 Active physical fall monitoring (custom guardrail)
+            # If the base tilts too much (angle > 53 degrees) or height collapses (< 11cm),
+            # trigger an immediate manual reset of the environment and discard the trajectory buffer.
+            is_physical_fall = (projected_gravity[i, 2] > -0.6) or (root_pos_w[i, 2] < 0.11)
+            if is_physical_fall:
+                trajectory_buffers[i] = [] # Discard trajectory immediately
+                print(f"[FILTER] Discarded env {i} due to active fall detection (gravity Z={projected_gravity[i, 2]:.2f}, height={root_pos_w[i, 2]:.2f}m). Resetting...")
+                with torch.inference_mode():
+                    raw_env._reset_idx(torch.tensor([i], device=device))
+                # Skip normal reset check as it was handled manually
+                continue
+
+            # 4. Check resets and apply Survival Filtering (timeouts or simulator-triggered terminations)
             if dones[i]:
                 traj = trajectory_buffers[i]
                 trajectory_buffers[i] = [] # Reset buffer
                 
-                # Fall is determined dynamically from the environment's terminal reset flag
+                # Check if simulator-level termination triggered a fall
                 is_fall = raw_env.reset_terminated[i].item()
                 
                 # Survival condition: Discard any episode that ends in a fall (expert quality check)

@@ -3,7 +3,7 @@
 
 """
 Script to play back a collected trajectory in the Isaac Sim GUI.
-Runs a single environment (num_envs=1) and replays recorded actions.
+Runs a single environment (num_envs=1) and replays recorded states/actions.
 
 Example usage:
 python scripts/diffusion_policy/data/play_trajectory.py --task="solo12-v0" --dataset scripts/diffusion_policy/data/datasets/walk_raw.hdf5 --demo demo_0
@@ -32,6 +32,8 @@ parser = argparse.ArgumentParser(description="Replay a recorded expert trajector
 parser.add_argument("--task", type=str, required=True, help="Task name (e.g. solo12-v0).")
 parser.add_argument("--dataset", type=str, required=True, help="Path to the HDF5 dataset file.")
 parser.add_argument("--demo", type=str, default=None, help="Name of the demo to replay (e.g. demo_0). Defaults to first demo.")
+parser.add_argument("--mode", type=str, choices=["action", "kinematic"], default="kinematic", 
+                    help="Playback mode: open-loop 'action' replay or 'kinematic' state replay.")
 parser.add_argument("--num_loops", type=int, default=1, help="Number of times to loop the playback.")
 
 # Add standard app launcher CLI arguments (GUI is enabled by default here)
@@ -58,7 +60,7 @@ def main(env_cfg: Any, agent_cfg: Any):
     if not os.path.exists(dataset_path):
         raise FileNotFoundError(f"Dataset not found at: {dataset_path}")
 
-    # Read trajectory actions from HDF5
+    # Read trajectory actions and states from HDF5
     with h5py.File(dataset_path, "r") as f:
         demos = list(f["data"].keys())
         selected_demo = args_cli.demo if args_cli.demo else demos[0]
@@ -68,8 +70,17 @@ def main(env_cfg: Any, agent_cfg: Any):
         print(f"[INFO] Loading '{selected_demo}' from {dataset_path}")
         demo_grp = f[f"data/{selected_demo}"]
         actions_seq = demo_grp["actions"][:]
-        # Load commands just to print/show them
         commands_seq = demo_grp["obs/command_speed"][:]
+        
+        # Load physical states for kinematic replay
+        root_pos_w = demo_grp["obs/root_pos_w"][:]
+        # Shift coordinates to start at (0, 0) relative to environment 0
+        root_pos_w[:, 0] -= root_pos_w[0, 0]
+        root_pos_w[:, 1] -= root_pos_w[0, 1]
+        
+        root_quat_w = demo_grp["obs/root_quat_w"][:]
+        joint_pos_seq = demo_grp["obs/joint_pos"][:]
+        joint_vel_seq = demo_grp["obs/joint_vel"][:]
 
     # Override environment settings for single visual environment
     env_cfg.scene.num_envs = 1
@@ -95,9 +106,15 @@ def main(env_cfg: Any, agent_cfg: Any):
     actions_tensor = torch.tensor(actions_seq, dtype=torch.float32, device=device)
     num_steps = actions_tensor.shape[0]
 
+    # Convert logged states to torch tensors for kinematic playback
+    root_pos_t = torch.tensor(root_pos_w, dtype=torch.float32, device=device)
+    root_quat_t = torch.tensor(root_quat_w, dtype=torch.float32, device=device)
+    joint_pos_t = torch.tensor(joint_pos_seq, dtype=torch.float32, device=device)
+    joint_vel_t = torch.tensor(joint_vel_seq, dtype=torch.float32, device=device)
+
     # Control rates
     dt = env.step_dt if hasattr(env, "step_dt") else raw_env.step_dt
-    print(f"[INFO] Environment built. Replaying {num_steps} steps at {1/dt:.1f}Hz...")
+    print(f"[INFO] Environment built. Replaying {num_steps} steps at {1/dt:.1f}Hz in '{args_cli.mode}' mode...")
 
     # Visual camera follow setup
     camera_look_at = np.array([0.0, 0.0, 0.35])
@@ -114,11 +131,26 @@ def main(env_cfg: Any, agent_cfg: Any):
             if not simulation_app.is_running():
                 break
                 
-            # Extract action at step t
-            action_step = actions_tensor[t : t + 1] # shape (1, 12)
-            
-            # Step environment using recorded expert actions
-            obs, _, _, _ = vec_env.step(action_step)
+            if args_cli.mode == "action":
+                # Step environment using recorded expert actions (open-loop PD control)
+                action_step = actions_tensor[t : t + 1] # shape (1, 12)
+                obs, _, _, _ = vec_env.step(action_step)
+            else:
+                # Kinematic playback (override simulator state to match recorded physical trajectory)
+                root_pose = torch.cat([root_pos_t[t], root_quat_t[t]], dim=-1).unsqueeze(0) # (1, 7)
+                j_pos = joint_pos_t[t].unsqueeze(0) # (1, 12)
+                j_vel = joint_vel_t[t].unsqueeze(0) # (1, 12)
+                
+                # Force state in simulation (specifying the exact joint IDs)
+                raw_env._robot.write_root_pose_to_sim(root_pose, env_ids=torch.tensor([0], device=device))
+                raw_env._robot.write_joint_state_to_sim(
+                    j_pos, j_vel, joint_ids=raw_env._joint_ids, env_ids=torch.tensor([0], device=device)
+                )
+                
+                # Write back buffers and step rendering/simulation frame
+                raw_env.scene.write_data_to_sim()
+                raw_env.sim.step(render=True)
+                raw_env.scene.update(dt=raw_env.physics_dt)
             
             # Update camera to follow the robot
             try:
