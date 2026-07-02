@@ -273,21 +273,21 @@ def main(env_cfg: Any, agent_cfg: Any):
                 traj = trajectory_buffers[i]
                 trajectory_buffers[i] = [] # Reset buffer
                 
-                # Fall is defined as a reset happening before the timeout (capped at 1000 steps)
-                is_fall = len(traj) < 950
+                # Fall is determined dynamically from the environment's terminal reset flag
+                is_fall = raw_env.reset_terminated[i].item()
                 
-                # Survival condition:
-                # - In single mode: discard if it fell.
-                # - In chained mode: discard if it fell within survival_check_steps after a transition.
+                # Survival condition: Discard any episode that ends in a fall (expert quality check)
                 survived = True
                 if is_fall:
-                    if args_cli.mode == "single":
-                        survived = False
-                    elif has_transitioned[i]:
+                    survived = False
+                    if args_cli.mode == "chained" and has_transitioned[i]:
                         steps_since_last_transition = len(traj) - last_transition_step[i]
                         if steps_since_last_transition < args_cli.survival_check_steps:
-                            survived = False
-                            print(f"[FILTER] Discarded env {i} due to fall {steps_since_last_transition} steps after transition.")
+                            print(f"[FILTER] Discarded env {i} due to transition fall ({steps_since_last_transition} steps after transition).")
+                        else:
+                            print(f"[FILTER] Discarded env {i} due to post-transition fall ({steps_since_last_transition} steps after transition).")
+                    else:
+                        print(f"[FILTER] Discarded env {i} due to fall during baseline locomotion.")
                 
                 # Save if survived and has minimum length
                 if survived and len(traj) >= args_cli.min_demo_len and total_steps_saved < args_cli.num_steps:
