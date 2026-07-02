@@ -48,6 +48,8 @@ parser.add_argument("--min_demo_len", type=int, default=100, help="Minimum step 
 parser.add_argument("--min_steps_per_skill", type=int, default=150, help="Minimum steps to run a skill in chained mode before transition.")
 parser.add_argument("--max_steps_per_skill", type=int, default=300, help="Maximum steps to run a skill in chained mode before transition.")
 parser.add_argument("--survival_check_steps", type=int, default=100, help="Steps to survive after a transition for the episode to be kept.")
+parser.add_argument("--transition_blend_steps", type=int, default=8, help="Number of steps over which to blend actions during policy transitions. Set to 0 to disable.")
+parser.add_argument("--transition_blend_type", type=str, choices=["linear", "cosine"], default="cosine", help="Interpolation curve for blending actions.")
 
 # Add standard app launcher CLI arguments
 AppLauncher.add_app_launcher_args(parser)
@@ -184,6 +186,10 @@ def main(env_cfg: Any, agent_cfg: Any):
     last_transition_step = np.zeros(args_cli.num_envs, dtype=int)
     has_transitioned = np.zeros(args_cli.num_envs, dtype=bool)
     
+    # Blending state tracking variables
+    old_policies = list(current_policies) # Track previous active policies for blending
+    transition_steps_left = np.zeros(args_cli.num_envs, dtype=int) # Steps left in transition blending phase
+    
     # Initialize environment commands
     for i in range(args_cli.num_envs):
         resample_env_command(i, current_policies[i], raw_env._commands, device)
@@ -207,15 +213,47 @@ def main(env_cfg: Any, agent_cfg: Any):
                 actions = policies["walk"](obs)
                 obs, _, dones, _ = vec_env.step(actions)
         else:
-            # In chained mode, batch observations and run active policies
-            actions = torch.zeros((args_cli.num_envs, vec_env.num_actions), device=device)
+            # In chained mode, batch observations and run target policies
+            actions_new = torch.zeros((args_cli.num_envs, vec_env.num_actions), device=device)
             policy_obs = obs["policy"] if isinstance(obs, dict) else obs
             
+            # Query active target policies
             for name, policy_fn in policies.items():
                 env_mask = torch.tensor([cp == name for cp in current_policies], dtype=torch.bool, device=device)
                 if env_mask.any():
                     with torch.inference_mode():
-                        actions[env_mask] = policy_fn(policy_obs[env_mask])
+                        actions_new[env_mask] = policy_fn(policy_obs[env_mask])
+            
+            # Handle action blending during transitions
+            if args_cli.transition_blend_steps > 0:
+                actions = actions_new.clone()
+                in_transition = transition_steps_left > 0
+                if in_transition.any():
+                    # Convert to PyTorch tensor on the correct device to allow bitwise operations
+                    in_transition_tensor = torch.tensor(in_transition, dtype=torch.bool, device=device)
+                    
+                    # Query old policies for environments currently in blending transition
+                    actions_old = torch.zeros((args_cli.num_envs, vec_env.num_actions), device=device)
+                    for name, policy_fn in policies.items():
+                        old_mask = in_transition_tensor & torch.tensor([op == name for op in old_policies], dtype=torch.bool, device=device)
+                        if old_mask.any():
+                            with torch.inference_mode():
+                                actions_old[old_mask] = policy_fn(policy_obs[old_mask])
+                    
+                    # Compute blending alpha factor [0.0 to 1.0]
+                    steps_in = args_cli.transition_blend_steps - transition_steps_left[in_transition]
+                    alphas_linear = torch.tensor(steps_in / args_cli.transition_blend_steps, dtype=torch.float32, device=device)
+                    
+                    if args_cli.transition_blend_type == "cosine":
+                        alphas = 0.5 * (1.0 - torch.cos(torch.pi * alphas_linear))
+                    else:
+                        alphas = alphas_linear
+                    
+                    # Blend: actions = (1 - alpha) * actions_old + alpha * actions_new
+                    alphas_expanded = alphas.unsqueeze(-1)
+                    actions[in_transition_tensor] = (1.0 - alphas_expanded) * actions_old[in_transition_tensor] + alphas_expanded * actions_new[in_transition_tensor]
+            else:
+                actions = actions_new
             
             obs, _, dones, _ = vec_env.step(actions)
 
@@ -257,7 +295,11 @@ def main(env_cfg: Any, agent_cfg: Any):
             if args_cli.mode == "chained" and steps_left_in_policy[i] <= 0:
                 old_policy = current_policies[i]
                 new_policy = random.choice([p for p in policy_names if p != old_policy])
+                
+                # Update policies and start blending window
+                old_policies[i] = old_policy
                 current_policies[i] = new_policy
+                transition_steps_left[i] = args_cli.transition_blend_steps
                 
                 # Resettle steps left and resample speed commands
                 steps_left_in_policy[i] = random.randint(args_cli.min_steps_per_skill, args_cli.max_steps_per_skill)
@@ -277,6 +319,15 @@ def main(env_cfg: Any, agent_cfg: Any):
                 print(f"[FILTER] Discarded env {i} due to active fall detection (gravity Z={projected_gravity[i, 2]:.2f}, height={root_pos_w[i, 2]:.2f}m). Resetting...")
                 with torch.inference_mode():
                     raw_env._reset_idx(torch.tensor([i], device=device))
+                # Reset environment tracking states for new episode
+                current_policies[i] = random.choice(policy_names)
+                old_policies[i] = current_policies[i]
+                transition_steps_left[i] = 0
+                steps_left_in_policy[i] = random.randint(args_cli.min_steps_per_skill, args_cli.max_steps_per_skill)
+                steps_since_resample[i] = 0
+                last_transition_step[i] = 0
+                has_transitioned[i] = False
+                resample_env_command(i, current_policies[i], raw_env._commands, device)
                 # Skip normal reset check as it was handled manually
                 continue
 
@@ -329,11 +380,17 @@ def main(env_cfg: Any, agent_cfg: Any):
 
                 # Reset environment tracking states for new episode
                 current_policies[i] = random.choice(policy_names)
+                old_policies[i] = current_policies[i]
+                transition_steps_left[i] = 0
                 steps_left_in_policy[i] = random.randint(args_cli.min_steps_per_skill, args_cli.max_steps_per_skill)
                 steps_since_resample[i] = 0
                 last_transition_step[i] = 0
                 has_transitioned[i] = False
                 resample_env_command(i, current_policies[i], raw_env._commands, device)
+
+        # Decrement transition blend steps at the end of the simulation step
+        if args_cli.mode == "chained" and args_cli.transition_blend_steps > 0:
+            transition_steps_left = np.maximum(0, transition_steps_left - 1)
 
         steps_collected += 1
         if steps_collected % 500 == 0:

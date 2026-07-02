@@ -74,9 +74,6 @@ def main(env_cfg: Any, agent_cfg: Any):
         
         # Load physical states for kinematic replay
         root_pos_w = demo_grp["obs/root_pos_w"][:]
-        # Shift coordinates to start at (0, 0) relative to environment 0
-        root_pos_w[:, 0] -= root_pos_w[0, 0]
-        root_pos_w[:, 1] -= root_pos_w[0, 1]
         
         root_quat_w = demo_grp["obs/root_quat_w"][:]
         joint_pos_seq = demo_grp["obs/joint_pos"][:]
@@ -125,6 +122,8 @@ def main(env_cfg: Any, agent_cfg: Any):
         
         # Reset env to starting pose
         obs = vec_env.reset()
+        # Capture the initial starting position from the reset state
+        start_pos = raw_env._robot.data.root_pos_w[0].clone()
         time.sleep(0.5)
 
         for t in range(num_steps):
@@ -137,7 +136,8 @@ def main(env_cfg: Any, agent_cfg: Any):
                 obs, _, _, _ = vec_env.step(action_step)
             else:
                 # Kinematic playback (override simulator state to match recorded physical trajectory)
-                root_pose = torch.cat([root_pos_t[t], root_quat_t[t]], dim=-1).unsqueeze(0) # (1, 7)
+                curr_root_pos = root_pos_t[t] - root_pos_t[0] + start_pos
+                root_pose = torch.cat([curr_root_pos, root_quat_t[t]], dim=-1).unsqueeze(0) # (1, 7)
                 j_pos = joint_pos_t[t].unsqueeze(0) # (1, 12)
                 j_vel = joint_vel_t[t].unsqueeze(0) # (1, 12)
                 
@@ -147,9 +147,9 @@ def main(env_cfg: Any, agent_cfg: Any):
                     j_pos, j_vel, joint_ids=raw_env._joint_ids, env_ids=torch.tensor([0], device=device)
                 )
                 
-                # Write back buffers and step rendering/simulation frame
+                # Write back buffers and render the visual frame without stepping physics
                 raw_env.scene.write_data_to_sim()
-                raw_env.sim.step(render=True)
+                raw_env.sim.render()
                 raw_env.scene.update(dt=raw_env.physics_dt)
             
             # Update camera to follow the robot
