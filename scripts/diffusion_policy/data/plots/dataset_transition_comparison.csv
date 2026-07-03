@@ -1,0 +1,4 @@
+dataset_label,glob_mean_act,glob_max_act,glob_mean_jerk,trans_mean_act_jump,trans_max_act_jump,trans_mean_jnt_vel_jump,trans_mean_base_tilt,trans_max_base_tilt
+Abrupto,0.7169,6.0764,11404.8,1.8488,6.0764,9.2427,2.61,15.02
+Cosine 8,0.7182,5.1613,11437.0,0.6814,4.0723,4.8640,2.73,11.94
+Linear 8,0.7172,5.8135,11421.3,0.7157,4.2535,5.0981,2.69,14.45

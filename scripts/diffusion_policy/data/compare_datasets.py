@@ -9,6 +9,7 @@ python scripts/diffusion_policy/data/compare_datasets.py --datasets scripts/diff
 
 import argparse
 import h5py
+import csv
 import os
 import numpy as np
 import matplotlib.pyplot as plt
@@ -68,9 +69,8 @@ def extract_metrics(dataset_path, label, window_before=15, window_after=25):
             
             vel = np.diff(joint_pos, axis=0) / dt
             acc = np.diff(vel, axis=0) / dt
-            jerk = np.diff(acc, axis=0) / dt
-            jerk_norm = np.linalg.norm(jerk, axis=1)
-            global_joint_jerks.extend(jerk_norm)
+            jerk = np.linalg.norm(np.diff(acc, axis=0) / dt, axis=1)
+            global_joint_jerks.extend(jerk)
             
             # 2. Extract transition-aligned windows
             cmd_changed = np.any(np.diff(command_speed, axis=0) != 0, axis=1)
@@ -110,6 +110,63 @@ def extract_metrics(dataset_path, label, window_before=15, window_after=25):
     print(f"  - Extracted {len(transition_action_deltas)} transition events.")
     return metrics
 
+def generate_and_save_table(all_metrics, save_dir, window_before):
+    """
+    Generates an objective comparison table based on processed data,
+    prints it as markdown in console, and saves it to a clean CSV file.
+    """
+    headers = [
+        "dataset_label", 
+        "glob_mean_act", "glob_max_act", "glob_mean_jerk",
+        "trans_mean_act_jump", "trans_max_act_jump",
+        "trans_mean_jnt_vel_jump", 
+        "trans_mean_base_tilt", "trans_max_base_tilt"
+    ]
+    
+    rows = []
+    for m in all_metrics:
+        # Global metrics
+        glob_mean_act = np.mean(m["global_action_deltas"])
+        glob_max_act = np.max(m["global_action_deltas"])
+        glob_mean_jerk = np.mean(m["global_joint_jerks"])
+        
+        # Transition metrics (step index is exactly at window_before)
+        trans_act_jumps = m["transition_action_deltas"][:, window_before]
+        trans_vel_jumps = m["transition_joint_vel_deltas"][:, window_before]
+        trans_tilts = m["transition_base_tilts"][:, window_before]
+        
+        row = [
+            m["label"],
+            f"{glob_mean_act:.4f}",
+            f"{glob_max_act:.4f}",
+            f"{glob_mean_jerk:.1f}",
+            f"{np.mean(trans_act_jumps):.4f}",
+            f"{np.max(trans_act_jumps):.4f}",
+            f"{np.mean(trans_vel_jumps):.4f}",
+            f"{np.mean(trans_tilts):.2f}",
+            f"{np.max(trans_tilts):.2f}"
+        ]
+        rows.append(row)
+        
+    # 1. Print as Markdown to stdout
+    print("\n" + "="*50)
+    print("OBJECTIVE DATASET COMPARISON TABLE:")
+    print("="*50)
+    print("| " + " | ".join(headers) + " |")
+    print("| " + " | ".join([":---"] * len(headers)) + " |")
+    for r in rows:
+        print("| " + " | ".join(r) + " |")
+    print("="*50 + "\n")
+    
+    # 2. Save as clean CSV file
+    csv_path = save_dir / "dataset_transition_comparison.csv"
+    with open(csv_path, mode="w", newline="", encoding="utf-8") as file:
+        writer = csv.writer(file)
+        writer.writerow(headers)
+        writer.writerows(rows)
+        
+    print(f"Table successfully saved to:\n   {csv_path}\n")
+
 def plot_comparison(all_metrics, save_path, window_before=15, window_after=25):
     """
     Plots comparative statistics for multiple datasets in a 3x2 grid.
@@ -119,12 +176,9 @@ def plot_comparison(all_metrics, save_path, window_before=15, window_after=25):
     plt.style.use('seaborn-v0_8-whitegrid' if 'seaborn-v0_8-whitegrid' in plt.style.available else 'default')
     fig, axs = plt.subplots(3, 2, figsize=(15, 14))
     
-    # Modern, clean color palette for up to 6 curves
     colors = ["#ff5757", "#1f77b4", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf"]
-    
     steps_x = np.arange(-window_before, window_after)
     
-    # Helper for temporal profiles
     def plot_metric_profile(ax, key, title, ylabel, show_legend=True, scale="linear"):
         for i, m in enumerate(all_metrics):
             if len(m[key]) == 0:
@@ -144,23 +198,18 @@ def plot_comparison(all_metrics, save_path, window_before=15, window_after=25):
             ax.legend(loc="best", framealpha=0.9, fontsize=9)
         ax.grid(True, alpha=0.4)
 
-    # 1. Action jump
     plot_metric_profile(axs[0, 0], "transition_action_deltas", 
                         "Action Jump Magnitude (||a_t - a_{t-1}||) at Transition", "Action Delta [L2 Norm]")
     
-    # 2. Base angular velocity
     plot_metric_profile(axs[0, 1], "transition_base_ang_vels", 
                         "Base Angular Velocity (Roll/Pitch) at Transition", "Velocity [rad/s]")
 
-    # 3. Base tilt
     plot_metric_profile(axs[1, 0], "transition_base_tilts", 
                         "Base Tilt Angle (Stumble Indicator) at Transition", "Tilt Angle [Degrees]")
 
-    # 4. Joint velocity jump
     plot_metric_profile(axs[1, 1], "transition_joint_vel_deltas", 
                         "Joint Velocity Jump (||v_t - v_{t-1}||) at Transition", "Velocity Delta [rad/s]")
 
-    # 5. Global Action Boxplots
     action_data = [m["global_action_deltas"] for m in all_metrics]
     labels = [m["label"] for m in all_metrics]
     
@@ -174,7 +223,6 @@ def plot_comparison(all_metrics, save_path, window_before=15, window_after=25):
     axs[2, 0].set_ylabel("Action Change Magnitude [L2 Norm]", fontsize=9)
     axs[2, 0].grid(True, alpha=0.4)
 
-    # 6. Global Jerk Boxplots (Log Scale)
     jerk_data = [m["global_joint_jerks"] for m in all_metrics]
     bplot2 = axs[2, 1].boxplot(jerk_data, patch_artist=True, tick_labels=labels, showfliers=False)
     for patch, color in zip(bplot2['boxes'], colors[:len(all_metrics)]):
@@ -201,7 +249,9 @@ def main():
     parser.add_argument("--output_path", type=str, default=None, help="Output plot filename.")
     args = parser.parse_args()
     
-    # Resolve labels
+    window_before = 15
+    window_after = 25
+    
     if args.labels is None:
         labels = [Path(p).stem for p in args.datasets]
     else:
@@ -209,7 +259,6 @@ def main():
         if len(labels) < len(args.datasets):
             labels.extend([Path(p).stem for p in args.datasets[len(labels):]])
             
-    # Resolve output path
     if args.output_path:
         save_path = Path(args.output_path)
     else:
@@ -217,10 +266,9 @@ def main():
         
     save_path.parent.mkdir(parents=True, exist_ok=True)
     
-    # Process all datasets
     all_metrics = []
     for path, label in zip(args.datasets, labels):
-        m = extract_metrics(path, label)
+        m = extract_metrics(path, label, window_before, window_after)
         if m is not None:
             all_metrics.append(m)
             
@@ -228,7 +276,8 @@ def main():
         print("[ERROR] No datasets could be successfully processed.")
         return
         
-    plot_comparison(all_metrics, save_path)
+    generate_and_save_table(all_metrics, save_path.parent, window_before)
+    plot_comparison(all_metrics, save_path, window_before, window_after)
 
 if __name__ == "__main__":
     main()
