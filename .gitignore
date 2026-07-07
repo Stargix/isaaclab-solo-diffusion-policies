@@ -3,6 +3,7 @@
 .openclaw/
 .worktrees/
 .env
+**/context/
 
 # C++
 **/cmake-build*/
