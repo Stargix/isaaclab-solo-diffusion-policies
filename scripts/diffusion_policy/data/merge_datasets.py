@@ -62,8 +62,13 @@ def _validate_source_file(path: str) -> None:
             raise KeyError(f"{path}: missing required 'data' group.")
 
         data = f["data"]
-        convention = data.attrs.get("convention", "")
-        if convention and not _decode_attr(convention).startswith(EXPECTED_CONVENTION_PREFIX):
+        convention = data.attrs.get("convention", None)
+        if convention is None:
+            raise ValueError(
+                f"{path}: missing data.attrs['convention']. "
+                "Regenerate with the current collect_data.py before merging."
+            )
+        if not _decode_attr(convention).startswith(EXPECTED_CONVENTION_PREFIX):
             raise ValueError(
                 f"{path}: unsupported convention {convention!r}. "
                 "Regenerate with the current collect_data.py before merging."
@@ -96,12 +101,32 @@ def _validate_source_file(path: str) -> None:
                     raise KeyError(f"{path}/{demo_name}: missing required dataset '{key}'.")
 
             num_samples = obs["joint_pos"].shape[0]
+            expected_dims = {
+                "joint_pos": 12,
+                "joint_vel": 12,
+                "base_ang_vel": 3,
+                "projected_gravity": 3,
+                "last_action": 12,
+                "root_pos_w": 3,
+                "root_quat_w": 4,
+                "command_speed": 3,
+            }
+            for key, dim in expected_dims.items():
+                if obs[key].ndim != 2 or obs[key].shape[1] != dim:
+                    raise ValueError(f"{path}/{demo_name}/obs/{key}: expected shape (T, {dim}), got {obs[key].shape}.")
+                if obs[key].shape[0] != num_samples:
+                    raise ValueError(f"{path}/{demo_name}/obs/{key}: length does not match joint_pos.")
             if demo["actions"].shape[0] != num_samples:
                 raise ValueError(f"{path}/{demo_name}: actions length does not match obs length.")
+            if demo["actions"].ndim != 2 or demo["actions"].shape[1] != 12:
+                raise ValueError(f"{path}/{demo_name}: expected actions shape (T, 12), got {demo['actions'].shape}.")
             if demo["dones"].shape[0] != num_samples:
                 raise ValueError(f"{path}/{demo_name}: dones length does not match obs length.")
             if demo["skill_idx"].shape[0] != num_samples:
                 raise ValueError(f"{path}/{demo_name}: skill_idx length does not match obs length.")
+            skill_idx = demo["skill_idx"][:]
+            if skill_idx.min() < 0 or skill_idx.max() >= len(skill_names):
+                raise ValueError(f"{path}/{demo_name}: skill_idx contains values outside data.attrs['skill_names'].")
 
 
 def _remap_skill_idx(src_demo, src_skill_names: list[str],
