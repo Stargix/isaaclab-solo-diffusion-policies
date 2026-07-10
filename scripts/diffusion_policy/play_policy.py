@@ -38,8 +38,12 @@ parser.add_argument("--num_envs", type=int, default=1, help="Number of environme
 parser.add_argument("--num_inference_steps", type=int, default=15, help="Number of denoising steps during inference (default: 15 for fast RHC). Use 100 for exact DDPM.")
 parser.add_argument("--path_file", type=str, default=None, help="Path to a .npy file containing [N, 3] or [N, 4] coordinates of the 3D path.")
 
-parser.add_argument("--time_budget", type=float, default=3.0, help="Total time budget in seconds to reach the end of the path.")
+parser.add_argument("--time_budget", type=float, default=5.0, help="Total time budget in seconds to reach the end of the path.")
+parser.add_argument("--temporal_blend_alpha", type=float, default=0.6, help="Receding horizon action smoothing weight (1.0 = no blending, 0.6 = smooth overlap).")
+parser.add_argument("--exec_horizon", type=int, default=1, help="Number of action chunk steps to execute before replanning (1 = single-step RHC, 2-4 = multi-step execution).")
 parser.add_argument("--desired_speed", type=float, default=0.4, help="Fallback target speed if time budget is not used.")
+
+
 
 # Add standard app launcher CLI arguments (GUI is enabled by default)
 AppLauncher.add_app_launcher_args(parser)
@@ -278,27 +282,41 @@ def main(env_cfg: Any, agent_cfg: Any):
             obs_buffer[:, t_h] = initial_obs
             goal_buffer[:, t_h] = initial_goal
 
+    prev_actions_chunk = None
+    env_elapsed_time = np.zeros(num_envs, dtype=np.float32)
+    exec_step_idx = 0
+    current_chunk = None
+
     while simulation_app.is_running():
-        elapsed_time = step_count * dt
         with torch.inference_mode():
             # 1. Get current step observation and goal vector
             current_obs = get_proprioception_obs(raw_env, joint_ids, last_action)
-            current_goal = get_current_goal(elapsed_time)
+            current_goal = get_current_goal(float(env_elapsed_time[0]))
             
             # 2. Slide buffers
             obs_buffer = torch.cat([obs_buffer[:, 1:], current_obs.unsqueeze(1)], dim=1)
             goal_buffer = torch.cat([goal_buffer[:, 1:], current_goal.unsqueeze(1)], dim=1)
             
             # 3. Query the Diffusion Policy using Receding Horizon Control (RHC)
-            actions_chunk = policy.predict_action_denormalized(
-                obs_buffer, 
-                goal_buffer, 
-                guidance_scale=args_cli.guidance_scale
-            )
-            action_step = actions_chunk[:, 0] # (num_envs, 12)
+            if exec_step_idx == 0 or current_chunk is None:
+                actions_chunk = policy.predict_action_denormalized(
+                    obs_buffer, 
+                    goal_buffer, 
+                    guidance_scale=args_cli.guidance_scale
+                )
+                if prev_actions_chunk is not None and args_cli.temporal_blend_alpha < 1.0 and actions_chunk.shape[1] > 1:
+                    alpha = args_cli.temporal_blend_alpha
+                    actions_chunk[:, 0] = alpha * actions_chunk[:, 0] + (1.0 - alpha) * prev_actions_chunk[:, 1]
+                current_chunk = actions_chunk
+                prev_actions_chunk = actions_chunk.clone()
+            
+            k = min(exec_step_idx, current_chunk.shape[1] - 1)
+            action_step = current_chunk[:, k]
+            exec_step_idx = (exec_step_idx + 1) % max(1, args_cli.exec_horizon)
             
             # 4. Apply action in simulation
             obs, _, dones, _ = vec_env.step(action_step)
+            env_elapsed_time += dt
             
             # 5. Update last action for the next timestep
             last_action = action_step.clone()
@@ -308,10 +326,16 @@ def main(env_cfg: Any, agent_cfg: Any):
                 if dones[i]:
                     print(f"[INFO] Env {i} reset.")
                     last_action[i] = 0.0
+                    env_elapsed_time[i] = 0.0
+                    exec_step_idx = 0
+                    if prev_actions_chunk is not None:
+                        prev_actions_chunk[i] = current_chunk[i]
                     reset_obs = get_proprioception_obs(raw_env, joint_ids, last_action)
-                    reset_goal = get_current_goal(elapsed_time)
+                    reset_goal = get_current_goal(0.0)
                     obs_buffer[i, :] = reset_obs
                     goal_buffer[i, :] = reset_goal
+
+
 
         # Update camera follow
         try:
@@ -330,9 +354,10 @@ def main(env_cfg: Any, agent_cfg: Any):
             v_req_val = current_goal[0, 10].item()
             mode_str = "CROUCHING" if robot_z < 0.20 else "WALKING"
             dist_rem = float(np.linalg.norm(path_w[-1, :2] - robot_pos[:2]))
-            rem_t = max(args_cli.time_budget - elapsed_time, 0.0)
+            rem_t = max(args_cli.time_budget - float(env_elapsed_time[0]), 0.0)
             
-            print(f"Step {step_count:03d} (t={elapsed_time:.2f}s | rem_t={rem_t:.2f}s) | Mode: {mode_str:^10s} | Z: {robot_z:.3f}m | DistRem: {dist_rem:.2f}m | target_dz: {target_dz:+.3f}m | v_req: {v_req_val:.2f}m/s")
+            print(f"Step {step_count:03d} (t={env_elapsed_time[0]:.2f}s | rem_t={rem_t:.2f}s) | Mode: {mode_str:^10s} | Z: {robot_z:.3f}m | DistRem: {dist_rem:.2f}m | target_dz: {target_dz:+.3f}m | v_req: {v_req_val:.2f}m/s")
+
 
         step_count += 1
         time.sleep(dt)
