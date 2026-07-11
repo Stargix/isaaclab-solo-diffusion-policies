@@ -18,6 +18,7 @@ class DatasetConfig:
     min_segment_steps: int = 100
     max_segment_steps: int = 100
     segment_stride: int = 1
+    step_stride: int = 1
     dt: float = 0.02
     v_req_clip: float = 2.0
     symmetry_mode: str = "quadruped"
@@ -61,6 +62,7 @@ class OptimConfig:
     weight_decay: float = 1.0e-3
     grad_clip_norm: float = 1.0
     ema_decay: float = 0.9999
+    lr_warmup_steps: int = 10_000
     num_workers: int = 0
     seed: int = 42
     mixed_precision: bool = True
@@ -95,6 +97,7 @@ TRAINING_CONFIG_KEYS = frozenset(
         "min_segment_steps",
         "max_segment_steps",
         "segment_stride",
+        "step_stride",
         "v_req_clip",
         "symmetry_mode",
         "val_fraction",
@@ -113,6 +116,7 @@ TRAINING_CONFIG_KEYS = frozenset(
         "weight_decay",
         "grad_clip_norm",
         "ema_decay",
+        "lr_warmup_steps",
         "num_workers",
         "seed",
         "save_every",

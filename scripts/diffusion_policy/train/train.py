@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import sys
 import time
@@ -83,6 +84,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min_segment_steps", type=int, default=DATASET_DEFAULTS.min_segment_steps)
     parser.add_argument("--max_segment_steps", type=int, default=DATASET_DEFAULTS.max_segment_steps)
     parser.add_argument("--segment_stride", type=int, default=DATASET_DEFAULTS.segment_stride)
+    parser.add_argument("--step_stride", type=int, default=DATASET_DEFAULTS.step_stride, help="Temporal stride to sub-sample step windows.")
     parser.add_argument("--v_req_clip", type=float, default=DATASET_DEFAULTS.v_req_clip)
     parser.add_argument("--symmetry_mode", choices=["none", "mirror", "quadruped"], default=DATASET_DEFAULTS.symmetry_mode)
     parser.add_argument("--val_fraction", type=float, default=DATASET_DEFAULTS.val_fraction)
@@ -108,6 +110,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight_decay", type=float, default=OPTIM_DEFAULTS.weight_decay)
     parser.add_argument("--grad_clip_norm", type=float, default=OPTIM_DEFAULTS.grad_clip_norm)
     parser.add_argument("--ema_decay", type=float, default=OPTIM_DEFAULTS.ema_decay)
+    parser.add_argument(
+        "--lr_warmup_steps",
+        type=int,
+        default=OPTIM_DEFAULTS.lr_warmup_steps,
+        help="Linear LR warmup steps before cosine decay (DiffuseLoco default: 10000).",
+    )
     parser.add_argument("--num_workers", type=int, default=OPTIM_DEFAULTS.num_workers)
     parser.add_argument("--seed", type=int, default=OPTIM_DEFAULTS.seed)
     parser.add_argument("--save_every", type=int, default=OPTIM_DEFAULTS.save_every)
@@ -143,6 +151,7 @@ def make_config(args: argparse.Namespace) -> TrainConfig:
             min_segment_steps=args.min_segment_steps,
             max_segment_steps=args.max_segment_steps,
             segment_stride=args.segment_stride,
+            step_stride=args.step_stride,
             v_req_clip=args.v_req_clip,
             symmetry_mode=args.symmetry_mode,
             val_fraction=args.val_fraction,
@@ -168,6 +177,7 @@ def make_config(args: argparse.Namespace) -> TrainConfig:
             weight_decay=args.weight_decay,
             grad_clip_norm=args.grad_clip_norm,
             ema_decay=args.ema_decay,
+            lr_warmup_steps=args.lr_warmup_steps,
             num_workers=args.num_workers,
             seed=args.seed,
             mixed_precision=not args.no_amp,
@@ -193,6 +203,27 @@ def maybe_init_wandb(cfg: TrainConfig):
         config=cfg.to_dict(),
     )
     return wandb
+
+
+def build_lr_scheduler(
+    optimizer: torch.optim.Optimizer,
+    *,
+    warmup_steps: int,
+    total_steps: int,
+) -> torch.optim.lr_scheduler.LambdaLR:
+    """Linear warmup followed by cosine decay (DiffuseLoco-style, step-based)."""
+
+    warmup_steps = max(0, min(int(warmup_steps), max(total_steps - 1, 0)))
+    cosine_steps = max(1, total_steps - warmup_steps)
+
+    def lr_lambda(step: int) -> float:
+        if warmup_steps > 0 and step < warmup_steps:
+            return float(step + 1) / float(warmup_steps)
+        progress = float(step - warmup_steps) / float(cosine_steps)
+        progress = min(max(progress, 0.0), 1.0)
+        return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
 def build_policy(cfg: TrainConfig) -> Solo12DiffusionPolicy:
@@ -289,6 +320,7 @@ def main() -> None:
         min_segment_steps=cfg.dataset.min_segment_steps,
         max_segment_steps=cfg.dataset.max_segment_steps,
         segment_stride=cfg.dataset.segment_stride,
+        step_stride=cfg.dataset.step_stride,
         dt=cfg.dataset.dt,
         v_req_clip=cfg.dataset.v_req_clip,
         symmetry_mode=cfg.dataset.symmetry_mode,
@@ -328,13 +360,20 @@ def main() -> None:
         learning_rate=cfg.optim.learning_rate,
         weight_decay=cfg.optim.weight_decay,
     )
-    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.optim.epochs)
+    steps_per_epoch = len(train_loader)
+    total_steps = steps_per_epoch * cfg.optim.epochs
+    lr_scheduler = build_lr_scheduler(
+        optimizer,
+        warmup_steps=cfg.optim.lr_warmup_steps,
+        total_steps=total_steps,
+    )
     scaler = torch.amp.GradScaler("cuda", enabled=cfg.optim.mixed_precision and device.type == "cuda")
     wandb = maybe_init_wandb(cfg)
 
     print(
         f"[INFO] demos={len(dataset.demos)} samples={len(dataset)} train={train_size} val={val_size} "
-        f"symmetry={cfg.dataset.symmetry_mode} scheduler=diffusers device={device}"
+        f"symmetry={cfg.dataset.symmetry_mode} steps/epoch={steps_per_epoch} total_steps={total_steps} "
+        f"lr_warmup={cfg.optim.lr_warmup_steps} device={device}"
     )
 
     global_step = 0
@@ -353,6 +392,7 @@ def main() -> None:
             torch.nn.utils.clip_grad_norm_(policy.parameters(), cfg.optim.grad_clip_norm)
             scaler.step(optimizer)
             scaler.update()
+            lr_scheduler.step()
             ema.step(policy)
 
             global_step += 1
@@ -403,7 +443,6 @@ def main() -> None:
                         val_loss=val_loss,
                     )
 
-        lr_scheduler.step()
         ema.averaged_model.set_normalizer_stats(normalizer_stats)
         val_loss = evaluate(ema.averaged_model, val_loader, device, max_batches=100)
         train_loss = float(np.mean(train_losses))

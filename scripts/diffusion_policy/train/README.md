@@ -5,7 +5,7 @@ This folder contains the Solo12-specific training pipeline for the Diffusion Pol
 - `dataset.py`: HDF5 loader with **delayed** hindsight relabeling (`proprio_hist`, `action_hist`, `goal_hist`).
 - `symmetry.py`: optional Solo12 data augmentation using existing RL symmetry conventions.
 - `normalization.py`: z-score stats for proprioception/goals and min-max action scaling to `[-1, 1]`.
-- `train.py`: DDPM training loop with `Solo12DiffusionPolicy`, `diffusers.DDPMScheduler`, EMA warmup, cosine LR and optional W&B.
+- `train.py`: DDPM training loop with `Solo12DiffusionPolicy`, `diffusers.DDPMScheduler`, EMA warmup, linear LR warmup (10k steps) + cosine decay, and optional W&B.
 - `../model/solo12_diffusion_policy.py`: policy wrapper with train loss + CFG inference loop.
 - `../model/transformer_for_diffusion.py`: vendored `TransformerForDiffusion` from Diffusion Policy / DiffuseLoco.
 - `../model/ema_model.py`: vendored EMA warmup from Diffusion Policy.

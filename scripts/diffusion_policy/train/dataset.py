@@ -113,6 +113,7 @@ class LocomotionHindsightDataset(Dataset):
         min_segment_steps: int = 100,
         max_segment_steps: int = 100,
         segment_stride: int = 1,
+        step_stride: int = 1,
         dt: float = 0.02,
         waypoint_distances: tuple[float, float, float] = (0.4, 0.8, 1.2),
         v_req_clip: float = 2.0,
@@ -134,6 +135,7 @@ class LocomotionHindsightDataset(Dataset):
         self.min_segment_steps = min_segment_steps
         self.max_segment_steps = max_segment_steps
         self.segment_stride = segment_stride
+        self.step_stride = step_stride
         self.dt = dt
         self.waypoint_distances = waypoint_distances
         self.v_req_clip = v_req_clip
@@ -184,7 +186,7 @@ class LocomotionHindsightDataset(Dataset):
     def _index_demo(self, demo_idx: int, length: int) -> None:
         first_step = self.history + 1
         last_action_start = length - self.action_horizon
-        for step in range(first_step, last_action_start + 1):
+        for step in range(first_step, last_action_start + 1, self.step_stride):
             for segment_steps in range(self.min_segment_steps, self.max_segment_steps + 1, self.segment_stride):
                 end_step = step + segment_steps
                 if end_step < length:
