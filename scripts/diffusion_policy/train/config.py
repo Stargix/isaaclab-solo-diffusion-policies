@@ -7,15 +7,17 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from .obs_utils import ACTION_HIST_DIM, GOAL_DIM, PROPRIO_DIM
+
 
 @dataclass
 class DatasetConfig:
     hdf5_paths: list[str]
     history: int = 8
     action_horizon: int = 4
-    min_segment_steps: int = 50
-    max_segment_steps: int = 150
-    segment_stride: int = 10
+    min_segment_steps: int = 100
+    max_segment_steps: int = 100
+    segment_stride: int = 1
     dt: float = 0.02
     v_req_clip: float = 2.0
     symmetry_mode: str = "quadruped"
@@ -25,19 +27,22 @@ class DatasetConfig:
 
 @dataclass
 class ModelConfig:
-    obs_dim: int = 42
-    goal_dim: int = 11
+    proprio_dim: int = PROPRIO_DIM
+    action_hist_dim: int = ACTION_HIST_DIM
+    goal_dim: int = GOAL_DIM
     action_dim: int = 12
     d_model: int = 256
     nhead: int = 8
     num_layers: int = 6
     dim_feedforward: int = 1024
-    dropout: float = 0.1
+    p_drop_emb: float = 0.0
+    p_drop_attn: float = 0.3
+    separate_goal_conditioning: bool = True
 
 
 @dataclass
 class DiffusionConfig:
-    num_train_timesteps: int = 100
+    num_train_timesteps: int = 10
     num_inference_steps: int | None = None
     beta_start: float = 1.0e-4
     beta_end: float = 2.0e-2
@@ -53,7 +58,7 @@ class OptimConfig:
     batch_size: int = 256
     epochs: int = 200
     learning_rate: float = 1.0e-4
-    weight_decay: float = 1.0e-6
+    weight_decay: float = 1.0e-3
     grad_clip_norm: float = 1.0
     ema_decay: float = 0.9999
     num_workers: int = 0
@@ -83,7 +88,6 @@ DIFFUSION_DEFAULTS = DiffusionConfig()
 OPTIM_DEFAULTS = OptimConfig()
 DATASET_DEFAULTS = DatasetConfig(hdf5_paths=[])
 
-# Keys accepted by ``--config`` JSON files (flat dict, same names as CLI flags).
 TRAINING_CONFIG_KEYS = frozenset(
     {
         "history",
@@ -97,7 +101,8 @@ TRAINING_CONFIG_KEYS = frozenset(
         "d_model",
         "nhead",
         "num_layers",
-        "dropout",
+        "p_drop_emb",
+        "p_drop_attn",
         "diffusion_steps",
         "num_inference_steps",
         "beta_schedule",
@@ -146,4 +151,3 @@ def resolve_inference_steps(cli_override: int | None, diffusion: DiffusionConfig
     if infer_steps is not None:
         return int(infer_steps)
     return train_steps
-

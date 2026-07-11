@@ -1,10 +1,4 @@
-"""Solo12 symmetry augmentation for diffusion-policy training samples.
-
-The joint permutations and signs mirror the existing RL augmentation in
-``source/scripts/skrl/solo12_symmetry.py``. The default recommended augmentation
-is left-right mirroring; front-back symmetry is available for ablations because it
-changes forward tasks into backward tasks and may not help every dataset mix.
-"""
+"""Solo12 symmetry augmentation for diffusion-policy training samples."""
 
 from __future__ import annotations
 
@@ -52,24 +46,22 @@ def _transform_joint_data(data: torch.Tensor, perm: torch.Tensor, sign: torch.Te
     return data[..., perm] * sign
 
 
-def _reflect_obs_x(obs_hist: torch.Tensor) -> torch.Tensor:
-    obs = obs_hist.clone()
-    obs[..., 0:12] = _transform_joint_data(obs[..., 0:12], LEFT_RIGHT_PERM, LEFT_RIGHT_SIGN)
-    obs[..., 12:24] = _transform_joint_data(obs[..., 12:24], LEFT_RIGHT_PERM, LEFT_RIGHT_SIGN)
-    obs[..., 24:27] *= _device_tensor(PSEUDOVECTOR_REFLECT_X, obs)
-    obs[..., 27:30] *= _device_tensor(VECTOR_REFLECT_X, obs)
-    obs[..., 30:42] = _transform_joint_data(obs[..., 30:42], LEFT_RIGHT_PERM, LEFT_RIGHT_SIGN)
-    return obs
+def _reflect_proprio_x(proprio_hist: torch.Tensor) -> torch.Tensor:
+    proprio = proprio_hist.clone()
+    proprio[..., 0:12] = _transform_joint_data(proprio[..., 0:12], LEFT_RIGHT_PERM, LEFT_RIGHT_SIGN)
+    proprio[..., 12:24] = _transform_joint_data(proprio[..., 12:24], LEFT_RIGHT_PERM, LEFT_RIGHT_SIGN)
+    proprio[..., 24:27] *= _device_tensor(PSEUDOVECTOR_REFLECT_X, proprio)
+    proprio[..., 27:30] *= _device_tensor(VECTOR_REFLECT_X, proprio)
+    return proprio
 
 
-def _reflect_obs_y(obs_hist: torch.Tensor) -> torch.Tensor:
-    obs = obs_hist.clone()
-    obs[..., 0:12] = _transform_joint_data(obs[..., 0:12], FRONT_BACK_PERM, FRONT_BACK_SIGN)
-    obs[..., 12:24] = _transform_joint_data(obs[..., 12:24], FRONT_BACK_PERM, FRONT_BACK_SIGN)
-    obs[..., 24:27] *= _device_tensor(PSEUDOVECTOR_REFLECT_Y, obs)
-    obs[..., 27:30] *= _device_tensor(VECTOR_REFLECT_Y, obs)
-    obs[..., 30:42] = _transform_joint_data(obs[..., 30:42], FRONT_BACK_PERM, FRONT_BACK_SIGN)
-    return obs
+def _reflect_proprio_y(proprio_hist: torch.Tensor) -> torch.Tensor:
+    proprio = proprio_hist.clone()
+    proprio[..., 0:12] = _transform_joint_data(proprio[..., 0:12], FRONT_BACK_PERM, FRONT_BACK_SIGN)
+    proprio[..., 12:24] = _transform_joint_data(proprio[..., 12:24], FRONT_BACK_PERM, FRONT_BACK_SIGN)
+    proprio[..., 24:27] *= _device_tensor(PSEUDOVECTOR_REFLECT_Y, proprio)
+    proprio[..., 27:30] *= _device_tensor(VECTOR_REFLECT_Y, proprio)
+    return proprio
 
 
 def _reflect_goal_x(goal_hist: torch.Tensor) -> torch.Tensor:
@@ -96,33 +88,37 @@ def _reflect_goal_y(goal_hist: torch.Tensor) -> torch.Tensor:
     return goal
 
 
-def _reflect_actions_x(actions: torch.Tensor) -> torch.Tensor:
-    return _transform_joint_data(actions, LEFT_RIGHT_PERM, LEFT_RIGHT_SIGN)
-
-
-def _reflect_actions_y(actions: torch.Tensor) -> torch.Tensor:
-    return _transform_joint_data(actions, FRONT_BACK_PERM, FRONT_BACK_SIGN)
-
-
 def apply_symmetry(
-    obs_hist: torch.Tensor,
+    proprio_hist: torch.Tensor,
+    action_hist: torch.Tensor,
     goal_hist: torch.Tensor,
     actions: torch.Tensor,
     *,
     index: int,
     mode: str,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Apply one symmetry transform to unnormalized tensors."""
 
     name = symmetry_name(index, mode)
     if name == "identity":
-        return obs_hist, goal_hist, actions
+        return proprio_hist, action_hist, goal_hist, actions
     if name == "reflect_x":
-        return _reflect_obs_x(obs_hist), _reflect_goal_x(goal_hist), _reflect_actions_x(actions)
+        return (
+            _reflect_proprio_x(proprio_hist),
+            _transform_joint_data(action_hist, LEFT_RIGHT_PERM, LEFT_RIGHT_SIGN),
+            _reflect_goal_x(goal_hist),
+            _transform_joint_data(actions, LEFT_RIGHT_PERM, LEFT_RIGHT_SIGN),
+        )
     if name == "reflect_y":
-        return _reflect_obs_y(obs_hist), _reflect_goal_y(goal_hist), _reflect_actions_y(actions)
+        return (
+            _reflect_proprio_y(proprio_hist),
+            _transform_joint_data(action_hist, FRONT_BACK_PERM, FRONT_BACK_SIGN),
+            _reflect_goal_y(goal_hist),
+            _transform_joint_data(actions, FRONT_BACK_PERM, FRONT_BACK_SIGN),
+        )
     if name == "rotate_180":
-        obs_x, goal_x, actions_x = apply_symmetry(obs_hist, goal_hist, actions, index=1, mode="quadruped")
-        return apply_symmetry(obs_x, goal_x, actions_x, index=2, mode="quadruped")
+        proprio_x, action_x, goal_x, actions_x = apply_symmetry(
+            proprio_hist, action_hist, goal_hist, actions, index=1, mode="quadruped"
+        )
+        return apply_symmetry(proprio_x, action_x, goal_x, actions_x, index=2, mode="quadruped")
     raise ValueError(f"Unsupported symmetry transform: {name}")
-

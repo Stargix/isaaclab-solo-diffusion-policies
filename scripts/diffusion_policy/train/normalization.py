@@ -23,24 +23,33 @@ class MinMaxStats:
 
 @dataclass
 class NormalizerStats:
-    obs: ZScoreStats
+    proprio: ZScoreStats
     goal: ZScoreStats
     action: MinMaxStats
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "obs_mean": self.obs.mean,
-            "obs_std": self.obs.std,
+            "proprio_mean": self.proprio.mean,
+            "proprio_std": self.proprio.std,
             "goal_mean": self.goal.mean,
             "goal_std": self.goal.std,
             "action_min": self.action.min,
             "action_max": self.action.max,
+            # Backward compatibility for older checkpoints.
+            "obs_mean": self.proprio.mean,
+            "obs_std": self.proprio.std,
         }
 
     @classmethod
     def from_dict(cls, values: dict[str, Any]) -> "NormalizerStats":
+        if "proprio_mean" in values:
+            proprio_mean = values["proprio_mean"]
+            proprio_std = values["proprio_std"]
+        else:
+            proprio_mean = values["obs_mean"]
+            proprio_std = values["obs_std"]
         return cls(
-            obs=ZScoreStats(np.asarray(values["obs_mean"]), np.asarray(values["obs_std"])),
+            proprio=ZScoreStats(np.asarray(proprio_mean), np.asarray(proprio_std)),
             goal=ZScoreStats(np.asarray(values["goal_mean"]), np.asarray(values["goal_std"])),
             action=MinMaxStats(np.asarray(values["action_min"]), np.asarray(values["action_max"])),
         )
@@ -80,13 +89,14 @@ def denormalize_minmax(values: torch.Tensor, stats: MinMaxStats) -> torch.Tensor
     return 0.5 * (values + 1.0) * (max_values - min_values) + min_values
 
 
-def build_stats(obs_values: np.ndarray, goal_values: np.ndarray, action_values: np.ndarray) -> NormalizerStats:
-    """Create normalizer stats from flattened observations, goals and actions."""
-
+def build_stats(
+    proprio_values: np.ndarray,
+    goal_values: np.ndarray,
+    action_values: np.ndarray,
+) -> NormalizerStats:
     action_min, action_max = _safe_range(action_values.min(axis=0), action_values.max(axis=0))
     return NormalizerStats(
-        obs=ZScoreStats(obs_values.mean(axis=0).astype(np.float32), _safe_std(obs_values.std(axis=0))),
+        proprio=ZScoreStats(proprio_values.mean(axis=0).astype(np.float32), _safe_std(proprio_values.std(axis=0))),
         goal=ZScoreStats(goal_values.mean(axis=0).astype(np.float32), _safe_std(goal_values.std(axis=0))),
         action=MinMaxStats(action_min, action_max),
     )
-

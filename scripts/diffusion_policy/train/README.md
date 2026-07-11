@@ -2,7 +2,7 @@
 
 This folder contains the Solo12-specific training pipeline for the Diffusion Policy:
 
-- `dataset.py`: HDF5 loader with current-inclusive hindsight relabeling.
+- `dataset.py`: HDF5 loader with **delayed** hindsight relabeling (`proprio_hist`, `action_hist`, `goal_hist`).
 - `symmetry.py`: optional Solo12 data augmentation using existing RL symmetry conventions.
 - `normalization.py`: z-score stats for proprioception/goals and min-max action scaling to `[-1, 1]`.
 - `train.py`: DDPM training loop with `Solo12DiffusionPolicy`, `diffusers.DDPMScheduler`, EMA warmup, cosine LR and optional W&B.
@@ -112,13 +112,15 @@ python scripts/diffusion_policy/train/train.py \
     --epochs 200
 ```
 
-Evaluate a trained checkpoint:
+Evaluate a trained checkpoint (use `exec_horizon 4` + `num_inference_steps 4` on this GPU — see latency table in `context/diffuseloco_audit_and_fixes_2026-07-11.md`):
 
 ```bash
 python scripts/diffusion_policy/play_policy.py \
     --task solo12-v0 \
     --checkpoint scripts/diffusion_policy/runs/compact_k10/best.pt \
+    --num_inference_steps 4 \
     --exec_horizon 4 \
+    --guidance_scale 1.0 \
     --no_real_time_viewer
 ```
 

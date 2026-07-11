@@ -72,9 +72,13 @@ def extract_metrics(dataset_path, label, window_before=15, window_after=25):
             jerk = np.linalg.norm(np.diff(acc, axis=0) / dt, axis=1)
             global_joint_jerks.extend(jerk)
             
-            # 2. Extract transition-aligned windows
+            # 2. Extract transition-aligned windows (skill changes first, command changes fallback)
+            skill_changed = np.zeros(num_steps, dtype=bool)
+            if "skill_idx" in demo_grp:
+                skill_idx = demo_grp["skill_idx"][:]
+                skill_changed[1:] = skill_idx[1:] != skill_idx[:-1]
             cmd_changed = np.any(np.diff(command_speed, axis=0) != 0, axis=1)
-            transition_indices = np.where(cmd_changed)[0] + 1
+            transition_indices = np.where(skill_changed | cmd_changed)[0]
             
             demo_action_diffs = np.zeros(num_steps)
             demo_action_diffs[1:] = act_diffs

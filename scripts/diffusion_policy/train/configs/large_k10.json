@@ -4,5 +4,6 @@
   "num_layers": 6,
   "diffusion_steps": 10,
   "num_inference_steps": 10,
+  "p_drop_attn": 0.3,
   "weight_decay": 0.001
 }

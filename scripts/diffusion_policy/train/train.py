@@ -90,7 +90,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--d_model", type=int, default=MODEL_DEFAULTS.d_model)
     parser.add_argument("--nhead", type=int, default=MODEL_DEFAULTS.nhead)
     parser.add_argument("--num_layers", type=int, default=MODEL_DEFAULTS.num_layers)
-    parser.add_argument("--dropout", type=float, default=MODEL_DEFAULTS.dropout)
+    parser.add_argument("--p_drop_emb", type=float, default=MODEL_DEFAULTS.p_drop_emb)
+    parser.add_argument("--p_drop_attn", type=float, default=MODEL_DEFAULTS.p_drop_attn)
 
     parser.add_argument("--diffusion_steps", type=int, default=DIFFUSION_DEFAULTS.num_train_timesteps)
     parser.add_argument(
@@ -151,7 +152,8 @@ def make_config(args: argparse.Namespace) -> TrainConfig:
             nhead=args.nhead,
             num_layers=args.num_layers,
             dim_feedforward=4 * args.d_model,
-            dropout=args.dropout,
+            p_drop_emb=args.p_drop_emb,
+            p_drop_attn=args.p_drop_attn,
         ),
         diffusion=DiffusionConfig(
             num_train_timesteps=args.diffusion_steps,
@@ -195,12 +197,17 @@ def maybe_init_wandb(cfg: TrainConfig):
 
 def build_policy(cfg: TrainConfig) -> Solo12DiffusionPolicy:
     policy_cfg = Solo12DiffusionPolicyConfig(
+        proprio_dim=cfg.model.proprio_dim,
+        action_hist_dim=cfg.model.action_hist_dim,
+        goal_dim=cfg.model.goal_dim,
         history=cfg.dataset.history,
         action_horizon=cfg.dataset.action_horizon,
         d_model=cfg.model.d_model,
         nhead=cfg.model.nhead,
         num_layers=cfg.model.num_layers,
-        dropout=cfg.model.dropout,
+        p_drop_emb=cfg.model.p_drop_emb,
+        p_drop_attn=cfg.model.p_drop_attn,
+        separate_goal_conditioning=cfg.model.separate_goal_conditioning,
         num_train_timesteps=cfg.diffusion.num_train_timesteps,
         beta_start=cfg.diffusion.beta_start,
         beta_end=cfg.diffusion.beta_end,
