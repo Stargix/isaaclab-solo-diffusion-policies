@@ -1,0 +1,8 @@
+{
+  "d_model": 128,
+  "nhead": 4,
+  "num_layers": 4,
+  "diffusion_steps": 10,
+  "num_inference_steps": 10,
+  "weight_decay": 0.001
+}

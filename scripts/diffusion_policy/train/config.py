@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
 
 
 @dataclass
@@ -35,6 +38,7 @@ class ModelConfig:
 @dataclass
 class DiffusionConfig:
     num_train_timesteps: int = 100
+    num_inference_steps: int | None = None
     beta_start: float = 1.0e-4
     beta_end: float = 2.0e-2
     beta_schedule: str = "squaredcos_cap_v2"
@@ -72,4 +76,74 @@ class TrainConfig:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+MODEL_DEFAULTS = ModelConfig()
+DIFFUSION_DEFAULTS = DiffusionConfig()
+OPTIM_DEFAULTS = OptimConfig()
+DATASET_DEFAULTS = DatasetConfig(hdf5_paths=[])
+
+# Keys accepted by ``--config`` JSON files (flat dict, same names as CLI flags).
+TRAINING_CONFIG_KEYS = frozenset(
+    {
+        "history",
+        "action_horizon",
+        "min_segment_steps",
+        "max_segment_steps",
+        "segment_stride",
+        "v_req_clip",
+        "symmetry_mode",
+        "val_fraction",
+        "d_model",
+        "nhead",
+        "num_layers",
+        "dropout",
+        "diffusion_steps",
+        "num_inference_steps",
+        "beta_schedule",
+        "cfg_dropout_prob",
+        "batch_size",
+        "epochs",
+        "lr",
+        "weight_decay",
+        "grad_clip_norm",
+        "ema_decay",
+        "num_workers",
+        "seed",
+        "save_every",
+        "log_every",
+    }
+)
+
+
+def load_training_config_overrides(path: str | Path) -> dict[str, Any]:
+    """Load optional training hyperparameter overrides from a JSON file."""
+
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"Training config must be a JSON object: {path}")
+
+    unknown = sorted(set(data) - TRAINING_CONFIG_KEYS)
+    if unknown:
+        raise ValueError(f"Unknown keys in {path}: {unknown}")
+
+    return data
+
+
+def resolve_inference_steps(cli_override: int | None, diffusion: DiffusionConfig | dict[str, Any]) -> int:
+    """Resolve denoising steps for deployment: CLI > checkpoint > train timesteps."""
+
+    if cli_override is not None:
+        return cli_override
+
+    if isinstance(diffusion, dict):
+        infer_steps = diffusion.get("num_inference_steps")
+        train_steps = int(diffusion["num_train_timesteps"])
+    else:
+        infer_steps = diffusion.num_inference_steps
+        train_steps = diffusion.num_train_timesteps
+
+    if infer_steps is not None:
+        return int(infer_steps)
+    return train_steps
 

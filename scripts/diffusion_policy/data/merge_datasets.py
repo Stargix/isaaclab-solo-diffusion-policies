@@ -142,7 +142,13 @@ def _remap_skill_idx(src_demo, src_skill_names: list[str],
     return remap[src_idx]
 
 
-def merge_hdf5_files(input_files: list[str], output_file: str) -> None:
+def merge_hdf5_files(
+    input_files: list[str],
+    output_file: str,
+    *,
+    shuffle_demos: bool = True,
+    shuffle_seed: int = 42,
+) -> None:
     out_path = Path(output_file)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -161,6 +167,18 @@ def merge_hdf5_files(input_files: list[str], output_file: str) -> None:
     name_to_unified = {n: i for i, n in enumerate(unified_skill_names)}
     print(f"[INFO] Unified skill_names: {unified_skill_names}")
 
+    demo_entries: list[tuple[str, str, list[str]]] = []
+    for path, src_skills in zip(input_files, per_source_skills):
+        with h5py.File(path, "r") as in_f:
+            in_data = in_f["data"]
+            for demo_name in sorted(in_data.keys(), key=_demo_sort_key):
+                demo_entries.append((path, demo_name, src_skills))
+
+    if shuffle_demos and len(demo_entries) > 1:
+        order = np.random.default_rng(shuffle_seed).permutation(len(demo_entries))
+        demo_entries = [demo_entries[int(i)] for i in order]
+        print(f"[INFO] Shuffled {len(demo_entries)} demos before writing (seed={shuffle_seed}).")
+
     # Pass 2: copy demos, remapping skill_idx and writing unified metadata.
     demo_counter = 0
     with h5py.File(out_path, "w") as out_f:
@@ -175,37 +193,44 @@ def merge_hdf5_files(input_files: list[str], output_file: str) -> None:
         out_data.attrs["merged_from"] = np.array(
             [str(Path(p).name) for p in input_files], dtype="S64",
         )
+        if shuffle_demos:
+            out_data.attrs["demo_order"] = "shuffled"
+            out_data.attrs["shuffle_seed"] = shuffle_seed
+        else:
+            out_data.attrs["demo_order"] = "sequential"
 
-        for path, src_skills in zip(input_files, per_source_skills):
-            print(f"[INFO] Processing {path} (skills={src_skills})...")
-            with h5py.File(path, "r") as in_f:
+        open_files: dict[str, h5py.File] = {}
+        try:
+            for path, demo_name, src_skills in demo_entries:
+                if path not in open_files:
+                    open_files[path] = h5py.File(path, "r")
+                in_f = open_files[path]
                 in_data = in_f["data"]
-                for demo_name in sorted(in_data.keys(), key=_demo_sort_key):
-                    new_name = f"demo_{demo_counter}"
-                    new_grp = out_data.create_group(new_name)
+                new_name = f"demo_{demo_counter}"
+                new_grp = out_data.create_group(new_name)
 
-                    # Copy obs group + actions + dones verbatim.
-                    in_f.copy(f"data/{demo_name}/obs", new_grp, name="obs")
-                    in_f.copy(f"data/{demo_name}/actions", new_grp, name="actions")
-                    in_f.copy(f"data/{demo_name}/dones", new_grp, name="dones")
+                in_f.copy(f"data/{demo_name}/obs", new_grp, name="obs")
+                in_f.copy(f"data/{demo_name}/actions", new_grp, name="actions")
+                in_f.copy(f"data/{demo_name}/dones", new_grp, name="dones")
 
-                    # Remap skill_idx to the unified table.
-                    remapped = _remap_skill_idx(
-                        in_data[demo_name], src_skills, name_to_unified,
+                remapped = _remap_skill_idx(
+                    in_data[demo_name], src_skills, name_to_unified,
+                )
+                if remapped is not None:
+                    new_grp.create_dataset(
+                        "skill_idx", data=remapped.astype(np.int8),
                     )
-                    if remapped is not None:
-                        new_grp.create_dataset(
-                            "skill_idx", data=remapped.astype(np.int8),
-                        )
 
-                    # Carry over per-demo attrs and refresh num_samples.
-                    for attr_name in ("num_samples", "skills_sequence"):
-                        if attr_name in in_data[demo_name].attrs:
-                            new_grp.attrs[attr_name] = in_data[demo_name].attrs[attr_name]
-                    if "obs" in new_grp:
-                        new_grp.attrs["num_samples"] = new_grp["obs"]["joint_pos"].shape[0]
+                for attr_name in ("num_samples", "skills_sequence"):
+                    if attr_name in in_data[demo_name].attrs:
+                        new_grp.attrs[attr_name] = in_data[demo_name].attrs[attr_name]
+                if "obs" in new_grp:
+                    new_grp.attrs["num_samples"] = new_grp["obs"]["joint_pos"].shape[0]
 
-                    demo_counter += 1
+                demo_counter += 1
+        finally:
+            for handle in open_files.values():
+                handle.close()
 
     print(f"[SUCCESS] Merged {len(input_files)} file(s) into {out_path}. "
           f"Total demos: {demo_counter}. Skills: {unified_skill_names}")
@@ -224,13 +249,29 @@ def main() -> None:
     parser.add_argument("--inputs", nargs="+", required=True,
                         help="Paths to source HDF5 files.")
     parser.add_argument("--output", required=True, help="Path to the merged HDF5 file.")
+    parser.add_argument(
+        "--no_shuffle_demos",
+        action="store_true",
+        help="Keep source-file order instead of shuffling demos before writing.",
+    )
+    parser.add_argument(
+        "--shuffle_seed",
+        type=int,
+        default=42,
+        help="Seed used when shuffling demos during merge.",
+    )
     args = parser.parse_args()
 
     for p in args.inputs:
         if not os.path.exists(p):
             raise FileNotFoundError(f"Input dataset not found: {p}")
 
-    merge_hdf5_files(args.inputs, args.output)
+    merge_hdf5_files(
+        args.inputs,
+        args.output,
+        shuffle_demos=not args.no_shuffle_demos,
+        shuffle_seed=args.shuffle_seed,
+    )
 
 
 if __name__ == "__main__":

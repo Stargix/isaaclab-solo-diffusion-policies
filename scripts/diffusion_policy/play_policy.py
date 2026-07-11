@@ -16,6 +16,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -33,7 +34,7 @@ parser.add_argument("--task", type=str, default="solo12-v0")
 parser.add_argument("--checkpoint", type=str, required=True)
 parser.add_argument("--guidance_scale", type=float, default=1.0, help="CFG scale (1.0 = faster, no double forward).")
 parser.add_argument("--num_envs", type=int, default=1)
-parser.add_argument("--num_inference_steps", type=int, default=4, help="Denoising steps (4 recommended for ~50Hz budget).")
+parser.add_argument("--num_inference_steps", type=int, default=None, help="Denoising steps; default from checkpoint.")
 parser.add_argument("--path_file", type=str, default=None, help="Optional .npy path [N,3] or [N,4].")
 parser.add_argument("--goal_horizon_steps", type=int, default=100, help="Lookahead horizon in sim steps (matches training).")
 parser.add_argument("--v_req_clip", type=float, default=2.0)
@@ -59,9 +60,80 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
 from train.checkpoint_utils import load_training_checkpoint
-from train.geometry import cumulative_xy_lengths
+from train.config import resolve_inference_steps
+from train.geometry import cumulative_xy_lengths, quat_wxyz_to_rotmat, yaw_from_rotmat
 from train.goal_builder import build_goal_batch_from_path
 from train.normalization import NormalizerStats
+
+
+@dataclass
+class PathPlan:
+    path_w: np.ndarray
+    yaws_w: np.ndarray
+    cumulative_lengths: np.ndarray
+    is_custom: bool
+
+    def rebuild_from_robot(self, pos_w: np.ndarray, quat_w: np.ndarray, env_idx: int = 0) -> None:
+        if self.is_custom:
+            return
+        self.path_w, self.yaws_w = build_default_path(pos_w[env_idx], quat_w[env_idx])
+        self.cumulative_lengths = cumulative_xy_lengths(self.path_w)
+
+
+def robot_yaw_w(quat_wxyz: np.ndarray) -> float:
+    return yaw_from_rotmat(quat_wxyz_to_rotmat(quat_wxyz))
+
+
+def build_default_path(
+    start_pos_w: np.ndarray,
+    start_quat_w: np.ndarray,
+    *,
+    length_m: float = 3.0,
+    num_points: int = 60,
+    crouch_start_m: float = 1.5,
+    walk_z: float = 0.24,
+    crouch_z: float = 0.16,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build a straight path in the robot's forward (yaw) direction."""
+
+    yaw = robot_yaw_w(start_quat_w)
+    cos_y = float(np.cos(yaw))
+    sin_y = float(np.sin(yaw))
+    path_points: list[list[float]] = []
+    yaws: list[float] = []
+    for s in np.linspace(0.0, length_m, num_points):
+        x = float(start_pos_w[0] + cos_y * s)
+        y = float(start_pos_w[1] + sin_y * s)
+        z = walk_z if s < crouch_start_m else crouch_z
+        path_points.append([x, y, z])
+        yaws.append(yaw)
+    return np.array(path_points, dtype=np.float32), np.array(yaws, dtype=np.float32)
+
+
+def load_or_build_path(
+    start_pos: np.ndarray,
+    start_quat: np.ndarray,
+    path_file: str | None,
+) -> PathPlan:
+    if path_file is not None and os.path.exists(path_file):
+        print(f"[INFO] Loading path: {path_file}")
+        path_array = np.load(path_file)
+        if path_array.shape[1] == 3:
+            yaws = [0.0]
+            for idx in range(1, len(path_array)):
+                yaws.append(
+                    np.arctan2(path_array[idx, 1] - path_array[idx - 1, 1], path_array[idx, 0] - path_array[idx - 1, 0])
+                )
+            yaws_w = np.array(yaws, dtype=np.float32)
+            path_w = path_array.astype(np.float32)
+        else:
+            path_w = path_array[:, :3].astype(np.float32)
+            yaws_w = path_array[:, 3].astype(np.float32)
+        return PathPlan(path_w, yaws_w, cumulative_xy_lengths(path_w), is_custom=True)
+
+    print("[INFO] Generating default 3 m walk->crouch path aligned to robot yaw.")
+    path_w, yaws_w = build_default_path(start_pos[0], start_quat[0])
+    return PathPlan(path_w, yaws_w, cumulative_xy_lengths(path_w), is_custom=False)
 
 
 def get_proprioception_obs(raw_env: Any, joint_ids: slice, last_action: torch.Tensor) -> torch.Tensor:
@@ -82,35 +154,6 @@ def goal_zscore(goal: torch.Tensor, stats: NormalizerStats) -> torch.Tensor:
     mean = torch.as_tensor(stats.goal.mean, device=goal.device, dtype=goal.dtype)
     std = torch.as_tensor(stats.goal.std, device=goal.device, dtype=goal.dtype)
     return (goal - mean) / std
-
-
-def load_or_build_path(start_pos: np.ndarray, path_file: str | None) -> tuple[np.ndarray, np.ndarray]:
-    if path_file is not None and os.path.exists(path_file):
-        print(f"[INFO] Loading path: {path_file}")
-        path_array = np.load(path_file)
-        if path_array.shape[1] == 3:
-            yaws = [0.0]
-            for idx in range(1, len(path_array)):
-                yaws.append(
-                    np.arctan2(path_array[idx, 1] - path_array[idx - 1, 1], path_array[idx, 0] - path_array[idx - 1, 0])
-                )
-            yaws_w = np.array(yaws, dtype=np.float32)
-            path_w = path_array.astype(np.float32)
-        else:
-            path_w = path_array[:, :3].astype(np.float32)
-            yaws_w = path_array[:, 3].astype(np.float32)
-        return path_w, yaws_w
-
-    print("[INFO] Generating default 3 m walk->crouch path.")
-    path_points = []
-    for dx in np.linspace(0, 3.0, 60):
-        x = start_pos[0, 0] + dx
-        y = start_pos[0, 1]
-        z = 0.24 if dx < 1.5 else 0.16
-        path_points.append([x, y, z])
-    path_w = np.array(path_points, dtype=np.float32)
-    yaws_w = np.zeros(len(path_w), dtype=np.float32)
-    return path_w, yaws_w
 
 
 def compute_goals(
@@ -200,6 +243,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     checkpoint = load_training_checkpoint(checkpoint_path, device)
     config_dict = checkpoint["config"]
     normalizer_stats = NormalizerStats.from_dict(checkpoint["normalizer_stats"])
+    infer_steps = resolve_inference_steps(args_cli.num_inference_steps, config_dict["diffusion"])
 
     policy_cfg = Solo12DiffusionPolicyConfig(
         history=config_dict["dataset"]["history"],
@@ -216,7 +260,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         variance_type=config_dict["diffusion"]["variance_type"],
         clip_sample=config_dict["diffusion"]["clip_sample"],
         cfg_dropout_prob=config_dict["diffusion"]["cfg_dropout_prob"],
-        num_inference_steps=args_cli.num_inference_steps,
+        num_inference_steps=infer_steps,
     )
 
     policy = Solo12DiffusionPolicy(policy_cfg)
@@ -255,7 +299,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     dt = env.step_dt if hasattr(env, "step_dt") else raw_env.step_dt
 
     print(
-        f"[INFO] Control @ {1 / dt:.0f} Hz | infer_steps={args_cli.num_inference_steps} "
+        f"[INFO] Control @ {1 / dt:.0f} Hz | infer_steps={infer_steps} "
         f"| goal_horizon={args_cli.goal_horizon_steps} | exec_horizon={args_cli.exec_horizon} "
         f"| guidance={args_cli.guidance_scale}"
     )
@@ -266,10 +310,10 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
     vec_env.reset()
     start_pos = raw_env._robot.data.root_pos_w.cpu().numpy()
+    start_quat = raw_env._robot.data.root_quat_w.cpu().numpy()
     time.sleep(0.5)
 
-    path_w, yaws_w = load_or_build_path(start_pos, args_cli.path_file)
-    cumulative_lengths = cumulative_xy_lengths(path_w)
+    path_plan = load_or_build_path(start_pos, start_quat, args_cli.path_file)
     path_progress = np.zeros(num_envs, dtype=np.int32)
 
     run_warmup(
@@ -279,9 +323,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         obs_buffer,
         goal_buffer,
         last_action,
-        path_w,
-        yaws_w,
-        cumulative_lengths,
+        path_plan.path_w,
+        path_plan.yaws_w,
+        path_plan.cumulative_lengths,
         path_progress,
         warmup_steps=max(args_cli.warmup_steps, history_len),
         goal_horizon_steps=args_cli.goal_horizon_steps,
@@ -315,25 +359,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     current_chunk = None
     step_count = 0
     infer_ms = 0.0
+    current_goal = goal_buffer[:, -1].clone()
 
     while simulation_app.is_running():
         with torch.inference_mode():
-            current_obs = get_proprioception_obs(raw_env, joint_ids, last_action)
-            current_goal = compute_goals(
-                raw_env,
-                path_w,
-                yaws_w,
-                cumulative_lengths,
-                path_progress,
-                goal_horizon_steps=args_cli.goal_horizon_steps,
-                dt=dt,
-                speed=args_cli.desired_speed,
-                v_req_clip=v_req_clip,
-                device=device,
-            )
-            slide_buffer(obs_buffer, current_obs)
-            slide_buffer(goal_buffer, current_goal)
-
+            # Delayed inputs: infer with history from t-1, update buffers after env.step().
             if exec_step_idx == 0 or current_chunk is None:
                 if device.type == "cuda":
                     torch.cuda.synchronize()
@@ -363,6 +393,22 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             _, _, dones, _ = vec_env.step(action_step)
             last_action.copy_(action_step)
 
+            current_obs = get_proprioception_obs(raw_env, joint_ids, last_action)
+            current_goal = compute_goals(
+                raw_env,
+                path_plan.path_w,
+                path_plan.yaws_w,
+                path_plan.cumulative_lengths,
+                path_progress,
+                goal_horizon_steps=args_cli.goal_horizon_steps,
+                dt=dt,
+                speed=args_cli.desired_speed,
+                v_req_clip=v_req_clip,
+                device=device,
+            )
+            slide_buffer(obs_buffer, current_obs)
+            slide_buffer(goal_buffer, current_goal)
+
             for i in range(num_envs):
                 if dones[i]:
                     print(f"[INFO] Env {i} reset.")
@@ -370,6 +416,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                     path_progress[i] = 0
                     exec_step_idx = 0
                     current_chunk = None
+                    reset_pos = raw_env._robot.data.root_pos_w.cpu().numpy()
+                    reset_quat = raw_env._robot.data.root_quat_w.cpu().numpy()
+                    path_plan.rebuild_from_robot(reset_pos, reset_quat, i)
                     run_warmup(
                         vec_env,
                         raw_env,
@@ -377,9 +426,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                         obs_buffer,
                         goal_buffer,
                         last_action,
-                        path_w,
-                        yaws_w,
-                        cumulative_lengths,
+                        path_plan.path_w,
+                        path_plan.yaws_w,
+                        path_plan.cumulative_lengths,
                         path_progress,
                         warmup_steps=max(args_cli.warmup_steps, history_len),
                         goal_horizon_steps=args_cli.goal_horizon_steps,
@@ -404,7 +453,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             target_dz = current_goal[0, 8].item()
             v_req_val = current_goal[0, 10].item()
             mode_str = "CROUCHING" if robot_z < 0.20 else "WALKING"
-            dist_rem = float(np.linalg.norm(path_w[-1, :2] - robot_pos[:2]))
+            dist_rem = float(np.linalg.norm(path_plan.path_w[-1, :2] - robot_pos[:2]))
             infer_per_step = infer_ms / max(1, args_cli.exec_horizon)
             print(
                 f"Step {step_count:04d} | {mode_str:^10s} | Z={robot_z:.3f}m | "

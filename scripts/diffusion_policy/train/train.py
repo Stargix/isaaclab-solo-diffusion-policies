@@ -29,54 +29,100 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from model.ema_model import EMAModel
     from model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
-    from train.config import DatasetConfig, DiffusionConfig, ModelConfig, OptimConfig, TrainConfig
+    from train.config import (
+        DATASET_DEFAULTS,
+        DIFFUSION_DEFAULTS,
+        MODEL_DEFAULTS,
+        OPTIM_DEFAULTS,
+        DatasetConfig,
+        DiffusionConfig,
+        ModelConfig,
+        OptimConfig,
+        TrainConfig,
+        load_training_config_overrides,
+    )
     from train.dataset import LocomotionHindsightDataset
 else:  # pragma: no cover
     from ..model.ema_model import EMAModel
     from ..model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
-    from .config import DatasetConfig, DiffusionConfig, ModelConfig, OptimConfig, TrainConfig
+    from .config import (
+        DATASET_DEFAULTS,
+        DIFFUSION_DEFAULTS,
+        MODEL_DEFAULTS,
+        OPTIM_DEFAULTS,
+        DatasetConfig,
+        DiffusionConfig,
+        ModelConfig,
+        OptimConfig,
+        TrainConfig,
+        load_training_config_overrides,
+    )
     from .dataset import LocomotionHindsightDataset
 
 
+def _find_cli_value(argv: list[str], flag: str) -> str | None:
+    for index, arg in enumerate(argv):
+        if arg == flag and index + 1 < len(argv):
+            return argv[index + 1]
+    return None
+
+
 def parse_args() -> argparse.Namespace:
+    config_path = _find_cli_value(sys.argv[1:], "--config")
+    config_defaults = load_training_config_overrides(config_path) if config_path else {}
+
     parser = argparse.ArgumentParser(description="Train Solo12 Diffusion Policy.")
+    parser.add_argument("--config", type=str, default=None, help="Optional JSON file with hyperparameter overrides.")
     parser.add_argument("--datasets", nargs="+", required=True, help="Merged HDF5 files to train on.")
     parser.add_argument("--output_dir", required=True, help="Directory for checkpoints and config.")
     parser.add_argument("--run_name", default="solo12_diffusion_policy", help="Run name for logs.")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
 
-    parser.add_argument("--history", type=int, default=8)
-    parser.add_argument("--action_horizon", type=int, default=4)
-    parser.add_argument("--min_segment_steps", type=int, default=50)
-    parser.add_argument("--max_segment_steps", type=int, default=150)
-    parser.add_argument("--segment_stride", type=int, default=10)
-    parser.add_argument("--v_req_clip", type=float, default=2.0)
-    parser.add_argument("--symmetry_mode", choices=["none", "mirror", "quadruped"], default="quadruped")
-    parser.add_argument("--val_fraction", type=float, default=0.05)
+    parser.add_argument("--history", type=int, default=DATASET_DEFAULTS.history)
+    parser.add_argument("--action_horizon", type=int, default=DATASET_DEFAULTS.action_horizon)
+    parser.add_argument("--min_segment_steps", type=int, default=DATASET_DEFAULTS.min_segment_steps)
+    parser.add_argument("--max_segment_steps", type=int, default=DATASET_DEFAULTS.max_segment_steps)
+    parser.add_argument("--segment_stride", type=int, default=DATASET_DEFAULTS.segment_stride)
+    parser.add_argument("--v_req_clip", type=float, default=DATASET_DEFAULTS.v_req_clip)
+    parser.add_argument("--symmetry_mode", choices=["none", "mirror", "quadruped"], default=DATASET_DEFAULTS.symmetry_mode)
+    parser.add_argument("--val_fraction", type=float, default=DATASET_DEFAULTS.val_fraction)
 
-    parser.add_argument("--d_model", type=int, default=256)
-    parser.add_argument("--nhead", type=int, default=8)
-    parser.add_argument("--num_layers", type=int, default=6)
-    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--d_model", type=int, default=MODEL_DEFAULTS.d_model)
+    parser.add_argument("--nhead", type=int, default=MODEL_DEFAULTS.nhead)
+    parser.add_argument("--num_layers", type=int, default=MODEL_DEFAULTS.num_layers)
+    parser.add_argument("--dropout", type=float, default=MODEL_DEFAULTS.dropout)
 
-    parser.add_argument("--diffusion_steps", type=int, default=100)
-    parser.add_argument("--beta_schedule", default="squaredcos_cap_v2")
-    parser.add_argument("--cfg_dropout_prob", type=float, default=0.2)
-    parser.add_argument("--batch_size", type=int, default=256)
-    parser.add_argument("--epochs", type=int, default=200)
-    parser.add_argument("--lr", type=float, default=1.0e-4)
-    parser.add_argument("--weight_decay", type=float, default=1.0e-6)
-    parser.add_argument("--grad_clip_norm", type=float, default=1.0)
-    parser.add_argument("--ema_decay", type=float, default=0.9999)
-    parser.add_argument("--num_workers", type=int, default=0)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--save_every", type=int, default=10)
-    parser.add_argument("--log_every", type=int, default=50)
+    parser.add_argument("--diffusion_steps", type=int, default=DIFFUSION_DEFAULTS.num_train_timesteps)
+    parser.add_argument(
+        "--num_inference_steps",
+        type=int,
+        default=None,
+        help="Denoising steps at deploy time; defaults to diffusion_steps.",
+    )
+    parser.add_argument("--beta_schedule", default=DIFFUSION_DEFAULTS.beta_schedule)
+    parser.add_argument("--cfg_dropout_prob", type=float, default=DIFFUSION_DEFAULTS.cfg_dropout_prob)
+    parser.add_argument("--batch_size", type=int, default=OPTIM_DEFAULTS.batch_size)
+    parser.add_argument("--epochs", type=int, default=OPTIM_DEFAULTS.epochs)
+    parser.add_argument("--lr", type=float, default=OPTIM_DEFAULTS.learning_rate)
+    parser.add_argument("--weight_decay", type=float, default=OPTIM_DEFAULTS.weight_decay)
+    parser.add_argument("--grad_clip_norm", type=float, default=OPTIM_DEFAULTS.grad_clip_norm)
+    parser.add_argument("--ema_decay", type=float, default=OPTIM_DEFAULTS.ema_decay)
+    parser.add_argument("--num_workers", type=int, default=OPTIM_DEFAULTS.num_workers)
+    parser.add_argument("--seed", type=int, default=OPTIM_DEFAULTS.seed)
+    parser.add_argument("--save_every", type=int, default=OPTIM_DEFAULTS.save_every)
+    parser.add_argument("--log_every", type=int, default=OPTIM_DEFAULTS.log_every)
     parser.add_argument("--no_amp", action="store_true", help="Disable CUDA mixed precision.")
 
     parser.add_argument("--wandb_project", default=None)
     parser.add_argument("--wandb_entity", default=None)
-    return parser.parse_args()
+
+    if config_defaults:
+        parser.set_defaults(**config_defaults)
+
+    args = parser.parse_args()
+    if args.num_inference_steps is None:
+        args.num_inference_steps = args.diffusion_steps
+    return args
 
 
 def set_seed(seed: int) -> None:
@@ -109,6 +155,7 @@ def make_config(args: argparse.Namespace) -> TrainConfig:
         ),
         diffusion=DiffusionConfig(
             num_train_timesteps=args.diffusion_steps,
+            num_inference_steps=args.num_inference_steps,
             beta_schedule=args.beta_schedule,
             cfg_dropout_prob=args.cfg_dropout_prob,
         ),
@@ -162,6 +209,7 @@ def build_policy(cfg: TrainConfig) -> Solo12DiffusionPolicy:
         variance_type=cfg.diffusion.variance_type,
         clip_sample=cfg.diffusion.clip_sample,
         cfg_dropout_prob=cfg.diffusion.cfg_dropout_prob,
+        num_inference_steps=cfg.diffusion.num_inference_steps or cfg.diffusion.num_train_timesteps,
     )
     return Solo12DiffusionPolicy(policy_cfg)
 
@@ -219,6 +267,12 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     with (output_dir / "config.json").open("w", encoding="utf-8") as f:
         json.dump(cfg.to_dict(), f, indent=2)
+
+    print(
+        f"[INFO] d_model={cfg.model.d_model} layers={cfg.model.num_layers} "
+        f"nhead={cfg.model.nhead} K_train={cfg.diffusion.num_train_timesteps} "
+        f"K_infer={cfg.diffusion.num_inference_steps}"
+    )
 
     device = torch.device(args.device)
     dataset = LocomotionHindsightDataset(
