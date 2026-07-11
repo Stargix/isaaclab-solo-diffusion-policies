@@ -12,7 +12,9 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from .geometry import cumulative_xy_lengths, local_waypoints_by_path_distance, relative_yaw, transform_point_to_local, transform_point_to_yaw_frame
+from .geometry import cumulative_xy_lengths
+
+from .goal_builder import build_goal_vector
 
 from .normalization import NormalizerStats, build_stats, normalize_minmax, normalize_zscore
 from .symmetry import apply_symmetry, symmetry_count
@@ -195,38 +197,17 @@ class LocomotionHindsightDataset(Dataset):
                     self.samples.append(HindsightSample(demo_idx, step, end_step))
 
     def _goal_for_step(self, demo: DemoSequence, step: int, end_step: int) -> np.ndarray:
-        pos = demo.root_pos_w
-        quat = demo.root_quat_w
-        origin_w = pos[step]
-        quat_step = quat[step]
-        target_w = pos[end_step]
-
-        waypoints = local_waypoints_by_path_distance(
-            pos,
-            step,
+        return build_goal_vector(
+            demo.root_pos_w,
             demo.cumulative_xy,
-            origin_w,
-            quat_step,
-            distances=self.waypoint_distances,
-            end_idx=end_step,
-        )
-        target_rel = transform_point_to_yaw_frame(target_w, origin_w, quat_step)
-
-        dyaw = relative_yaw(quat_step, quat[end_step])
-        path_length_remaining = demo.cumulative_xy[end_step] - demo.cumulative_xy[step]
-        time_remaining = max((end_step - step) * self.dt, self.dt)
-        v_req = np.clip(path_length_remaining / (time_remaining + 1.0e-3), 0.0, self.v_req_clip)
-
-        return np.asarray(
-            [
-                *waypoints.tolist(),
-                float(target_rel[0]),
-                float(target_rel[1]),
-                float(target_rel[2]),
-                float(dyaw),
-                float(v_req),
-            ],
-            dtype=np.float32,
+            step,
+            end_step,
+            demo.root_pos_w[step],
+            demo.root_quat_w[step],
+            quat_w=demo.root_quat_w,
+            dt=self.dt,
+            waypoint_distances=self.waypoint_distances,
+            v_req_clip=self.v_req_clip,
         )
 
     def _goal_history(self, sample: HindsightSample) -> np.ndarray:
