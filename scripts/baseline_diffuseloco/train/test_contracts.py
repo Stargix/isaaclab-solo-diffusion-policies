@@ -74,8 +74,8 @@ class CommandContractTests(unittest.TestCase):
         train_windows = dataset.sample_indices_for_demos(split.train_demo_indices)
         val_windows = dataset.sample_indices_for_demos(split.val_demo_indices)
         self.assertFalse(set(train_windows) & set(val_windows))
-        stats = dataset.build_normalizer_stats([0])
-        self.assertLess(float(stats.action.max.max()), 200.0)
+        stats = dataset.build_normalizer_stats([0], max_stats_samples=2, seed=1)
+        self.assertEqual(float(stats.action.max.max()), 139.0)
 
     def test_memory_mask_exposes_full_history_at_execution(self) -> None:
         model = TransformerForDiffusion(

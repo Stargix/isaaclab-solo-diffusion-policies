@@ -43,7 +43,8 @@ def write_dataset(path: Path, *, demos: int = 3, length: int = 140) -> None:
             obs.create_dataset("command_speed", data=np.repeat(np.array([[0.4, 0.0, 0.0]], np.float32), length, axis=0))
             root_pos = np.zeros((length, 3), dtype=np.float32)
             root_pos[:, 0] = np.arange(length, dtype=np.float32) * 0.02
-            root_pos[:, 2] = 0.24
+            root_pos[:, 1] = np.square(np.arange(length, dtype=np.float32)) * 0.0001
+            root_pos[:, 2] = 0.20 + np.arange(length, dtype=np.float32) * 0.0002
             root_quat = np.zeros((length, 4), dtype=np.float32)
             root_quat[:, 0] = 1.0
             obs.create_dataset("root_pos_w", data=root_pos)
@@ -84,6 +85,7 @@ class SpatialContractTests(unittest.TestCase):
             quat_w=demo.root_quat_w,
         )
         np.testing.assert_allclose(item["goal_hist"][0], expected_first, atol=1e-6)
+        self.assertFalse(np.allclose(item["goal_hist"][0], item["goal_hist"][-1]))
 
     def test_episode_split_and_train_only_stats(self) -> None:
         dataset = SpatialHindsightDataset(
@@ -95,8 +97,8 @@ class SpatialContractTests(unittest.TestCase):
             set(dataset.sample_indices_for_demos(split.train_demo_indices))
             & set(dataset.sample_indices_for_demos(split.val_demo_indices))
         )
-        stats = dataset.build_normalizer_stats([0], max_goal_samples=20, seed=3)
-        self.assertLess(float(stats.action.max.max()), 200.0)
+        stats = dataset.build_normalizer_stats([0], max_stats_samples=2, seed=3)
+        self.assertEqual(float(stats.action.max.max()), 139.0)
 
 
 if __name__ == "__main__":

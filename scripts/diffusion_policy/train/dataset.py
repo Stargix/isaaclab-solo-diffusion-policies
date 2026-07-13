@@ -14,8 +14,8 @@ from torch.utils.data import Dataset
 
 from .geometry import cumulative_xy_lengths
 from .goal_builder import build_goal_vector
-from .normalization import NormalizerStats, build_stats
-from .obs_utils import ACTION_HIST_DIM, GOAL_DIM, delayed_io_windows, read_proprio_vector
+from .normalization import NormalizerStats, build_stats_with_action_range
+from .obs_utils import GOAL_DIM, PROPRIO_DIM, delayed_io_windows, read_proprio_vector
 from .symmetry import apply_symmetry, symmetry_count
 
 os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
@@ -251,24 +251,67 @@ class SpatialHindsightDataset(Dataset):
         self,
         demo_indices: Iterable[int],
         *,
-        max_goal_samples: int = 20_000,
+        max_stats_samples: int = 20_000,
         seed: int = 0,
     ) -> NormalizerStats:
         selected = set(int(index) for index in demo_indices)
         demos = [demo for index, demo in enumerate(self.demos) if index in selected]
         if not demos:
             raise ValueError("Cannot fit normalizer without training episodes.")
-        proprio = np.concatenate([demo.proprio for demo in demos], axis=0)
-        actions = np.concatenate([demo.actions for demo in demos], axis=0)
-        candidate_samples = [sample for sample in self.samples if sample.demo_idx in selected]
+        proprio, actions = self._sample_state_action_rows(demos, max_stats_samples, seed)
+        candidate_positions = np.flatnonzero(
+            np.fromiter((sample.demo_idx in selected for sample in self.samples), dtype=bool)
+        )
         rng = np.random.default_rng(seed)
-        count = min(max_goal_samples, len(candidate_samples))
-        chosen = rng.choice(len(candidate_samples), size=count, replace=False)
-        goals = np.concatenate([self._goal_history(candidate_samples[int(i)]) for i in chosen], axis=0)
+        count = min(max_stats_samples, len(candidate_positions))
+        chosen = rng.choice(candidate_positions, size=count, replace=False)
+        goals = np.concatenate([self._goal_history(self.samples[int(i)]) for i in chosen], axis=0)
 
         if self._symmetry_count > 1:
             proprio, actions, goals = self._augment_stats(proprio, actions, goals)
-        return build_stats(proprio, goals, actions)
+        action_min, action_max = self._exact_action_range(demos)
+        return build_stats_with_action_range(proprio, goals, action_min, action_max)
+
+    @staticmethod
+    def _sample_state_action_rows(
+        demos: list[DemoSequence], max_samples: int, seed: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if max_samples < 1:
+            raise ValueError("max_stats_samples must be >= 1.")
+        lengths = np.asarray([len(demo.actions) for demo in demos], dtype=np.int64)
+        boundaries = np.cumsum(lengths)
+        count = min(int(max_samples), int(boundaries[-1]))
+        chosen = np.sort(np.random.default_rng(seed).choice(boundaries[-1], count, replace=False))
+        demo_ids = np.searchsorted(boundaries, chosen, side="right")
+        starts = np.concatenate(([0], boundaries[:-1]))
+        proprio, actions = [], []
+        for demo_idx in np.unique(demo_ids):
+            local = chosen[demo_ids == demo_idx] - starts[demo_idx]
+            demo = demos[int(demo_idx)]
+            proprio.append(demo.proprio[local])
+            actions.append(demo.actions[local])
+        return np.concatenate(proprio), np.concatenate(actions)
+
+    def _exact_action_range(self, demos: list[DemoSequence]) -> tuple[np.ndarray, np.ndarray]:
+        action_min = np.full(12, np.inf, dtype=np.float32)
+        action_max = np.full(12, -np.inf, dtype=np.float32)
+        for demo in demos:
+            actions = torch.from_numpy(demo.actions)
+            proprio = torch.zeros((len(actions), PROPRIO_DIM), dtype=actions.dtype)
+            goals = torch.zeros((len(actions), GOAL_DIM), dtype=actions.dtype)
+            for index in range(self._symmetry_count):
+                _, _, _, transformed = apply_symmetry(
+                    proprio,
+                    actions,
+                    goals,
+                    actions,
+                    index=index,
+                    mode=self.symmetry_mode,
+                )
+                values = transformed.numpy()
+                action_min = np.minimum(action_min, values.min(axis=0))
+                action_max = np.maximum(action_max, values.max(axis=0))
+        return action_min, action_max
 
     def _augment_stats(
         self, proprio: np.ndarray, actions: np.ndarray, goals: np.ndarray

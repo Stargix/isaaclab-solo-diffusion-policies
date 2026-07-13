@@ -100,6 +100,7 @@ TRAINING_CONFIG_KEYS = frozenset(
         "step_stride",
         "v_req_clip",
         "symmetry_mode",
+        "max_stats_samples",
         "val_fraction",
         "d_model",
         "nhead",

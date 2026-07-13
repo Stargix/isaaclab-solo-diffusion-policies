@@ -102,7 +102,23 @@ def build_stats(
 ) -> NormalizerStats:
     # DDPMScheduler clips normalized samples to [-1, 1], so training targets
     # must use the exact train-set support rather than percentile bounds.
-    action_min, action_max = _safe_range(action_values.min(axis=0), action_values.max(axis=0))
+    return build_stats_with_action_range(
+        proprio_values,
+        goal_values,
+        action_values.min(axis=0),
+        action_values.max(axis=0),
+    )
+
+
+def build_stats_with_action_range(
+    proprio_values: np.ndarray,
+    goal_values: np.ndarray,
+    action_min: np.ndarray,
+    action_max: np.ndarray,
+) -> NormalizerStats:
+    """Build bounded-memory z-scores with an exact action range."""
+
+    action_min, action_max = _safe_range(action_min, action_max)
     return NormalizerStats(
         proprio=ZScoreStats(proprio_values.mean(axis=0).astype(np.float32), _safe_std(proprio_values.std(axis=0))),
         goal=ZScoreStats(goal_values.mean(axis=0).astype(np.float32), _safe_std(goal_values.std(axis=0))),

@@ -12,8 +12,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from .normalization import NormalizerStats, build_stats
-from .obs_utils import delayed_io_windows, read_proprio_vector
+from .normalization import NormalizerStats, build_stats_with_action_range
+from .obs_utils import PROPRIO_DIM, delayed_io_windows, read_proprio_vector
 from .symmetry import apply_symmetry, symmetry_count
 
 os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
@@ -172,17 +172,64 @@ class DiffuseLocoCommandDataset(Dataset):
             raise ValueError("Episode split produced no command windows.")
         return output
 
-    def build_normalizer_stats(self, demo_indices: Iterable[int]) -> NormalizerStats:
+    def build_normalizer_stats(
+        self,
+        demo_indices: Iterable[int],
+        *,
+        max_stats_samples: int = 20_000,
+        seed: int = 0,
+    ) -> NormalizerStats:
         selected = set(int(index) for index in demo_indices)
         demos = [demo for index, demo in enumerate(self.demos) if index in selected]
         if not demos:
             raise ValueError("Cannot fit normalizer without training episodes.")
-        proprio = np.concatenate([demo.proprio for demo in demos], axis=0)
-        actions = np.concatenate([demo.actions for demo in demos], axis=0)
-        commands = np.concatenate([demo.commands for demo in demos], axis=0)
+        proprio, actions, commands = self._sample_rows(demos, max_stats_samples, seed)
         if self._symmetry_count > 1:
             proprio, actions, commands = self._augment_stats(proprio, actions, commands)
-        return build_stats(proprio, commands, actions)
+        action_min, action_max = self._exact_action_range(demos)
+        return build_stats_with_action_range(proprio, commands, action_min, action_max)
+
+    @staticmethod
+    def _sample_rows(
+        demos: list[DemoSequence], max_samples: int, seed: int
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if max_samples < 1:
+            raise ValueError("max_stats_samples must be >= 1.")
+        lengths = np.asarray([len(demo.actions) for demo in demos], dtype=np.int64)
+        boundaries = np.cumsum(lengths)
+        count = min(int(max_samples), int(boundaries[-1]))
+        chosen = np.sort(np.random.default_rng(seed).choice(boundaries[-1], count, replace=False))
+        demo_ids = np.searchsorted(boundaries, chosen, side="right")
+        starts = np.concatenate(([0], boundaries[:-1]))
+        proprio, actions, commands = [], [], []
+        for demo_idx in np.unique(demo_ids):
+            local = chosen[demo_ids == demo_idx] - starts[demo_idx]
+            demo = demos[int(demo_idx)]
+            proprio.append(demo.proprio[local])
+            actions.append(demo.actions[local])
+            commands.append(demo.commands[local])
+        return np.concatenate(proprio), np.concatenate(actions), np.concatenate(commands)
+
+    def _exact_action_range(self, demos: list[DemoSequence]) -> tuple[np.ndarray, np.ndarray]:
+        action_min = np.full(12, np.inf, dtype=np.float32)
+        action_max = np.full(12, -np.inf, dtype=np.float32)
+        for demo in demos:
+            actions = torch.from_numpy(demo.actions)
+            proprio = torch.zeros((len(actions), PROPRIO_DIM), dtype=actions.dtype)
+            commands = torch.zeros((len(actions), 3), dtype=actions.dtype)
+            for index in range(self._symmetry_count):
+                _, _, _, transformed = apply_symmetry(
+                    proprio,
+                    actions,
+                    commands,
+                    actions,
+                    index=index,
+                    mode=self.symmetry_mode,
+                )
+                values = transformed.numpy()
+                action_min = np.minimum(action_min, values.min(axis=0))
+                action_max = np.maximum(action_max, values.max(axis=0))
+        return action_min, action_max
 
     def _augment_stats(
         self, proprio: np.ndarray, actions: np.ndarray, commands: np.ndarray
@@ -230,4 +277,3 @@ class DiffuseLocoCommandDataset(Dataset):
             "goal_hist": commands,
             "actions": actions,
         }
-

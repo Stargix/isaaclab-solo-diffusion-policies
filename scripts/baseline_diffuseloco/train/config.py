@@ -18,6 +18,7 @@ class DatasetConfig:
     execution_offset: int = 8
     step_stride: int = 1
     symmetry_mode: str = "quadruped"
+    max_stats_samples: int = 20_000
     val_fraction: float = 0.05
 
 
@@ -94,6 +95,7 @@ TRAINING_CONFIG_KEYS = frozenset(
         "execution_offset",
         "step_stride",
         "symmetry_mode",
+        "max_stats_samples",
         "val_fraction",
         "d_model",
         "nhead",

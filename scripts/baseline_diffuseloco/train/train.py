@@ -86,6 +86,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--execution_offset", type=int, default=DATASET_DEFAULTS.execution_offset)
     parser.add_argument("--step_stride", type=int, default=DATASET_DEFAULTS.step_stride, help="Temporal stride to sub-sample step windows.")
     parser.add_argument("--symmetry_mode", choices=["none", "mirror", "quadruped"], default=DATASET_DEFAULTS.symmetry_mode)
+    parser.add_argument("--max_stats_samples", type=int, default=DATASET_DEFAULTS.max_stats_samples)
     parser.add_argument("--val_fraction", type=float, default=DATASET_DEFAULTS.val_fraction)
 
     parser.add_argument("--d_model", type=int, default=MODEL_DEFAULTS.d_model)
@@ -150,6 +151,7 @@ def make_config(args: argparse.Namespace) -> TrainConfig:
             execution_offset=args.execution_offset,
             step_stride=args.step_stride,
             symmetry_mode=args.symmetry_mode,
+            max_stats_samples=args.max_stats_samples,
             val_fraction=args.val_fraction,
         ),
         model=ModelConfig(
@@ -326,7 +328,11 @@ def main() -> None:
     episode_split = split_episode_indices(len(dataset.demos), cfg.dataset.val_fraction, cfg.optim.seed)
     train_indices = dataset.sample_indices_for_demos(episode_split.train_demo_indices)
     val_indices = dataset.sample_indices_for_demos(episode_split.val_demo_indices)
-    normalizer_stats = dataset.build_normalizer_stats(episode_split.train_demo_indices).to_dict()
+    normalizer_stats = dataset.build_normalizer_stats(
+        episode_split.train_demo_indices,
+        max_stats_samples=cfg.dataset.max_stats_samples,
+        seed=cfg.optim.seed,
+    ).to_dict()
     train_dataset = Subset(dataset, train_indices)
     val_dataset = Subset(dataset, val_indices)
     split_manifest = {
@@ -343,7 +349,7 @@ def main() -> None:
         shuffle=True,
         num_workers=cfg.optim.num_workers,
         pin_memory=device.type == "cuda",
-        drop_last=True,
+        drop_last=False,
     )
     val_loader = DataLoader(
         val_dataset,

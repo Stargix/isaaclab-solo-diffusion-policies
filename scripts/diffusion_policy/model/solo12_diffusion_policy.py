@@ -154,6 +154,8 @@ class Solo12DiffusionPolicy(torch.nn.Module):
             raise RuntimeError("Normalizer stats must be set before inference.")
 
         guidance_scale = self.cfg.guidance_scale if guidance_scale is None else guidance_scale
+        if guidance_scale != 1.0 and self.cfg.cfg_dropout_prob <= 0.0:
+            raise ValueError("guidance_scale != 1 requires a checkpoint trained with goal CFG dropout.")
         proprio_n = normalize_zscore(proprio_hist, self.normalizer_stats.proprio)
         action_n = normalize_minmax(action_hist, self.normalizer_stats.action)
         goal_n = normalize_zscore(goal_hist, self.normalizer_stats.goal)

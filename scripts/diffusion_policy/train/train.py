@@ -88,6 +88,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--step_stride", type=int, default=DATASET_DEFAULTS.step_stride, help="Temporal stride to sub-sample step windows.")
     parser.add_argument("--v_req_clip", type=float, default=DATASET_DEFAULTS.v_req_clip)
     parser.add_argument("--symmetry_mode", choices=["none", "mirror", "quadruped"], default=DATASET_DEFAULTS.symmetry_mode)
+    parser.add_argument("--max_stats_samples", type=int, default=DATASET_DEFAULTS.max_stats_samples)
     parser.add_argument("--val_fraction", type=float, default=DATASET_DEFAULTS.val_fraction)
 
     parser.add_argument("--d_model", type=int, default=MODEL_DEFAULTS.d_model)
@@ -154,6 +155,7 @@ def make_config(args: argparse.Namespace) -> TrainConfig:
             step_stride=args.step_stride,
             v_req_clip=args.v_req_clip,
             symmetry_mode=args.symmetry_mode,
+            max_stats_samples=args.max_stats_samples,
             val_fraction=args.val_fraction,
         ),
         model=ModelConfig(
@@ -335,7 +337,7 @@ def main() -> None:
     val_indices = dataset.sample_indices_for_demos(episode_split.val_demo_indices)
     normalizer_stats = dataset.build_normalizer_stats(
         episode_split.train_demo_indices,
-        max_goal_samples=cfg.dataset.max_stats_samples,
+        max_stats_samples=cfg.dataset.max_stats_samples,
         seed=cfg.optim.seed,
     ).to_dict()
     train_dataset = Subset(dataset, train_indices)
@@ -354,7 +356,7 @@ def main() -> None:
         shuffle=True,
         num_workers=cfg.optim.num_workers,
         pin_memory=device.type == "cuda",
-        drop_last=True,
+        drop_last=False,
     )
     val_loader = DataLoader(
         val_dataset,

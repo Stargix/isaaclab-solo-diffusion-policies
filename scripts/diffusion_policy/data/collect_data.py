@@ -86,6 +86,7 @@ parser.add_argument("--num_envs", type=int, default=128, help="Number of paralle
 parser.add_argument("--num_steps", type=int, default=50000,
                     help="Total number of timesteps to SAVE across all kept episodes.")
 parser.add_argument("--output_name", type=str, default="raw_dataset.hdf5", help="Output file name.")
+parser.add_argument("--seed", type=int, default=42, help="Seed for command/skill sampling and collection metadata.")
 parser.add_argument("--command_resample_time_s", type=float, default=2.0,
                     help="Time interval (s) to resample speed commands within an episode.")
 parser.add_argument("--min_demo_len", type=int, default=100,
@@ -191,6 +192,7 @@ def configure_env_for_collection(env_cfg: Any, args: argparse.Namespace) -> None
     anticipate (pushes, actuation delays, observation noise, reset-velocity noise).
     """
     env_cfg.scene.num_envs = args.num_envs
+    env_cfg.seed = args.seed
     env_cfg.sim.device = args.device if args.device is not None else env_cfg.sim.device
 
     # 20s episodes = 1000 steps at 50Hz. Command resampling is handled manually below.
@@ -458,13 +460,14 @@ class PolicyManager:
 class HDF5Writer:
     """Writes kept episodes to an HDF5 file in the diffusion_policy schema."""
 
-    def __init__(self, path: Path, skill_names: List[str]):
+    def __init__(self, path: Path, skill_names: List[str], seed: int):
         path.parent.mkdir(parents=True, exist_ok=True)
         self._f = h5py.File(path, "w")
         self._data = self._f.create_group("data")
         self._data.attrs["skill_names"] = np.array(skill_names, dtype="S32")
         self._data.attrs["convention"] = HDF5_CONVENTION
         self._data.attrs["control_rate_hz"] = 50.0
+        self._data.attrs["collection_seed"] = int(seed)
         self._demo_counter = 0
         self._total_steps = 0
 
@@ -595,7 +598,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     device = torch.device(vec_env.unwrapped.device)
     joint_ids = raw_env._joint_ids
 
-    rng = random.Random()  # deterministic-ish per-process; seeded by system time by default
+    rng = random.Random(args_cli.seed)
+    np.random.seed(args_cli.seed)
+    torch.manual_seed(args_cli.seed)
     policy_mgr = PolicyManager(vec_env, agent_cfg, device, args_cli.mode,
                                args_cli.checkpoint, args_cli.checkpoints)
     skill_names = policy_mgr.skill_names
@@ -609,7 +614,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         resample_command(i, skill_names[state_tracker.current_skill_idx[i]],
                          raw_env._commands, device)
 
-    writer = HDF5Writer(output_path, skill_names)
+    writer = HDF5Writer(output_path, skill_names, args_cli.seed)
     stats = CollectionStats()
     print(f"[INFO] Starting collection ({args_cli.mode} mode). Output: {output_path}")
     dr_status = "off" if args_cli.disable_physics_dr else args_cli.physics_dr_mode

@@ -32,13 +32,7 @@ conda run --no-capture-output -n env_isaaclab python scripts/baseline_diffuseloc
   --headless
 ```
 
-Inspect it before training:
-
-```powershell
-conda run --no-capture-output -n env_isaaclab python scripts/baseline_diffuseloco/data/inspect_dataset.py `
-  --dataset scripts/baseline_diffuseloco/data/datasets/walk_raw.hdf5
-```
-
 The spatial fields `root_pos_w` and `root_quat_w` remain in the raw schema so a
 single collection can also be audited or reused later, but the command baseline
-does not consume them.
+does not consume them. Instantiating `DiffuseLocoCommandDataset` performs the
+mandatory schema and temporal-alignment checks before training.
