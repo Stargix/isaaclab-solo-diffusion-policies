@@ -75,10 +75,32 @@ def _validate_file(path: str) -> None:
             if missing:
                 raise KeyError(f"{path}/{demo_name}: missing obs keys {missing}.")
             length = int(demo["actions"].shape[0])
+            if length == 0:
+                raise ValueError(f"{path}/{demo_name}: empty demonstration.")
             if any(int(obs[key].shape[0]) != length for key in REQUIRED_OBS):
                 raise ValueError(f"{path}/{demo_name}: observation length mismatch.")
-            if int(demo["dones"].shape[0]) != length or (length and not bool(demo["dones"][-1])):
+            dones = demo["dones"][:]
+            if len(dones) != length or (length and not bool(dones[-1])) or np.any(dones[:-1]):
                 raise ValueError(f"{path}/{demo_name}: invalid dones convention.")
+            actions_ds = demo["actions"]
+            last_action_ds = obs["last_action"]
+            for start in range(0, length, 65_536):
+                end = min(start + 65_536, length)
+                actions = actions_ds[start:end]
+                if not np.isfinite(actions).all():
+                    raise ValueError(f"{path}/{demo_name}: non-finite actions.")
+                for key in REQUIRED_OBS:
+                    if not np.isfinite(obs[key][start:end]).all():
+                        raise ValueError(f"{path}/{demo_name}: non-finite obs/{key}.")
+                expected = np.empty_like(actions)
+                if start == 0:
+                    expected[0] = 0.0
+                    expected[1:] = actions[:-1]
+                else:
+                    expected[0] = actions_ds[start - 1]
+                    expected[1:] = actions[:-1]
+                if not np.allclose(last_action_ds[start:end], expected, atol=1.0e-6, rtol=0.0):
+                    raise ValueError(f"{path}/{demo_name}: last_action is not actions[t-1].")
 
 
 class DiffuseLocoCommandDataset(Dataset):

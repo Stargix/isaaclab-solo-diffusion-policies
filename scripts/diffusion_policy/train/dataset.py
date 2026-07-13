@@ -90,13 +90,36 @@ def _validate_hdf5(path: str) -> None:
             if "actions" not in demo or "dones" not in demo:
                 raise KeyError(f"{path}/{demo_name}: missing actions or dones.")
             length = int(demo["actions"].shape[0])
+            if length == 0:
+                raise ValueError(f"{path}/{demo_name}: empty demonstration.")
             for key in HDF5_OBS_KEYS:
                 if int(obs[key].shape[0]) != length:
                     raise ValueError(f"{path}/{demo_name}: obs/{key} length mismatch.")
-            if int(demo["dones"].shape[0]) != length:
-                raise ValueError(f"{path}/{demo_name}: dones length mismatch.")
-            if length and not bool(demo["dones"][-1]):
-                raise ValueError(f"{path}/{demo_name}: final dones entry must be True.")
+            dones = demo["dones"][:]
+            if len(dones) != length or (length and not bool(dones[-1])) or np.any(dones[:-1]):
+                raise ValueError(f"{path}/{demo_name}: dones must be false except at the final sample.")
+            actions_ds = demo["actions"]
+            last_action_ds = obs["last_action"]
+            for start in range(0, length, 65_536):
+                end = min(start + 65_536, length)
+                actions = actions_ds[start:end]
+                if not np.isfinite(actions).all():
+                    raise ValueError(f"{path}/{demo_name}: non-finite actions.")
+                for key in HDF5_OBS_KEYS:
+                    if not np.isfinite(obs[key][start:end]).all():
+                        raise ValueError(f"{path}/{demo_name}: non-finite obs/{key}.")
+                expected = np.empty_like(actions)
+                if start == 0:
+                    expected[0] = 0.0
+                    expected[1:] = actions[:-1]
+                else:
+                    expected[0] = actions_ds[start - 1]
+                    expected[1:] = actions[:-1]
+                if not np.allclose(last_action_ds[start:end], expected, atol=1.0e-6, rtol=0.0):
+                    raise ValueError(f"{path}/{demo_name}: last_action is not actions[t-1].")
+                quat_norm = np.linalg.norm(obs["root_quat_w"][start:end], axis=-1)
+                if not np.allclose(quat_norm, 1.0, atol=1.0e-3, rtol=0.0):
+                    raise ValueError(f"{path}/{demo_name}: root_quat_w is not normalized.")
 
 
 class SpatialHindsightDataset(Dataset):
@@ -140,6 +163,8 @@ class SpatialHindsightDataset(Dataset):
             raise ValueError("goal_horizon_steps must be >= 1.")
         if step_stride < 1:
             raise ValueError("step_stride must be >= 1.")
+        if not np.isclose(dt, 0.02):
+            raise ValueError("Schema v2 is fixed at 50 Hz and requires dt=0.02.")
 
         self.history = history
         self.prediction_horizon = prediction_horizon
