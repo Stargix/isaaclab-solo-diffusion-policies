@@ -93,7 +93,7 @@ parser.add_argument("--seed", type=int, default=42, help="Seed for command sampl
 parser.add_argument("--command_resample_time_s", type=float, default=2.0,
                     help="Time interval (s) to resample speed commands within an episode.")
 parser.add_argument("--command_profile", choices=["native", "shared_height"], default="native",
-                    help="native: each expert's envelope; shared_height: common sprint/crouch envelope for a fair height ablation.")
+                    help="native: each expert's envelope; shared_height: common walk/crouch envelope for a fair posture-height ablation.")
 parser.add_argument("--desired_base_height", type=float, required=True,
                     help="Expert's commanded base height in metres; stored as the fourth conditioning value.")
 parser.add_argument("--min_demo_len", type=int, default=100,
@@ -153,7 +153,7 @@ SKILL_COMMAND_RANGES: Dict[str, Dict[str, Tuple[float, float]]] = {
     "jump":   {"vx": (-1.2, 1.2),  "vy": (-0.6, 0.6),  "wz": (-0.6, 0.6)},
     "sprint": {"vx": (0.3, 2.0), "vy": (-0.2, 0.2), "wz": (-0.2, 0.2)},
 }
-SHARED_HEIGHT_COMMAND_RANGE = {"vx": (0.3, 0.75), "vy": (-0.2, 0.2), "wz": (-0.2, 0.2)}
+SHARED_HEIGHT_COMMAND_RANGE = {"vx": (-0.75, 0.75), "vy": (-0.5, 0.5), "wz": (-0.5, 0.5)}
 
 # HDF5 convention string stored as an attribute for downstream consumers.
 HDF5_CONVENTION = (
@@ -260,7 +260,7 @@ def resample_command(env_idx: int, skill: str,
     """Sample a skill-specific (vx, vy, wz) command for one environment in-place."""
     ranges = (
         SHARED_HEIGHT_COMMAND_RANGE
-        if args_cli.command_profile == "shared_height" and skill in {"sprint", "crouch"}
+        if args_cli.command_profile == "shared_height" and skill in {"walk", "crouch"}
         else SKILL_COMMAND_RANGES.get(skill)
     )
     if ranges is None:

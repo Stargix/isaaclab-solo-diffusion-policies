@@ -5,6 +5,11 @@ waypoints and terminal pose from the problem. The policy is conditioned on the
 expert command `[vx, vy, wz, desired_height]`. The fourth value is an explicit
 desired height label, never the measured base height.
 
+For the currently working walk/crouch experts, it is a fixed posture-reference
+label (walk `0.2932`, crouch `0.1705`), not evidence of continuous height
+control. It becomes a true desired-height command after training experts with
+explicit, distinct height objectives.
+
 ## Versioned contract (schema v3)
 
 - Control rate: 50 Hz.
@@ -26,7 +31,7 @@ Regenerate data first: schema-v2 velocity-only files are rejected by design.
 
 ```powershell
 conda run --no-capture-output -n env_isaaclab python scripts/baseline_diffuseloco/train/train.py `
-  --datasets scripts/diffusion_policy/data/datasets/sprint_crouch_v3.hdf5 `
+  --datasets scripts/diffusion_policy/data/datasets/walk_crouch_v3.hdf5 `
   --output_dir scripts/baseline_diffuseloco/runs/velocity_height_compact_k10 `
   --config scripts/baseline_diffuseloco/train/configs/compact_k10.json `
   --symmetry_mode quadruped
@@ -41,7 +46,7 @@ conda run --no-capture-output -n env_isaaclab python scripts/baseline_diffuseloc
   --task solo12-v0 `
   --checkpoint scripts/baseline_diffuseloco/runs/velocity_height_compact_k10/best.pt `
   --command 0.4 0.0 0.0 `
-  --desired_height 0.25 `
+  --desired_height 0.2932 `
   --exec_horizon 1
 ```
 

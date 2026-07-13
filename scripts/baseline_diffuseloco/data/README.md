@@ -22,22 +22,22 @@ present. Collection uses a deterministic command-sampling seed and stores it in
 ```powershell
 conda run --no-capture-output -n env_isaaclab python scripts/baseline_diffuseloco/data/collect_data.py `
   --mode single `
-  --task solo12-sprint-v0 `
-  --checkpoint checkpoints/sprint_safe.pt `
-  --skill_name sprint `
+  --task solo12-v0 `
+  --checkpoint checkpoints/walk_safe.pt `
+  --skill_name walk `
   --num_envs 128 `
   --num_steps 1500000 `
-  --desired_base_height 0.25 `
+  --desired_base_height 0.2932 `
   --command_profile shared_height `
   --command_resample_time_s 2.0 `
   --physics_dr_mode light `
   --seed 42 `
-  --output_name sprint_raw_v3.hdf5 `
+  --output_name walk_raw_v3.hdf5 `
   --headless
 ```
 
 Repeat with `--task solo12-crouch-v0`, the crouch checkpoint,
-`--skill_name crouch`, `--desired_base_height 0.16` and the same
+`--skill_name crouch`, `--desired_base_height 0.1705` and the same
 `--command_profile shared_height`, then merge the two files with
 `scripts/diffusion_policy/data/merge_datasets.py`. Do not use a chained file:
 it has no explicit per-skill height schedule in schema v3.
