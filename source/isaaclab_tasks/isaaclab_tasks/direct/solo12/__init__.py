@@ -53,4 +53,16 @@ gym.register(
     },
 )
 
+gym.register(
+    id="solo12-sprint-v0",
+    entry_point=f"{__name__}.solo12_sprint_env:Solo12SprintEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.solo12_sprint_env:Solo12SprintEnvCfg",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg_fast.yaml",
+        "rsl_rl_cfg_entry_point": f"{__name__}.solo12_sprint_env:Solo12SprintPPORunnerCfg",
+    },
+)
+
+
 

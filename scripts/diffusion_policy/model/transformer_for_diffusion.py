@@ -58,6 +58,8 @@ class TransformerForDiffusion(nn.Module):
         time_as_cond: bool = True,
         obs_as_cond: bool = False,
         n_cond_layers: int = 0,
+        separate_goal_conditioning: bool = False,
+        goal_dim: int = 0,
     ) -> None:
         super().__init__()
 
@@ -69,18 +71,30 @@ class TransformerForDiffusion(nn.Module):
         if not time_as_cond:
             tokens += 1
             cond_tokens -= 1
-        obs_as_cond = cond_dim > 0 or obs_as_cond
+        obs_as_cond = cond_dim > 0 or goal_dim > 0 or obs_as_cond
+        self.separate_goal_conditioning = separate_goal_conditioning and goal_dim > 0
         if obs_as_cond:
             if not time_as_cond:
                 raise ValueError("obs_as_cond requires time_as_cond=True.")
-            cond_tokens += n_obs_steps
+            if self.separate_goal_conditioning:
+                cond_tokens += 2 * n_obs_steps
+            else:
+                cond_tokens += n_obs_steps
 
         self.input_emb = nn.Linear(input_dim, n_emb)
         self.pos_emb = nn.Parameter(torch.zeros(1, tokens, n_emb))
         self.drop = nn.Dropout(p_drop_emb)
 
         self.time_emb = SinusoidalPosEmb(n_emb)
-        self.cond_obs_emb = nn.Linear(cond_dim, n_emb) if obs_as_cond else None
+        self.cond_io_emb = None
+        self.cond_goal_emb = None
+        self.cond_obs_emb = None
+        if obs_as_cond:
+            if self.separate_goal_conditioning:
+                self.cond_io_emb = self._make_cond_mlp(cond_dim, n_emb)
+                self.cond_goal_emb = self._make_cond_mlp(goal_dim, n_emb)
+            else:
+                self.cond_obs_emb = nn.Linear(cond_dim, n_emb)
 
         self.cond_pos_emb = None
         self.encoder = None
@@ -155,9 +169,21 @@ class TransformerForDiffusion(nn.Module):
         self.time_as_cond = time_as_cond
         self.obs_as_cond = obs_as_cond
         self.encoder_only = encoder_only
+        self.goal_dim = goal_dim
+        self.cond_dim = cond_dim
 
         self.apply(self._init_weights)
         logger.info("TransformerForDiffusion parameters: %e", sum(p.numel() for p in self.parameters()))
+
+    @staticmethod
+    def _make_cond_mlp(in_dim: int, out_dim: int) -> nn.Sequential:
+        """Two-layer MLP encoder used by DiffuseLoco for I/O and goal tokens."""
+
+        return nn.Sequential(
+            nn.Linear(in_dim, out_dim),
+            nn.Mish(),
+            nn.Linear(out_dim, out_dim),
+        )
 
     def _init_weights(self, module: nn.Module) -> None:
         ignore_types = (
@@ -191,6 +217,13 @@ class TransformerForDiffusion(nn.Module):
             torch.nn.init.normal_(module.pos_emb, mean=0.0, std=0.02)
             if module.cond_pos_emb is not None:
                 torch.nn.init.normal_(module.cond_pos_emb, mean=0.0, std=0.02)
+            for emb in (module.cond_obs_emb, module.cond_io_emb, module.cond_goal_emb):
+                if isinstance(emb, nn.Sequential):
+                    for sub in emb:
+                        if isinstance(sub, nn.Linear):
+                            torch.nn.init.normal_(sub.weight, mean=0.0, std=0.02)
+                            if sub.bias is not None:
+                                torch.nn.init.zeros_(sub.bias)
         elif isinstance(module, ignore_types):
             pass
         else:
@@ -241,6 +274,7 @@ class TransformerForDiffusion(nn.Module):
         sample: torch.Tensor,
         timestep: Union[torch.Tensor, float, int],
         cond: torch.Tensor | None = None,
+        goal_cond: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
         timesteps = timestep
@@ -263,7 +297,14 @@ class TransformerForDiffusion(nn.Module):
             if self.obs_as_cond:
                 if cond is None:
                     raise ValueError("cond must be provided when obs_as_cond=True.")
-                cond_embeddings = torch.cat([cond_embeddings, self.cond_obs_emb(cond)], dim=1)
+                if self.separate_goal_conditioning:
+                    if goal_cond is None:
+                        raise ValueError("goal_cond must be provided when separate_goal_conditioning=True.")
+                    io_emb = self.cond_io_emb(cond)
+                    goal_emb = self.cond_goal_emb(goal_cond)
+                    cond_embeddings = torch.cat([cond_embeddings, io_emb, goal_emb], dim=1)
+                else:
+                    cond_embeddings = torch.cat([cond_embeddings, self.cond_obs_emb(cond)], dim=1)
             cond_pos = self.cond_pos_emb[:, : cond_embeddings.shape[1], :]
             memory = self.encoder(self.drop(cond_embeddings + cond_pos))
 

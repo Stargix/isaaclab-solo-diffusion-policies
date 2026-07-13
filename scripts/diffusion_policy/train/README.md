@@ -2,10 +2,10 @@
 
 This folder contains the Solo12-specific training pipeline for the Diffusion Policy:
 
-- `dataset.py`: HDF5 loader with current-inclusive hindsight relabeling.
+- `dataset.py`: HDF5 loader with **delayed** hindsight relabeling (`proprio_hist`, `action_hist`, `goal_hist`).
 - `symmetry.py`: optional Solo12 data augmentation using existing RL symmetry conventions.
 - `normalization.py`: z-score stats for proprioception/goals and min-max action scaling to `[-1, 1]`.
-- `train.py`: DDPM training loop with `Solo12DiffusionPolicy`, `diffusers.DDPMScheduler`, EMA warmup, cosine LR and optional W&B.
+- `train.py`: DDPM training loop with `Solo12DiffusionPolicy`, `diffusers.DDPMScheduler`, EMA warmup, linear LR warmup (10k steps) + cosine decay, and optional W&B.
 - `../model/solo12_diffusion_policy.py`: policy wrapper with train loss + CFG inference loop.
 - `../model/transformer_for_diffusion.py`: vendored `TransformerForDiffusion` from Diffusion Policy / DiffuseLoco.
 - `../model/ema_model.py`: vendored EMA warmup from Diffusion Policy.
@@ -58,4 +58,71 @@ python scripts/diffusion_policy/train/train.py \
 ```
 
 `--symmetry_mode quadruped` matches the Solo12 RL symmetry augmentation in this repository: identity, left-right, front-back, and 180-degree rotation. Use `--symmetry_mode mirror` as a conservative ablation if front-back augmentation hurts forward-transition metrics.
+
+## Hyperparameters
+
+Defaults live in `config.py` (`ModelConfig`, `DiffusionConfig`, etc.). The CLI reads those defaults directly; there are no string presets in code.
+
+Optional JSON profiles are in `configs/` and can be passed with `--config`. Any CLI flag still overrides the JSON value when both are provided.
+
+| File | Model | Diffusion steps | DiffuseLoco reference |
+|------|-------|-----------------|----------------------|
+| `configs/compact_k10.json` | 128-dim, 4 layers, 4 heads | 10 | `cyber_diffusion_policy_medium_model.yaml` |
+| `configs/large_k10.json` | 256-dim, 6 layers, 8 heads | 10 | `cyber_diffusion_policy_n=8.yaml` (5-skill deploy) |
+
+DiffuseLoco always trains and deploys with **K=10** denoising steps, not 100. Your existing `walk_crouch_diffusion/best.pt` used K=100 (Diffusion Policy default), which is why inference was slow.
+
+## Dataset merge (walk + crouch)
+
+`merge_datasets.py` remaps `skill_idx` correctly and now **shuffles demos by default** so the HDF5 is not walk-then-crouch blocks. Rebuild before training:
+
+```bash
+python scripts/diffusion_policy/data/merge_datasets.py \
+    --inputs scripts/diffusion_policy/data/datasets/walk_raw.hdf5 \
+             scripts/diffusion_policy/data/datasets/crouch_raw.hdf5 \
+    --output scripts/diffusion_policy/data/datasets/walk_crouch_combined.hdf5
+```
+
+Current `walk_crouch_combined.hdf5` stats (if not rebuilt yet):
+
+- 2054 demos, **50/50** walk/crouch by steps
+- ~19.6M hindsight samples (~78M with quadruped symmetry x4)
+- ~306k batches/epoch at `batch_size=256` — you will **not** finish one epoch; that is normal
+- `train.py` uses `shuffle=True`, so each batch is already random 50/50 even with the old sequential file
+
+## Walk + crouch (large model)
+
+```bash
+python scripts/diffusion_policy/train/train.py \
+    --datasets scripts/diffusion_policy/data/datasets/walk_crouch_combined.hdf5 \
+    --output_dir scripts/diffusion_policy/runs/walk_crouch_diffusion \
+    --config scripts/diffusion_policy/train/configs/large_k10.json \
+    --symmetry_mode quadruped \
+    --epochs 200
+```
+
+For lower inference latency, retrain with the compact profile:
+
+```bash
+python scripts/diffusion_policy/train/train.py \
+    --datasets scripts/diffusion_policy/data/datasets/walk_crouch_combined.hdf5 \
+    --output_dir scripts/diffusion_policy/runs/compact_k10 \
+    --config scripts/diffusion_policy/train/configs/compact_k10.json \
+    --symmetry_mode quadruped \
+    --epochs 200
+```
+
+Evaluate a trained checkpoint (use `exec_horizon 4` + `num_inference_steps 4` on this GPU — see latency table in `context/diffuseloco_audit_and_fixes_2026-07-11.md`):
+
+```bash
+python scripts/diffusion_policy/play_policy.py \
+    --task solo12-v0 \
+    --checkpoint scripts/diffusion_policy/runs/compact_k10/best.pt \
+    --num_inference_steps 4 \
+    --exec_horizon 4 \
+    --guidance_scale 1.0 \
+    --no_real_time_viewer
+```
+
+`--num_inference_steps` is optional at deploy time: it defaults to the value stored in the checkpoint.
 

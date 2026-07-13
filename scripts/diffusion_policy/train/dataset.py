@@ -12,23 +12,29 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from .geometry import cumulative_xy_lengths, local_waypoints_by_path_distance, relative_yaw, transform_point_to_local, transform_point_to_yaw_frame
-
-from .normalization import NormalizerStats, build_stats, normalize_minmax, normalize_zscore
+from .geometry import cumulative_xy_lengths
+from .goal_builder import build_goal_vector
+from .normalization import NormalizerStats, build_stats
+from .obs_utils import ACTION_HIST_DIM, GOAL_DIM, PROPRIO_DIM, delayed_io_windows, read_proprio_vector
 from .symmetry import apply_symmetry, symmetry_count
 
 os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
 EXPECTED_CONVENTION_PREFIX = "aligned: obs[t] is the proprioceptive state BEFORE executing actions[t]"
-OBS_KEYS = ("joint_pos", "joint_vel", "base_ang_vel", "projected_gravity", "last_action", "root_pos_w", "root_quat_w")
-OBS_DIM = 42
-GOAL_DIM = 11
-ACTION_DIM = 12
+HDF5_OBS_KEYS = (
+    "joint_pos",
+    "joint_vel",
+    "base_ang_vel",
+    "projected_gravity",
+    "last_action",
+    "root_pos_w",
+    "root_quat_w",
+)
 
 
 @dataclass(frozen=True)
 class DemoSequence:
-    obs: np.ndarray
+    proprio: np.ndarray
     actions: np.ndarray
     root_pos_w: np.ndarray
     root_quat_w: np.ndarray
@@ -56,17 +62,6 @@ def _demo_sort_key(name: str) -> int:
         return 0
 
 
-def _read_obs_vector(obs_group: h5py.Group) -> np.ndarray:
-    pieces = [
-        obs_group["joint_pos"][:],
-        obs_group["joint_vel"][:],
-        obs_group["base_ang_vel"][:],
-        obs_group["projected_gravity"][:],
-        obs_group["last_action"][:],
-    ]
-    return np.concatenate(pieces, axis=-1).astype(np.float32)
-
-
 def _validate_hdf5(path: str) -> None:
     with h5py.File(path, "r") as f:
         if "data" not in f:
@@ -87,10 +82,10 @@ def _validate_hdf5(path: str) -> None:
             if "obs" not in demo:
                 raise KeyError(f"{path}/{demo_name}: missing 'obs' group.")
             obs = demo["obs"]
-            missing = [key for key in OBS_KEYS if key not in obs]
+            missing = [key for key in HDF5_OBS_KEYS if key not in obs]
             if missing:
                 raise KeyError(f"{path}/{demo_name}: missing obs keys {missing}.")
-            for key in ("actions", "dones", "skill_idx"):
+            for key in ("actions", "dones"):
                 if key not in demo:
                     raise KeyError(f"{path}/{demo_name}: missing '{key}'.")
             length = demo["actions"].shape[0]
@@ -100,12 +95,13 @@ def _validate_hdf5(path: str) -> None:
 
 
 class LocomotionHindsightDataset(Dataset):
-    """Load merged HDF5 demonstrations and produce normalized DDPM samples.
+    """Load merged HDF5 demonstrations and produce delayed DDPM samples.
 
-    The history is current-inclusive: sample ``t`` returns observations
-    ``[t - history + 1, ..., t]`` and actions ``[t, ..., t + action_horizon - 1]``.
-    This matches the aligned HDF5 convention where ``obs[t]`` is the state before
-    executing ``actions[t]``.
+    Conditioning follows DiffuseLoco delayed inputs at anchor ``step``:
+    - proprio history: ``s_{step-history:step}`` (ends at ``step-1``)
+    - action history: ``a_{step-history-1:step-1}`` (ends at ``step-2``)
+    - goal history aligned with the proprio window
+    - action targets: ``a_{step:step+action_horizon}``
     """
 
     def __init__(
@@ -114,9 +110,10 @@ class LocomotionHindsightDataset(Dataset):
         *,
         history: int = 8,
         action_horizon: int = 4,
-        min_segment_steps: int = 50,
-        max_segment_steps: int = 150,
-        segment_stride: int = 10,
+        min_segment_steps: int = 100,
+        max_segment_steps: int = 100,
+        segment_stride: int = 1,
+        step_stride: int = 1,
         dt: float = 0.02,
         waypoint_distances: tuple[float, float, float] = (0.4, 0.8, 1.2),
         v_req_clip: float = 2.0,
@@ -138,6 +135,7 @@ class LocomotionHindsightDataset(Dataset):
         self.min_segment_steps = min_segment_steps
         self.max_segment_steps = max_segment_steps
         self.segment_stride = segment_stride
+        self.step_stride = step_stride
         self.dt = dt
         self.waypoint_distances = waypoint_distances
         self.v_req_clip = v_req_clip
@@ -167,7 +165,7 @@ class LocomotionHindsightDataset(Dataset):
             for demo_name in sorted(data.keys(), key=_demo_sort_key):
                 demo = data[demo_name]
                 obs_group = demo["obs"]
-                obs = _read_obs_vector(obs_group)
+                proprio = read_proprio_vector(obs_group)
                 actions = demo["actions"][:].astype(np.float32)
                 root_pos_w = obs_group["root_pos_w"][:].astype(np.float32)
                 root_quat_w = obs_group["root_quat_w"][:].astype(np.float32)
@@ -175,7 +173,7 @@ class LocomotionHindsightDataset(Dataset):
                 demo_idx = len(self.demos)
                 self.demos.append(
                     DemoSequence(
-                        obs=obs,
+                        proprio=proprio,
                         actions=actions,
                         root_pos_w=root_pos_w,
                         root_quat_w=root_quat_w,
@@ -186,67 +184,51 @@ class LocomotionHindsightDataset(Dataset):
                 self._index_demo(demo_idx, len(actions))
 
     def _index_demo(self, demo_idx: int, length: int) -> None:
-        first_step = self.history - 1
+        first_step = self.history + 1
         last_action_start = length - self.action_horizon
-        for step in range(first_step, last_action_start + 1):
+        for step in range(first_step, last_action_start + 1, self.step_stride):
             for segment_steps in range(self.min_segment_steps, self.max_segment_steps + 1, self.segment_stride):
                 end_step = step + segment_steps
                 if end_step < length:
                     self.samples.append(HindsightSample(demo_idx, step, end_step))
 
     def _goal_for_step(self, demo: DemoSequence, step: int, end_step: int) -> np.ndarray:
-        pos = demo.root_pos_w
-        quat = demo.root_quat_w
-        origin_w = pos[step]
-        quat_step = quat[step]
-        target_w = pos[end_step]
-
-        waypoints = local_waypoints_by_path_distance(
-            pos,
-            step,
+        return build_goal_vector(
+            demo.root_pos_w,
             demo.cumulative_xy,
-            origin_w,
-            quat_step,
-            distances=self.waypoint_distances,
-            end_idx=end_step,
-        )
-        target_rel = transform_point_to_yaw_frame(target_w, origin_w, quat_step)
-
-        dyaw = relative_yaw(quat_step, quat[end_step])
-        path_length_remaining = demo.cumulative_xy[end_step] - demo.cumulative_xy[step]
-        time_remaining = max((end_step - step) * self.dt, self.dt)
-        v_req = np.clip(path_length_remaining / (time_remaining + 1.0e-3), 0.0, self.v_req_clip)
-
-        return np.asarray(
-            [
-                *waypoints.tolist(),
-                float(target_rel[0]),
-                float(target_rel[1]),
-                float(target_rel[2]),
-                float(dyaw),
-                float(v_req),
-            ],
-            dtype=np.float32,
+            step,
+            end_step,
+            demo.root_pos_w[step],
+            demo.root_quat_w[step],
+            quat_w=demo.root_quat_w,
+            dt=self.dt,
+            waypoint_distances=self.waypoint_distances,
+            v_req_clip=self.v_req_clip,
         )
 
     def _goal_history(self, sample: HindsightSample) -> np.ndarray:
         demo = self.demos[sample.demo_idx]
-        start = sample.step - self.history + 1
-        return np.stack([self._goal_for_step(demo, step, sample.end_step) for step in range(start, sample.step + 1)])
+        start = sample.step - self.history
+        end = sample.step
+        return np.stack([self._goal_for_step(demo, step, sample.end_step) for step in range(start, end)])
 
-    def _raw_sample(self, sample: HindsightSample) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _raw_sample(
+        self,
+        sample: HindsightSample,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         demo = self.demos[sample.demo_idx]
-        obs_hist = demo.obs[sample.step - self.history + 1 : sample.step + 1]
+        proprio_hist, action_hist = delayed_io_windows(demo.proprio, demo.actions, sample.step, self.history)
         goal_hist = self._goal_history(sample)
         actions = demo.actions[sample.step : sample.step + self.action_horizon]
         return (
-            torch.from_numpy(obs_hist.astype(np.float32)),
+            torch.from_numpy(proprio_hist.astype(np.float32)),
+            torch.from_numpy(action_hist.astype(np.float32)),
             torch.from_numpy(goal_hist.astype(np.float32)),
             torch.from_numpy(actions.astype(np.float32)),
         )
 
     def _build_normalizer_stats(self, max_stats_samples: int) -> NormalizerStats:
-        obs_values = np.concatenate([demo.obs for demo in self.demos], axis=0)
+        proprio_values = np.concatenate([demo.proprio for demo in self.demos], axis=0)
         action_values = np.concatenate([demo.actions for demo in self.demos], axis=0)
 
         rng = np.random.default_rng(0)
@@ -255,28 +237,39 @@ class LocomotionHindsightDataset(Dataset):
         goal_values = np.concatenate([self._goal_history(self.samples[int(i)]) for i in sample_indices], axis=0)
 
         if self._symmetry_count > 1:
-            obs_values, goal_values, action_values = self._augment_stats_arrays(obs_values, goal_values, action_values)
+            proprio_values, action_values, goal_values = self._augment_stats_arrays(
+                proprio_values,
+                action_values,
+                goal_values,
+            )
 
-        return build_stats(obs_values, goal_values, action_values)
+        return build_stats(proprio_values, goal_values, action_values)
 
     def _augment_stats_arrays(
         self,
-        obs_values: np.ndarray,
-        goal_values: np.ndarray,
+        proprio_values: np.ndarray,
         action_values: np.ndarray,
+        goal_values: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        obs_t = torch.from_numpy(obs_values)
+        proprio_t = torch.from_numpy(proprio_values)
+        action_t = torch.from_numpy(action_values)
         goal_t = torch.from_numpy(goal_values)
-        actions_t = torch.from_numpy(action_values)
-        obs_aug = []
-        goal_aug = []
+        proprio_aug = []
         action_aug = []
+        goal_aug = []
         for idx in range(self._symmetry_count):
-            obs_i, goal_i, action_i = apply_symmetry(obs_t, goal_t, actions_t, index=idx, mode=self.symmetry_mode)
-            obs_aug.append(obs_i.numpy())
-            goal_aug.append(goal_i.numpy())
+            proprio_i, action_i, goal_i, _ = apply_symmetry(
+                proprio_t,
+                action_t,
+                goal_t,
+                action_t,
+                index=idx,
+                mode=self.symmetry_mode,
+            )
+            proprio_aug.append(proprio_i.numpy())
             action_aug.append(action_i.numpy())
-        return np.concatenate(obs_aug), np.concatenate(goal_aug), np.concatenate(action_aug)
+            goal_aug.append(goal_i.numpy())
+        return np.concatenate(proprio_aug), np.concatenate(action_aug), np.concatenate(goal_aug)
 
     def get_normalizer_stats(self) -> NormalizerStats:
         return self.normalizer_stats
@@ -287,9 +280,10 @@ class LocomotionHindsightDataset(Dataset):
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         sample_index = index // self._symmetry_count
         symmetry_index = index % self._symmetry_count
-        obs_hist, goal_hist, actions = self._raw_sample(self.samples[sample_index])
-        obs_hist, goal_hist, actions = apply_symmetry(
-            obs_hist,
+        proprio_hist, action_hist, goal_hist, actions = self._raw_sample(self.samples[sample_index])
+        proprio_hist, action_hist, goal_hist, actions = apply_symmetry(
+            proprio_hist,
+            action_hist,
             goal_hist,
             actions,
             index=symmetry_index,
@@ -297,8 +291,8 @@ class LocomotionHindsightDataset(Dataset):
         )
 
         return {
-            "obs_hist": obs_hist,
+            "proprio_hist": proprio_hist,
+            "action_hist": action_hist,
             "goal_hist": goal_hist,
             "actions": actions,
         }
-

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import sys
 import time
@@ -29,54 +30,108 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from model.ema_model import EMAModel
     from model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
-    from train.config import DatasetConfig, DiffusionConfig, ModelConfig, OptimConfig, TrainConfig
+    from train.config import (
+        DATASET_DEFAULTS,
+        DIFFUSION_DEFAULTS,
+        MODEL_DEFAULTS,
+        OPTIM_DEFAULTS,
+        DatasetConfig,
+        DiffusionConfig,
+        ModelConfig,
+        OptimConfig,
+        TrainConfig,
+        load_training_config_overrides,
+    )
     from train.dataset import LocomotionHindsightDataset
 else:  # pragma: no cover
     from ..model.ema_model import EMAModel
     from ..model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
-    from .config import DatasetConfig, DiffusionConfig, ModelConfig, OptimConfig, TrainConfig
+    from .config import (
+        DATASET_DEFAULTS,
+        DIFFUSION_DEFAULTS,
+        MODEL_DEFAULTS,
+        OPTIM_DEFAULTS,
+        DatasetConfig,
+        DiffusionConfig,
+        ModelConfig,
+        OptimConfig,
+        TrainConfig,
+        load_training_config_overrides,
+    )
     from .dataset import LocomotionHindsightDataset
 
 
+def _find_cli_value(argv: list[str], flag: str) -> str | None:
+    for index, arg in enumerate(argv):
+        if arg == flag and index + 1 < len(argv):
+            return argv[index + 1]
+    return None
+
+
 def parse_args() -> argparse.Namespace:
+    config_path = _find_cli_value(sys.argv[1:], "--config")
+    config_defaults = load_training_config_overrides(config_path) if config_path else {}
+
     parser = argparse.ArgumentParser(description="Train Solo12 Diffusion Policy.")
+    parser.add_argument("--config", type=str, default=None, help="Optional JSON file with hyperparameter overrides.")
     parser.add_argument("--datasets", nargs="+", required=True, help="Merged HDF5 files to train on.")
     parser.add_argument("--output_dir", required=True, help="Directory for checkpoints and config.")
     parser.add_argument("--run_name", default="solo12_diffusion_policy", help="Run name for logs.")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
 
-    parser.add_argument("--history", type=int, default=8)
-    parser.add_argument("--action_horizon", type=int, default=4)
-    parser.add_argument("--min_segment_steps", type=int, default=50)
-    parser.add_argument("--max_segment_steps", type=int, default=150)
-    parser.add_argument("--segment_stride", type=int, default=10)
-    parser.add_argument("--v_req_clip", type=float, default=2.0)
-    parser.add_argument("--symmetry_mode", choices=["none", "mirror", "quadruped"], default="quadruped")
-    parser.add_argument("--val_fraction", type=float, default=0.05)
+    parser.add_argument("--history", type=int, default=DATASET_DEFAULTS.history)
+    parser.add_argument("--action_horizon", type=int, default=DATASET_DEFAULTS.action_horizon)
+    parser.add_argument("--min_segment_steps", type=int, default=DATASET_DEFAULTS.min_segment_steps)
+    parser.add_argument("--max_segment_steps", type=int, default=DATASET_DEFAULTS.max_segment_steps)
+    parser.add_argument("--segment_stride", type=int, default=DATASET_DEFAULTS.segment_stride)
+    parser.add_argument("--step_stride", type=int, default=DATASET_DEFAULTS.step_stride, help="Temporal stride to sub-sample step windows.")
+    parser.add_argument("--v_req_clip", type=float, default=DATASET_DEFAULTS.v_req_clip)
+    parser.add_argument("--symmetry_mode", choices=["none", "mirror", "quadruped"], default=DATASET_DEFAULTS.symmetry_mode)
+    parser.add_argument("--val_fraction", type=float, default=DATASET_DEFAULTS.val_fraction)
 
-    parser.add_argument("--d_model", type=int, default=256)
-    parser.add_argument("--nhead", type=int, default=8)
-    parser.add_argument("--num_layers", type=int, default=6)
-    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--d_model", type=int, default=MODEL_DEFAULTS.d_model)
+    parser.add_argument("--nhead", type=int, default=MODEL_DEFAULTS.nhead)
+    parser.add_argument("--num_layers", type=int, default=MODEL_DEFAULTS.num_layers)
+    parser.add_argument("--p_drop_emb", type=float, default=MODEL_DEFAULTS.p_drop_emb)
+    parser.add_argument("--p_drop_attn", type=float, default=MODEL_DEFAULTS.p_drop_attn)
 
-    parser.add_argument("--diffusion_steps", type=int, default=100)
-    parser.add_argument("--beta_schedule", default="squaredcos_cap_v2")
-    parser.add_argument("--cfg_dropout_prob", type=float, default=0.2)
-    parser.add_argument("--batch_size", type=int, default=256)
-    parser.add_argument("--epochs", type=int, default=200)
-    parser.add_argument("--lr", type=float, default=1.0e-4)
-    parser.add_argument("--weight_decay", type=float, default=1.0e-6)
-    parser.add_argument("--grad_clip_norm", type=float, default=1.0)
-    parser.add_argument("--ema_decay", type=float, default=0.9999)
-    parser.add_argument("--num_workers", type=int, default=0)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--save_every", type=int, default=10)
-    parser.add_argument("--log_every", type=int, default=50)
+    parser.add_argument("--diffusion_steps", type=int, default=DIFFUSION_DEFAULTS.num_train_timesteps)
+    parser.add_argument(
+        "--num_inference_steps",
+        type=int,
+        default=None,
+        help="Denoising steps at deploy time; defaults to diffusion_steps.",
+    )
+    parser.add_argument("--beta_schedule", default=DIFFUSION_DEFAULTS.beta_schedule)
+    parser.add_argument("--cfg_dropout_prob", type=float, default=DIFFUSION_DEFAULTS.cfg_dropout_prob)
+    parser.add_argument("--batch_size", type=int, default=OPTIM_DEFAULTS.batch_size)
+    parser.add_argument("--epochs", type=int, default=OPTIM_DEFAULTS.epochs)
+    parser.add_argument("--lr", type=float, default=OPTIM_DEFAULTS.learning_rate)
+    parser.add_argument("--weight_decay", type=float, default=OPTIM_DEFAULTS.weight_decay)
+    parser.add_argument("--grad_clip_norm", type=float, default=OPTIM_DEFAULTS.grad_clip_norm)
+    parser.add_argument("--ema_decay", type=float, default=OPTIM_DEFAULTS.ema_decay)
+    parser.add_argument(
+        "--lr_warmup_steps",
+        type=int,
+        default=OPTIM_DEFAULTS.lr_warmup_steps,
+        help="Linear LR warmup steps before cosine decay (DiffuseLoco default: 10000).",
+    )
+    parser.add_argument("--num_workers", type=int, default=OPTIM_DEFAULTS.num_workers)
+    parser.add_argument("--seed", type=int, default=OPTIM_DEFAULTS.seed)
+    parser.add_argument("--save_every", type=int, default=OPTIM_DEFAULTS.save_every)
+    parser.add_argument("--log_every", type=int, default=OPTIM_DEFAULTS.log_every)
     parser.add_argument("--no_amp", action="store_true", help="Disable CUDA mixed precision.")
 
     parser.add_argument("--wandb_project", default=None)
     parser.add_argument("--wandb_entity", default=None)
-    return parser.parse_args()
+
+    if config_defaults:
+        parser.set_defaults(**config_defaults)
+
+    args = parser.parse_args()
+    if args.num_inference_steps is None:
+        args.num_inference_steps = args.diffusion_steps
+    return args
 
 
 def set_seed(seed: int) -> None:
@@ -96,6 +151,7 @@ def make_config(args: argparse.Namespace) -> TrainConfig:
             min_segment_steps=args.min_segment_steps,
             max_segment_steps=args.max_segment_steps,
             segment_stride=args.segment_stride,
+            step_stride=args.step_stride,
             v_req_clip=args.v_req_clip,
             symmetry_mode=args.symmetry_mode,
             val_fraction=args.val_fraction,
@@ -105,10 +161,12 @@ def make_config(args: argparse.Namespace) -> TrainConfig:
             nhead=args.nhead,
             num_layers=args.num_layers,
             dim_feedforward=4 * args.d_model,
-            dropout=args.dropout,
+            p_drop_emb=args.p_drop_emb,
+            p_drop_attn=args.p_drop_attn,
         ),
         diffusion=DiffusionConfig(
             num_train_timesteps=args.diffusion_steps,
+            num_inference_steps=args.num_inference_steps,
             beta_schedule=args.beta_schedule,
             cfg_dropout_prob=args.cfg_dropout_prob,
         ),
@@ -119,6 +177,7 @@ def make_config(args: argparse.Namespace) -> TrainConfig:
             weight_decay=args.weight_decay,
             grad_clip_norm=args.grad_clip_norm,
             ema_decay=args.ema_decay,
+            lr_warmup_steps=args.lr_warmup_steps,
             num_workers=args.num_workers,
             seed=args.seed,
             mixed_precision=not args.no_amp,
@@ -146,14 +205,40 @@ def maybe_init_wandb(cfg: TrainConfig):
     return wandb
 
 
+def build_lr_scheduler(
+    optimizer: torch.optim.Optimizer,
+    *,
+    warmup_steps: int,
+    total_steps: int,
+) -> torch.optim.lr_scheduler.LambdaLR:
+    """Linear warmup followed by cosine decay (DiffuseLoco-style, step-based)."""
+
+    warmup_steps = max(0, min(int(warmup_steps), max(total_steps - 1, 0)))
+    cosine_steps = max(1, total_steps - warmup_steps)
+
+    def lr_lambda(step: int) -> float:
+        if warmup_steps > 0 and step < warmup_steps:
+            return float(step + 1) / float(warmup_steps)
+        progress = float(step - warmup_steps) / float(cosine_steps)
+        progress = min(max(progress, 0.0), 1.0)
+        return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
 def build_policy(cfg: TrainConfig) -> Solo12DiffusionPolicy:
     policy_cfg = Solo12DiffusionPolicyConfig(
+        proprio_dim=cfg.model.proprio_dim,
+        action_hist_dim=cfg.model.action_hist_dim,
+        goal_dim=cfg.model.goal_dim,
         history=cfg.dataset.history,
         action_horizon=cfg.dataset.action_horizon,
         d_model=cfg.model.d_model,
         nhead=cfg.model.nhead,
         num_layers=cfg.model.num_layers,
-        dropout=cfg.model.dropout,
+        p_drop_emb=cfg.model.p_drop_emb,
+        p_drop_attn=cfg.model.p_drop_attn,
+        separate_goal_conditioning=cfg.model.separate_goal_conditioning,
         num_train_timesteps=cfg.diffusion.num_train_timesteps,
         beta_start=cfg.diffusion.beta_start,
         beta_end=cfg.diffusion.beta_end,
@@ -162,6 +247,7 @@ def build_policy(cfg: TrainConfig) -> Solo12DiffusionPolicy:
         variance_type=cfg.diffusion.variance_type,
         clip_sample=cfg.diffusion.clip_sample,
         cfg_dropout_prob=cfg.diffusion.cfg_dropout_prob,
+        num_inference_steps=cfg.diffusion.num_inference_steps or cfg.diffusion.num_train_timesteps,
     )
     return Solo12DiffusionPolicy(policy_cfg)
 
@@ -220,6 +306,12 @@ def main() -> None:
     with (output_dir / "config.json").open("w", encoding="utf-8") as f:
         json.dump(cfg.to_dict(), f, indent=2)
 
+    print(
+        f"[INFO] d_model={cfg.model.d_model} layers={cfg.model.num_layers} "
+        f"nhead={cfg.model.nhead} K_train={cfg.diffusion.num_train_timesteps} "
+        f"K_infer={cfg.diffusion.num_inference_steps}"
+    )
+
     device = torch.device(args.device)
     dataset = LocomotionHindsightDataset(
         cfg.dataset.hdf5_paths,
@@ -228,6 +320,7 @@ def main() -> None:
         min_segment_steps=cfg.dataset.min_segment_steps,
         max_segment_steps=cfg.dataset.max_segment_steps,
         segment_stride=cfg.dataset.segment_stride,
+        step_stride=cfg.dataset.step_stride,
         dt=cfg.dataset.dt,
         v_req_clip=cfg.dataset.v_req_clip,
         symmetry_mode=cfg.dataset.symmetry_mode,
@@ -267,13 +360,20 @@ def main() -> None:
         learning_rate=cfg.optim.learning_rate,
         weight_decay=cfg.optim.weight_decay,
     )
-    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.optim.epochs)
+    steps_per_epoch = len(train_loader)
+    total_steps = steps_per_epoch * cfg.optim.epochs
+    lr_scheduler = build_lr_scheduler(
+        optimizer,
+        warmup_steps=cfg.optim.lr_warmup_steps,
+        total_steps=total_steps,
+    )
     scaler = torch.amp.GradScaler("cuda", enabled=cfg.optim.mixed_precision and device.type == "cuda")
     wandb = maybe_init_wandb(cfg)
 
     print(
         f"[INFO] demos={len(dataset.demos)} samples={len(dataset)} train={train_size} val={val_size} "
-        f"symmetry={cfg.dataset.symmetry_mode} scheduler=diffusers device={device}"
+        f"symmetry={cfg.dataset.symmetry_mode} steps/epoch={steps_per_epoch} total_steps={total_steps} "
+        f"lr_warmup={cfg.optim.lr_warmup_steps} device={device}"
     )
 
     global_step = 0
@@ -292,6 +392,7 @@ def main() -> None:
             torch.nn.utils.clip_grad_norm_(policy.parameters(), cfg.optim.grad_clip_norm)
             scaler.step(optimizer)
             scaler.update()
+            lr_scheduler.step()
             ema.step(policy)
 
             global_step += 1
@@ -342,7 +443,6 @@ def main() -> None:
                         val_loss=val_loss,
                     )
 
-        lr_scheduler.step()
         ema.averaged_model.set_normalizer_stats(normalizer_stats)
         val_loss = evaluate(ema.averaged_model, val_loader, device, max_batches=100)
         train_loss = float(np.mean(train_losses))
