@@ -85,7 +85,7 @@ def _validate_hdf5(path: str) -> None:
             missing = [key for key in HDF5_OBS_KEYS if key not in obs]
             if missing:
                 raise KeyError(f"{path}/{demo_name}: missing obs keys {missing}.")
-            for key in ("actions", "dones", "skill_idx"):
+            for key in ("actions", "dones"):
                 if key not in demo:
                     raise KeyError(f"{path}/{demo_name}: missing '{key}'.")
             length = demo["actions"].shape[0]

@@ -94,7 +94,11 @@ def build_stats(
     goal_values: np.ndarray,
     action_values: np.ndarray,
 ) -> NormalizerStats:
-    action_min, action_max = _safe_range(action_values.min(axis=0), action_values.max(axis=0))
+    # Use 1st and 99th percentiles to avoid extreme outliers distorting the MinMax scale
+    q_low = np.percentile(action_values, 1, axis=0)
+    q_high = np.percentile(action_values, 99, axis=0)
+    clipped_actions = np.clip(action_values, q_low, q_high)
+    action_min, action_max = _safe_range(clipped_actions.min(axis=0), clipped_actions.max(axis=0))
     return NormalizerStats(
         proprio=ZScoreStats(proprio_values.mean(axis=0).astype(np.float32), _safe_std(proprio_values.std(axis=0))),
         goal=ZScoreStats(goal_values.mean(axis=0).astype(np.float32), _safe_std(goal_values.std(axis=0))),

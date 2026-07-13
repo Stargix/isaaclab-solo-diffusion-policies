@@ -45,6 +45,7 @@ parser.add_argument("--exec_horizon", type=int, default=1, help="RHC: execute N 
 parser.add_argument("--real_time_viewer", action="store_true", default=True, help="Sleep to match sim dt (GUI).")
 parser.add_argument("--no_real_time_viewer", action="store_false", dest="real_time_viewer")
 parser.add_argument("--compile_policy", action="store_true", help="Try torch.compile on the policy.")
+parser.add_argument("--force_walk_goal", action="store_true", help="Override conditioning goals to force walk commands.")
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
@@ -212,6 +213,44 @@ def run_warmup(
         prev_applied_action = stand_action.clone()
 
 
+def reset_env_history(
+    env_idx: int,
+    proprio_buffer: torch.Tensor,
+    action_buffer: torch.Tensor,
+    goal_buffer: torch.Tensor,
+    raw_env: Any,
+    joint_ids: slice,
+    path_w: np.ndarray,
+    yaws_w: np.ndarray,
+    cumulative_lengths: np.ndarray,
+    path_progress: np.ndarray,
+    *,
+    goal_horizon_steps: int,
+    dt: float,
+    speed: float,
+    v_req_clip: float,
+    device: torch.device,
+) -> None:
+    """Initialize history buffers for a single environment after reset without stepping the physics simulator."""
+    proprio_value = get_proprio_30d(raw_env, joint_ids)[env_idx]
+    goal_value = compute_goals(
+        raw_env,
+        path_w,
+        yaws_w,
+        cumulative_lengths,
+        path_progress,
+        goal_horizon_steps=goal_horizon_steps,
+        dt=dt,
+        speed=speed,
+        v_req_clip=v_req_clip,
+        device=device,
+    )[env_idx]
+
+    proprio_buffer[env_idx, :, :] = proprio_value.unsqueeze(0)
+    action_buffer[env_idx, :, :] = 0.0
+    goal_buffer[env_idx, :, :] = goal_value.unsqueeze(0)
+
+
 def slide_buffer(buffer: torch.Tensor, new_value: torch.Tensor) -> None:
     buffer[:, :-1] = buffer[:, 1:].clone()
     buffer[:, -1] = new_value
@@ -251,7 +290,20 @@ def compute_goals(
         path_progress=path_progress,
         v_req_clip=v_req_clip,
     )
-    return torch.from_numpy(goals).to(device)
+    goals_tensor = torch.from_numpy(goals).to(device)
+    if getattr(args_cli, "force_walk_goal", False):
+        goals_tensor[:, 0] = 0.4
+        goals_tensor[:, 1] = 0.0
+        goals_tensor[:, 2] = 0.8
+        goals_tensor[:, 3] = 0.0
+        goals_tensor[:, 4] = 1.2
+        goals_tensor[:, 5] = 0.0
+        goals_tensor[:, 6] = 0.8
+        goals_tensor[:, 7] = 0.0
+        goals_tensor[:, 8] = 0.0
+        goals_tensor[:, 9] = 0.0
+        goals_tensor[:, 10] = 1.0
+    return goals_tensor
 
 
 def _model_cfg_from_checkpoint(config_dict: dict) -> Solo12DiffusionPolicyConfig:
@@ -291,6 +343,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     checkpoint = load_training_checkpoint(checkpoint_path, device)
     config_dict = checkpoint["config"]
     normalizer_stats = NormalizerStats.from_dict(checkpoint["normalizer_stats"])
+    # Clamp goal std to a minimum value of 0.1 to prevent tiny divisions from amplifying noise
+    normalizer_stats.goal.std = np.maximum(normalizer_stats.goal.std, 0.1)
+    
     infer_steps = resolve_inference_steps(args_cli.num_inference_steps, config_dict["diffusion"])
     policy_cfg = _model_cfg_from_checkpoint(config_dict)
     policy_cfg.num_inference_steps = infer_steps
@@ -298,7 +353,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
     policy = Solo12DiffusionPolicy(policy_cfg)
     policy.load_state_dict(checkpoint["ema_model_state_dict"])
-    policy.set_normalizer_stats(checkpoint["normalizer_stats"])
+    policy.set_normalizer_stats(normalizer_stats)
     policy.to(device)
     policy.eval()
 
@@ -368,22 +423,27 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         device=device,
     )
 
-    # Benchmark one inference pass after warmup buffers are realistic.
+    # Benchmark latency over 50 runs.
+    print("[INFO] Benchmarking policy latency over 50 passes...")
+    times = []
     with torch.inference_mode():
-        if device.type == "cuda":
-            torch.cuda.synchronize()
-        t0 = time.perf_counter()
-        _ = policy.predict_action_denormalized(
-            proprio_buffer,
-            action_buffer,
-            goal_buffer,
-            guidance_scale=args_cli.guidance_scale,
-        )
-        if device.type == "cuda":
-            torch.cuda.synchronize()
-        infer_ms = (time.perf_counter() - t0) * 1000.0
-    print(f"[INFO] Single inference latency: {infer_ms:.1f} ms (budget @50Hz = 20 ms)")
-    if infer_ms > 20.0 * max(1, args_cli.exec_horizon):
+        for _ in range(50):
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            _ = policy.predict_action_denormalized(
+                proprio_buffer,
+                action_buffer,
+                goal_buffer,
+                guidance_scale=args_cli.guidance_scale,
+            )
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            times.append((time.perf_counter() - t0) * 1000.0)
+    avg_latency = sum(times) / len(times)
+    max_latency = max(times)
+    print(f"[INFO] Inference latency - Avg: {avg_latency:.1f} ms | Max: {max_latency:.1f} ms (budget @50Hz = 20 ms)")
+    if avg_latency > 20.0 * max(1, args_cli.exec_horizon):
         print(
             f"[WARN] Inference is slow. Use --num_inference_steps 4 --exec_horizon 4 "
             f"and --no_real_time_viewer so sim control is not wall-clock limited."
@@ -403,6 +463,16 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     while simulation_app.is_running():
         with torch.inference_mode():
             if exec_step_idx == 0 or current_chunk is None:
+                # Verify that the goal is in distribution before running inference
+                latest_goal = goal_buffer[:, -1]
+                for env_idx in range(num_envs):
+                    dx = latest_goal[env_idx, 6].item()
+                    dz = latest_goal[env_idx, 8].item()
+                    v_req = latest_goal[env_idx, 10].item()
+                    assert abs(dx) < 3.0, f"Env {env_idx}: dx={dx:.2f} está OOD (entrenamiento max ~3m)"
+                    assert abs(dz) < 0.25, f"Env {env_idx}: dz={dz:.2f} fuera de rango físico"
+                    assert 0.0 <= v_req <= 2.0, f"Env {env_idx}: v_req={v_req:.2f} fuera de rango"
+
                 if device.type == "cuda":
                     torch.cuda.synchronize()
                 t0 = time.perf_counter()
@@ -463,18 +533,17 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                     reset_pos = raw_env._robot.data.root_pos_w.cpu().numpy()
                     reset_quat = raw_env._robot.data.root_quat_w.cpu().numpy()
                     path_plan.rebuild_from_robot(reset_pos, reset_quat, i)
-                    run_warmup(
-                        vec_env,
-                        raw_env,
-                        joint_ids,
+                    reset_env_history(
+                        i,
                         proprio_buffer,
                         action_buffer,
                         goal_buffer,
+                        raw_env,
+                        joint_ids,
                         path_plan.path_w,
                         path_plan.yaws_w,
                         path_plan.cumulative_lengths,
                         path_progress,
-                        warmup_steps=max(args_cli.warmup_steps, history_len + 1),
                         goal_horizon_steps=goal_horizon_steps,
                         dt=dt,
                         speed=args_cli.desired_speed,
