@@ -144,15 +144,22 @@ class TransformerForDiffusion(nn.Module):
             self.register_buffer("mask", mask)
 
             if time_as_cond and obs_as_cond:
-                target_positions, source_positions = torch.meshgrid(
-                    torch.arange(tokens),
-                    torch.arange(cond_tokens),
-                    indexing="ij",
-                )
-                memory_mask = target_positions >= (source_positions - 1)
-                memory_mask = (
-                    memory_mask.float().masked_fill(memory_mask == 0, float("-inf")).masked_fill(memory_mask == 1, 0.0)
-                )
+                # Conditioning tokens are laid out as
+                # [diffusion_time, io_0..io_H-1, goal_0..goal_H-1].
+                # Action token j represents the matching trajectory time.  It may
+                # attend to all history entries up to min(j, H-1), and every
+                # future token may attend to the complete observed history.  The
+                # old triangular mask treated the two H-sized blocks as one long
+                # sequence, which made every goal token invisible at the action
+                # tokens used by this project.
+                memory_mask = torch.full((tokens, cond_tokens), float("-inf"))
+                memory_mask[:, 0] = 0.0
+                for target_idx in range(tokens):
+                    visible_history = min(target_idx + 1, n_obs_steps)
+                    memory_mask[target_idx, 1 : 1 + visible_history] = 0.0
+                    if self.separate_goal_conditioning:
+                        goal_start = 1 + n_obs_steps
+                        memory_mask[target_idx, goal_start : goal_start + visible_history] = 0.0
                 self.register_buffer("memory_mask", memory_mask)
             else:
                 self.memory_mask = None

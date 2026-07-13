@@ -23,7 +23,8 @@ class Solo12DiffusionPolicyConfig:
     goal_dim: int = 11
     action_dim: int = 12
     history: int = 8
-    action_horizon: int = 4
+    prediction_horizon: int = 16
+    execution_offset: int = 8
     d_model: int = 256
     nhead: int = 8
     num_layers: int = 6
@@ -38,7 +39,7 @@ class Solo12DiffusionPolicyConfig:
     variance_type: str = "fixed_small"
     clip_sample: bool = True
     num_inference_steps: int | None = None
-    cfg_dropout_prob: float = 0.2
+    cfg_dropout_prob: float = 0.0
     guidance_scale: float = 1.0
 
 
@@ -54,7 +55,7 @@ class Solo12DiffusionPolicy(torch.nn.Module):
             goal_dim=cfg.goal_dim,
             action_dim=cfg.action_dim,
             history=cfg.history,
-            action_horizon=cfg.action_horizon,
+            prediction_horizon=cfg.prediction_horizon,
             d_model=cfg.d_model,
             nhead=cfg.nhead,
             num_layers=cfg.num_layers,
@@ -117,11 +118,7 @@ class Solo12DiffusionPolicy(torch.nn.Module):
 
         if self.cfg.cfg_dropout_prob > 0.0:
             drop_mask = torch.rand(batch_size, device=device) < self.cfg.cfg_dropout_prob
-            proprio_hist = proprio_hist.clone()
-            action_hist = action_hist.clone()
             goal_hist = goal_hist.clone()
-            proprio_hist[drop_mask] = 0.0
-            action_hist[drop_mask] = 0.0
             goal_hist[drop_mask] = 0.0
 
         noise = torch.randn_like(actions)
@@ -162,7 +159,7 @@ class Solo12DiffusionPolicy(torch.nn.Module):
         goal_n = normalize_zscore(goal_hist, self.normalizer_stats.goal)
 
         trajectory = torch.randn(
-            (proprio_n.shape[0], self.cfg.action_horizon, self.cfg.action_dim),
+            (proprio_n.shape[0], self.cfg.prediction_horizon, self.cfg.action_dim),
             device=proprio_n.device,
             dtype=proprio_n.dtype,
             generator=generator,
@@ -173,8 +170,8 @@ class Solo12DiffusionPolicy(torch.nn.Module):
                 cond_pred = self._predict_noise(trajectory, proprio_n, action_n, goal_n, t)
                 uncond_pred = self._predict_noise(
                     trajectory,
-                    torch.zeros_like(proprio_n),
-                    torch.zeros_like(action_n),
+                    proprio_n,
+                    action_n,
                     torch.zeros_like(goal_n),
                     t,
                 )
@@ -202,3 +199,13 @@ class Solo12DiffusionPolicy(torch.nn.Module):
             generator=generator,
         )
         return denormalize_minmax(actions_n, self.normalizer_stats.action)
+
+    def executable_chunk(self, trajectory: torch.Tensor, num_actions: int = 1) -> torch.Tensor:
+        """Select future actions using the versioned execution offset."""
+        if num_actions < 1:
+            raise ValueError("num_actions must be >= 1.")
+        start = self.cfg.execution_offset
+        end = start + num_actions
+        if end > self.cfg.prediction_horizon:
+            raise ValueError("Requested executable chunk exceeds the prediction horizon.")
+        return trajectory[:, start:end]

@@ -101,7 +101,7 @@ def build_goal_vector(
             *waypoints.tolist(),
             float(target_rel[0]),
             float(target_rel[1]),
-            float(target_w[2]),  # Absolute target height, matching DiffuseLoco command conditioning
+            float(target_w[2]),  # Absolute target base height (project-specific spatial goal)
             float(dyaw),
             v_req,
         ],
@@ -156,7 +156,7 @@ def build_goal_from_path(
             *waypoints.tolist(),
             float(target_rel[0]),
             float(target_rel[1]),
-            float(path_w[end_idx, 2]),  # Absolute target height, matching DiffuseLoco command conditioning
+            float(path_w[end_idx, 2]),  # Absolute target base height
             float(dyaw),
             v_req,
         ],

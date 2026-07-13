@@ -1,11 +1,11 @@
-"""HDF5 dataset with hindsight relabeling for Solo12 Diffusion Policy."""
+"""Episode-aware hindsight dataset for the spatial Solo12 diffusion policy."""
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import h5py
 import numpy as np
@@ -15,11 +15,12 @@ from torch.utils.data import Dataset
 from .geometry import cumulative_xy_lengths
 from .goal_builder import build_goal_vector
 from .normalization import NormalizerStats, build_stats
-from .obs_utils import ACTION_HIST_DIM, GOAL_DIM, PROPRIO_DIM, delayed_io_windows, read_proprio_vector
+from .obs_utils import ACTION_HIST_DIM, GOAL_DIM, delayed_io_windows, read_proprio_vector
 from .symmetry import apply_symmetry, symmetry_count
 
 os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
+SCHEMA_VERSION = 2
 EXPECTED_CONVENTION_PREFIX = "aligned: obs[t] is the proprioceptive state BEFORE executing actions[t]"
 HDF5_OBS_KEYS = (
     "joint_pos",
@@ -29,11 +30,14 @@ HDF5_OBS_KEYS = (
     "last_action",
     "root_pos_w",
     "root_quat_w",
+    "command_speed",
 )
 
 
 @dataclass(frozen=True)
 class DemoSequence:
+    source_file: str
+    demo_name: str
     proprio: np.ndarray
     actions: np.ndarray
     root_pos_w: np.ndarray
@@ -45,63 +49,71 @@ class DemoSequence:
 @dataclass(frozen=True)
 class HindsightSample:
     demo_idx: int
-    step: int
-    end_step: int
+    anchor_step: int
 
 
 def _decode_attr(value: Any) -> str:
-    if isinstance(value, bytes):
-        return value.decode()
-    return str(value)
+    return value.decode() if isinstance(value, bytes) else str(value)
 
 
-def _demo_sort_key(name: str) -> int:
+def _demo_sort_key(name: str) -> tuple[int, str]:
     try:
-        return int(name.split("_")[-1])
+        return int(name.split("_")[-1]), name
     except ValueError:
-        return 0
+        return 0, name
 
 
 def _validate_hdf5(path: str) -> None:
-    with h5py.File(path, "r") as f:
-        if "data" not in f:
+    with h5py.File(path, "r") as file:
+        if "data" not in file:
             raise KeyError(f"{path}: missing 'data' group.")
-        data = f["data"]
-        convention = data.attrs.get("convention", None)
-        if convention is None:
-            raise ValueError(f"{path}: missing data.attrs['convention']; regenerate or merge with current scripts.")
-        if not _decode_attr(convention).startswith(EXPECTED_CONVENTION_PREFIX):
-            raise ValueError(f"{path}: unsupported convention {convention!r}.")
+        data = file["data"]
+        convention = data.attrs.get("convention")
+        if convention is None or not _decode_attr(convention).startswith(EXPECTED_CONVENTION_PREFIX):
+            raise ValueError(f"{path}: unsupported or missing alignment convention {convention!r}.")
         if "skill_names" not in data.attrs:
             raise ValueError(f"{path}: missing data.attrs['skill_names'].")
+        rate = float(data.attrs.get("control_rate_hz", 0.0))
+        if not np.isclose(rate, 50.0):
+            raise ValueError(f"{path}: expected control_rate_hz=50, got {rate}.")
         if not data.keys():
-            raise ValueError(f"{path}: no demos found.")
+            raise ValueError(f"{path}: no demonstrations found.")
 
         for demo_name in data:
             demo = data[demo_name]
             if "obs" not in demo:
-                raise KeyError(f"{path}/{demo_name}: missing 'obs' group.")
+                raise KeyError(f"{path}/{demo_name}: missing obs group.")
             obs = demo["obs"]
             missing = [key for key in HDF5_OBS_KEYS if key not in obs]
             if missing:
                 raise KeyError(f"{path}/{demo_name}: missing obs keys {missing}.")
-            for key in ("actions", "dones"):
-                if key not in demo:
-                    raise KeyError(f"{path}/{demo_name}: missing '{key}'.")
-            length = demo["actions"].shape[0]
-            for key in ("joint_pos", "joint_vel", "base_ang_vel", "projected_gravity", "last_action"):
-                if obs[key].shape[0] != length:
+            if "actions" not in demo or "dones" not in demo:
+                raise KeyError(f"{path}/{demo_name}: missing actions or dones.")
+            length = int(demo["actions"].shape[0])
+            for key in HDF5_OBS_KEYS:
+                if int(obs[key].shape[0]) != length:
                     raise ValueError(f"{path}/{demo_name}: obs/{key} length mismatch.")
+            if int(demo["dones"].shape[0]) != length:
+                raise ValueError(f"{path}/{demo_name}: dones length mismatch.")
+            if length and not bool(demo["dones"][-1]):
+                raise ValueError(f"{path}/{demo_name}: final dones entry must be True.")
 
 
-class LocomotionHindsightDataset(Dataset):
-    """Load merged HDF5 demonstrations and produce delayed DDPM samples.
+class SpatialHindsightDataset(Dataset):
+    """Build delayed conditioning and a full DiffuseLoco-style trajectory.
 
-    Conditioning follows DiffuseLoco delayed inputs at anchor ``step``:
-    - proprio history: ``s_{step-history:step}`` (ends at ``step-1``)
-    - action history: ``a_{step-history-1:step-1}`` (ends at ``step-2``)
-    - goal history aligned with the proprio window
-    - action targets: ``a_{step:step+action_horizon}``
+    At anchor ``t``:
+
+    - proprio condition: ``s[t-H:t]`` (latest state is ``s[t-1]``);
+    - action condition: ``a[t-H-1:t-1]`` (latest action is ``a[t-2]``);
+    - goal condition: rolling achieved-future goals aligned with each state;
+    - denoising target: ``a[t-H:t+F]``;
+    - deployment executes target token ``H``, corresponding to ``a[t]``.
+
+    Rolling hindsight matches deployment: each historical goal is the plan that
+    was available with its corresponding historical observation.  It avoids the
+    previous train/deploy mismatch where every history token pointed to one fixed
+    endpoint while deployment stored moving lookahead goals.
     """
 
     def __init__(
@@ -109,32 +121,31 @@ class LocomotionHindsightDataset(Dataset):
         hdf5_paths: list[str] | tuple[str, ...],
         *,
         history: int = 8,
-        action_horizon: int = 4,
-        min_segment_steps: int = 100,
-        max_segment_steps: int = 100,
-        segment_stride: int = 1,
+        prediction_horizon: int = 16,
+        execution_offset: int = 8,
+        goal_horizon_steps: int = 100,
         step_stride: int = 1,
         dt: float = 0.02,
         waypoint_distances: tuple[float, float, float] = (0.4, 0.8, 1.2),
         v_req_clip: float = 2.0,
         symmetry_mode: str = "none",
-        max_stats_samples: int = 20000,
-        normalizer_stats: NormalizerStats | None = None,
-    ):
+    ) -> None:
         if history < 1:
             raise ValueError("history must be >= 1.")
-        if action_horizon < 1:
-            raise ValueError("action_horizon must be >= 1.")
-        if min_segment_steps < action_horizon:
-            raise ValueError("min_segment_steps must be >= action_horizon.")
-        if max_segment_steps < min_segment_steps:
-            raise ValueError("max_segment_steps must be >= min_segment_steps.")
+        if execution_offset != history:
+            raise ValueError("Schema v2 requires execution_offset == history.")
+        if prediction_horizon <= execution_offset:
+            raise ValueError("prediction_horizon must include at least one future action.")
+        if goal_horizon_steps < 1:
+            raise ValueError("goal_horizon_steps must be >= 1.")
+        if step_stride < 1:
+            raise ValueError("step_stride must be >= 1.")
 
         self.history = history
-        self.action_horizon = action_horizon
-        self.min_segment_steps = min_segment_steps
-        self.max_segment_steps = max_segment_steps
-        self.segment_stride = segment_stride
+        self.prediction_horizon = prediction_horizon
+        self.execution_offset = execution_offset
+        self.future_horizon = prediction_horizon - execution_offset
+        self.goal_horizon_steps = goal_horizon_steps
         self.step_stride = step_stride
         self.dt = dt
         self.waypoint_distances = waypoint_distances
@@ -145,61 +156,61 @@ class LocomotionHindsightDataset(Dataset):
         self.demos: list[DemoSequence] = []
         self.samples: list[HindsightSample] = []
         self.skill_names: list[str] = []
-        self.source_files = [str(Path(p)) for p in hdf5_paths]
+        self.source_files = [str(Path(path).resolve()) for path in hdf5_paths]
 
         for path in hdf5_paths:
             self._load_file(path)
         if not self.samples:
-            raise ValueError("No valid hindsight samples. Check demo length and segment settings.")
-
-        self.normalizer_stats = normalizer_stats or self._build_normalizer_stats(max_stats_samples)
+            raise ValueError("No valid samples: check episode lengths, history and goal horizon.")
 
     def _load_file(self, path: str) -> None:
         _validate_hdf5(path)
-        with h5py.File(path, "r") as f:
-            data = f["data"]
+        resolved = str(Path(path).resolve())
+        with h5py.File(path, "r") as file:
+            data = file["data"]
+            names = [_decode_attr(value) for value in data.attrs["skill_names"]]
             if not self.skill_names:
-                raw_names = data.attrs["skill_names"]
-                self.skill_names = [s.decode() if isinstance(s, bytes) else str(s) for s in raw_names]
+                self.skill_names = names
+            elif self.skill_names != names:
+                raise ValueError(f"{path}: skill_names {names} do not match {self.skill_names}.")
 
             for demo_name in sorted(data.keys(), key=_demo_sort_key):
                 demo = data[demo_name]
-                obs_group = demo["obs"]
-                proprio = read_proprio_vector(obs_group)
-                actions = demo["actions"][:].astype(np.float32)
-                root_pos_w = obs_group["root_pos_w"][:].astype(np.float32)
-                root_quat_w = obs_group["root_quat_w"][:].astype(np.float32)
-                skill_idx = demo["skill_idx"][:].astype(np.int16) if "skill_idx" in demo else None
+                obs = demo["obs"]
                 demo_idx = len(self.demos)
                 self.demos.append(
                     DemoSequence(
-                        proprio=proprio,
-                        actions=actions,
-                        root_pos_w=root_pos_w,
-                        root_quat_w=root_quat_w,
-                        cumulative_xy=cumulative_xy_lengths(root_pos_w),
-                        skill_idx=skill_idx,
+                        source_file=resolved,
+                        demo_name=demo_name,
+                        proprio=read_proprio_vector(obs),
+                        actions=demo["actions"][:].astype(np.float32),
+                        root_pos_w=obs["root_pos_w"][:].astype(np.float32),
+                        root_quat_w=obs["root_quat_w"][:].astype(np.float32),
+                        cumulative_xy=cumulative_xy_lengths(obs["root_pos_w"][:].astype(np.float32)),
+                        skill_idx=demo["skill_idx"][:].astype(np.int16) if "skill_idx" in demo else None,
                     )
                 )
-                self._index_demo(demo_idx, len(actions))
+                self._index_demo(demo_idx)
 
-    def _index_demo(self, demo_idx: int, length: int) -> None:
-        first_step = self.history + 1
-        last_action_start = length - self.action_horizon
-        for step in range(first_step, last_action_start + 1, self.step_stride):
-            for segment_steps in range(self.min_segment_steps, self.max_segment_steps + 1, self.segment_stride):
-                end_step = step + segment_steps
-                if end_step < length:
-                    self.samples.append(HindsightSample(demo_idx, step, end_step))
+    def _index_demo(self, demo_idx: int) -> None:
+        length = len(self.demos[demo_idx].actions)
+        first_anchor = self.history + 1
+        # Latest goal history token is at t-1 and looks goal_horizon_steps ahead.
+        last_for_goal_exclusive = length - self.goal_horizon_steps + 1
+        last_for_actions_exclusive = length - self.future_horizon + 1
+        last_anchor_exclusive = min(last_for_goal_exclusive, last_for_actions_exclusive)
+        for anchor in range(first_anchor, last_anchor_exclusive, self.step_stride):
+            self.samples.append(HindsightSample(demo_idx, anchor))
 
-    def _goal_for_step(self, demo: DemoSequence, step: int, end_step: int) -> np.ndarray:
+    def _goal_for_state(self, demo: DemoSequence, state_step: int) -> np.ndarray:
+        end_step = state_step + self.goal_horizon_steps
         return build_goal_vector(
             demo.root_pos_w,
             demo.cumulative_xy,
-            step,
+            state_step,
             end_step,
-            demo.root_pos_w[step],
-            demo.root_quat_w[step],
+            demo.root_pos_w[state_step],
+            demo.root_quat_w[state_step],
             quat_w=demo.root_quat_w,
             dt=self.dt,
             waypoint_distances=self.waypoint_distances,
@@ -208,71 +219,83 @@ class LocomotionHindsightDataset(Dataset):
 
     def _goal_history(self, sample: HindsightSample) -> np.ndarray:
         demo = self.demos[sample.demo_idx]
-        start = sample.step - self.history
-        end = sample.step
-        return np.stack([self._goal_for_step(demo, step, sample.end_step) for step in range(start, end)])
+        start = sample.anchor_step - self.history
+        return np.stack([self._goal_for_state(demo, state_step) for state_step in range(start, sample.anchor_step)])
 
-    def _raw_sample(
-        self,
-        sample: HindsightSample,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _raw_sample(self, sample: HindsightSample) -> tuple[torch.Tensor, ...]:
         demo = self.demos[sample.demo_idx]
-        proprio_hist, action_hist = delayed_io_windows(demo.proprio, demo.actions, sample.step, self.history)
-        goal_hist = self._goal_history(sample)
-        actions = demo.actions[sample.step : sample.step + self.action_horizon]
+        proprio_hist, action_hist = delayed_io_windows(
+            demo.proprio, demo.actions, sample.anchor_step, self.history
+        )
+        target_start = sample.anchor_step - self.execution_offset
+        target_end = target_start + self.prediction_horizon
         return (
-            torch.from_numpy(proprio_hist.astype(np.float32)),
-            torch.from_numpy(action_hist.astype(np.float32)),
-            torch.from_numpy(goal_hist.astype(np.float32)),
-            torch.from_numpy(actions.astype(np.float32)),
+            torch.from_numpy(proprio_hist.copy()),
+            torch.from_numpy(action_hist.copy()),
+            torch.from_numpy(self._goal_history(sample).astype(np.float32)),
+            torch.from_numpy(demo.actions[target_start:target_end].copy()),
         )
 
-    def _build_normalizer_stats(self, max_stats_samples: int) -> NormalizerStats:
-        proprio_values = np.concatenate([demo.proprio for demo in self.demos], axis=0)
-        action_values = np.concatenate([demo.actions for demo in self.demos], axis=0)
+    def sample_indices_for_demos(self, demo_indices: Iterable[int]) -> list[int]:
+        selected = set(int(index) for index in demo_indices)
+        indices: list[int] = []
+        for sample_idx, sample in enumerate(self.samples):
+            if sample.demo_idx in selected:
+                base = sample_idx * self._symmetry_count
+                indices.extend(range(base, base + self._symmetry_count))
+        if not indices:
+            raise ValueError("Episode split produced no windows.")
+        return indices
 
-        rng = np.random.default_rng(0)
-        sample_count = min(max_stats_samples, len(self.samples))
-        sample_indices = rng.choice(len(self.samples), size=sample_count, replace=False)
-        goal_values = np.concatenate([self._goal_history(self.samples[int(i)]) for i in sample_indices], axis=0)
+    def build_normalizer_stats(
+        self,
+        demo_indices: Iterable[int],
+        *,
+        max_goal_samples: int = 20_000,
+        seed: int = 0,
+    ) -> NormalizerStats:
+        selected = set(int(index) for index in demo_indices)
+        demos = [demo for index, demo in enumerate(self.demos) if index in selected]
+        if not demos:
+            raise ValueError("Cannot fit normalizer without training episodes.")
+        proprio = np.concatenate([demo.proprio for demo in demos], axis=0)
+        actions = np.concatenate([demo.actions for demo in demos], axis=0)
+        candidate_samples = [sample for sample in self.samples if sample.demo_idx in selected]
+        rng = np.random.default_rng(seed)
+        count = min(max_goal_samples, len(candidate_samples))
+        chosen = rng.choice(len(candidate_samples), size=count, replace=False)
+        goals = np.concatenate([self._goal_history(candidate_samples[int(i)]) for i in chosen], axis=0)
 
         if self._symmetry_count > 1:
-            proprio_values, action_values, goal_values = self._augment_stats_arrays(
-                proprio_values,
-                action_values,
-                goal_values,
-            )
+            proprio, actions, goals = self._augment_stats(proprio, actions, goals)
+        return build_stats(proprio, goals, actions)
 
-        return build_stats(proprio_values, goal_values, action_values)
-
-    def _augment_stats_arrays(
-        self,
-        proprio_values: np.ndarray,
-        action_values: np.ndarray,
-        goal_values: np.ndarray,
+    def _augment_stats(
+        self, proprio: np.ndarray, actions: np.ndarray, goals: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        proprio_t = torch.from_numpy(proprio_values)
-        action_t = torch.from_numpy(action_values)
-        goal_t = torch.from_numpy(goal_values)
-        proprio_aug = []
-        action_aug = []
-        goal_aug = []
-        for idx in range(self._symmetry_count):
-            proprio_i, action_i, goal_i, _ = apply_symmetry(
-                proprio_t,
-                action_t,
-                goal_t,
-                action_t,
-                index=idx,
-                mode=self.symmetry_mode,
+        proprio_t = torch.from_numpy(proprio)
+        actions_t = torch.from_numpy(actions)
+        goals_t = torch.from_numpy(goals)
+        proprio_all, actions_all, goals_all = [], [], []
+        for index in range(self._symmetry_count):
+            p, a, g, _ = apply_symmetry(
+                proprio_t, actions_t, goals_t, actions_t, index=index, mode=self.symmetry_mode
             )
-            proprio_aug.append(proprio_i.numpy())
-            action_aug.append(action_i.numpy())
-            goal_aug.append(goal_i.numpy())
-        return np.concatenate(proprio_aug), np.concatenate(action_aug), np.concatenate(goal_aug)
+            proprio_all.append(p.numpy())
+            actions_all.append(a.numpy())
+            goals_all.append(g.numpy())
+        return np.concatenate(proprio_all), np.concatenate(actions_all), np.concatenate(goals_all)
 
-    def get_normalizer_stats(self) -> NormalizerStats:
-        return self.normalizer_stats
+    def manifest_for_demos(self, demo_indices: Iterable[int]) -> list[dict[str, Any]]:
+        return [
+            {
+                "demo_index": int(index),
+                "source_file": self.demos[int(index)].source_file,
+                "demo_name": self.demos[int(index)].demo_name,
+                "length": int(len(self.demos[int(index)].actions)),
+            }
+            for index in demo_indices
+        ]
 
     def __len__(self) -> int:
         return len(self.samples) * self._symmetry_count
@@ -280,19 +303,22 @@ class LocomotionHindsightDataset(Dataset):
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         sample_index = index // self._symmetry_count
         symmetry_index = index % self._symmetry_count
-        proprio_hist, action_hist, goal_hist, actions = self._raw_sample(self.samples[sample_index])
-        proprio_hist, action_hist, goal_hist, actions = apply_symmetry(
-            proprio_hist,
+        proprio, action_hist, goals, actions = self._raw_sample(self.samples[sample_index])
+        proprio, action_hist, goals, actions = apply_symmetry(
+            proprio,
             action_hist,
-            goal_hist,
+            goals,
             actions,
             index=symmetry_index,
             mode=self.symmetry_mode,
         )
-
         return {
-            "proprio_hist": proprio_hist,
+            "proprio_hist": proprio,
             "action_hist": action_hist,
-            "goal_hist": goal_hist,
+            "goal_hist": goals,
             "actions": actions,
         }
+
+
+# Backward-compatible import name for scripts while rejecting old checkpoints via schema_version.
+LocomotionHindsightDataset = SpatialHindsightDataset

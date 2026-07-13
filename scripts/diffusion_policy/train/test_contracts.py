@@ -1,0 +1,103 @@
+"""Regression tests for spatial hindsight relabeling and temporal alignment."""
+
+from __future__ import annotations
+
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+import h5py
+import numpy as np
+
+_PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_PACKAGE_ROOT))
+
+from train.dataset import SpatialHindsightDataset
+from train.episode_split import split_episode_indices
+from train.goal_builder import build_goal_vector
+
+
+def write_dataset(path: Path, *, demos: int = 3, length: int = 140) -> None:
+    with h5py.File(path, "w") as file:
+        data = file.create_group("data")
+        data.attrs["control_rate_hz"] = 50.0
+        data.attrs["convention"] = (
+            "aligned: obs[t] is the proprioceptive state BEFORE executing actions[t]; "
+            "last_action[t] = actions[t-1] (last_action[0] = 0)."
+        )
+        data.attrs["skill_names"] = np.asarray(["walk"], dtype=h5py.string_dtype())
+        for demo_idx in range(demos):
+            demo = data.create_group(f"demo_{demo_idx}")
+            obs = demo.create_group("obs")
+            offset = float(demo_idx * 1000)
+            steps = np.arange(length, dtype=np.float32)[:, None]
+            actions = np.repeat(steps + offset, 12, axis=1)
+            obs.create_dataset("joint_pos", data=np.repeat(steps + offset, 12, axis=1))
+            obs.create_dataset("joint_vel", data=np.repeat(steps, 12, axis=1))
+            obs.create_dataset("base_ang_vel", data=np.repeat(steps, 3, axis=1))
+            obs.create_dataset("projected_gravity", data=np.repeat(steps, 3, axis=1))
+            last_action = np.zeros_like(actions)
+            last_action[1:] = actions[:-1]
+            obs.create_dataset("last_action", data=last_action)
+            obs.create_dataset("command_speed", data=np.repeat(np.array([[0.4, 0.0, 0.0]], np.float32), length, axis=0))
+            root_pos = np.zeros((length, 3), dtype=np.float32)
+            root_pos[:, 0] = np.arange(length, dtype=np.float32) * 0.02
+            root_pos[:, 2] = 0.24
+            root_quat = np.zeros((length, 4), dtype=np.float32)
+            root_quat[:, 0] = 1.0
+            obs.create_dataset("root_pos_w", data=root_pos)
+            obs.create_dataset("root_quat_w", data=root_quat)
+            demo.create_dataset("actions", data=actions)
+            demo.create_dataset("skill_idx", data=np.zeros(length, dtype=np.int8))
+            dones = np.zeros(length, dtype=bool)
+            dones[-1] = True
+            demo.create_dataset("dones", data=dones)
+
+
+class SpatialContractTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.path = Path(self.tempdir.name) / "spatial.hdf5"
+        write_dataset(self.path)
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    def test_target_and_rolling_hindsight_alignment(self) -> None:
+        dataset = SpatialHindsightDataset(
+            [str(self.path)], goal_horizon_steps=10, symmetry_mode="none"
+        )
+        item = dataset[0]
+        np.testing.assert_allclose(item["proprio_hist"][:, 0], np.arange(1, 9))
+        np.testing.assert_allclose(item["action_hist"][:, 0], np.arange(0, 8))
+        np.testing.assert_allclose(item["actions"][:, 0], np.arange(1, 17))
+        self.assertEqual(float(item["actions"][8, 0]), 9.0)
+        demo = dataset.demos[0]
+        expected_first = build_goal_vector(
+            demo.root_pos_w,
+            demo.cumulative_xy,
+            1,
+            11,
+            demo.root_pos_w[1],
+            demo.root_quat_w[1],
+            quat_w=demo.root_quat_w,
+        )
+        np.testing.assert_allclose(item["goal_hist"][0], expected_first, atol=1e-6)
+
+    def test_episode_split_and_train_only_stats(self) -> None:
+        dataset = SpatialHindsightDataset(
+            [str(self.path)], goal_horizon_steps=10, symmetry_mode="none"
+        )
+        split = split_episode_indices(len(dataset.demos), 0.34, 3)
+        self.assertFalse(set(split.train_demo_indices) & set(split.val_demo_indices))
+        self.assertFalse(
+            set(dataset.sample_indices_for_demos(split.train_demo_indices))
+            & set(dataset.sample_indices_for_demos(split.val_demo_indices))
+        )
+        stats = dataset.build_normalizer_stats([0], max_goal_samples=20, seed=3)
+        self.assertLess(float(stats.action.max.max()), 200.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

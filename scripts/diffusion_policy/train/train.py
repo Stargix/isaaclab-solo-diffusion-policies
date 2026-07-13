@@ -24,7 +24,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -42,7 +42,8 @@ if __package__ in (None, ""):
         TrainConfig,
         load_training_config_overrides,
     )
-    from train.dataset import LocomotionHindsightDataset
+    from train.dataset import SpatialHindsightDataset
+    from train.episode_split import split_episode_indices
 else:  # pragma: no cover
     from ..model.ema_model import EMAModel
     from ..model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
@@ -58,7 +59,8 @@ else:  # pragma: no cover
         TrainConfig,
         load_training_config_overrides,
     )
-    from .dataset import LocomotionHindsightDataset
+    from .dataset import SpatialHindsightDataset
+    from .episode_split import split_episode_indices
 
 
 def _find_cli_value(argv: list[str], flag: str) -> str | None:
@@ -80,10 +82,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
 
     parser.add_argument("--history", type=int, default=DATASET_DEFAULTS.history)
-    parser.add_argument("--action_horizon", type=int, default=DATASET_DEFAULTS.action_horizon)
-    parser.add_argument("--min_segment_steps", type=int, default=DATASET_DEFAULTS.min_segment_steps)
-    parser.add_argument("--max_segment_steps", type=int, default=DATASET_DEFAULTS.max_segment_steps)
-    parser.add_argument("--segment_stride", type=int, default=DATASET_DEFAULTS.segment_stride)
+    parser.add_argument("--prediction_horizon", type=int, default=DATASET_DEFAULTS.prediction_horizon)
+    parser.add_argument("--execution_offset", type=int, default=DATASET_DEFAULTS.execution_offset)
+    parser.add_argument("--goal_horizon_steps", type=int, default=DATASET_DEFAULTS.goal_horizon_steps)
     parser.add_argument("--step_stride", type=int, default=DATASET_DEFAULTS.step_stride, help="Temporal stride to sub-sample step windows.")
     parser.add_argument("--v_req_clip", type=float, default=DATASET_DEFAULTS.v_req_clip)
     parser.add_argument("--symmetry_mode", choices=["none", "mirror", "quadruped"], default=DATASET_DEFAULTS.symmetry_mode)
@@ -147,10 +148,9 @@ def make_config(args: argparse.Namespace) -> TrainConfig:
         dataset=DatasetConfig(
             hdf5_paths=args.datasets,
             history=args.history,
-            action_horizon=args.action_horizon,
-            min_segment_steps=args.min_segment_steps,
-            max_segment_steps=args.max_segment_steps,
-            segment_stride=args.segment_stride,
+            prediction_horizon=args.prediction_horizon,
+            execution_offset=args.execution_offset,
+            goal_horizon_steps=args.goal_horizon_steps,
             step_stride=args.step_stride,
             v_req_clip=args.v_req_clip,
             symmetry_mode=args.symmetry_mode,
@@ -232,7 +232,8 @@ def build_policy(cfg: TrainConfig) -> Solo12DiffusionPolicy:
         action_hist_dim=cfg.model.action_hist_dim,
         goal_dim=cfg.model.goal_dim,
         history=cfg.dataset.history,
-        action_horizon=cfg.dataset.action_horizon,
+        prediction_horizon=cfg.dataset.prediction_horizon,
+        execution_offset=cfg.dataset.execution_offset,
         d_model=cfg.model.d_model,
         nhead=cfg.model.nhead,
         num_layers=cfg.model.num_layers,
@@ -277,10 +278,13 @@ def save_checkpoint(
     global_step: int,
     normalizer_stats: dict,
     val_loss: float,
+    split_manifest: dict,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
+            "schema_version": cfg.schema_version,
+            "policy_kind": cfg.policy_kind,
             "config": cfg.to_dict(),
             "model_state_dict": policy.state_dict(),
             "ema_model_state_dict": ema.averaged_model.state_dict(),
@@ -291,6 +295,7 @@ def save_checkpoint(
             "global_step": global_step,
             "normalizer_stats": normalizer_stats,
             "val_loss": val_loss,
+            "split_manifest": split_manifest,
         },
         path,
     )
@@ -309,32 +314,40 @@ def main() -> None:
     print(
         f"[INFO] d_model={cfg.model.d_model} layers={cfg.model.num_layers} "
         f"nhead={cfg.model.nhead} K_train={cfg.diffusion.num_train_timesteps} "
-        f"K_infer={cfg.diffusion.num_inference_steps}"
+        f"K_infer={cfg.diffusion.num_inference_steps} trajectory={cfg.dataset.prediction_horizon} "
+        f"execute_from={cfg.dataset.execution_offset}"
     )
 
     device = torch.device(args.device)
-    dataset = LocomotionHindsightDataset(
+    dataset = SpatialHindsightDataset(
         cfg.dataset.hdf5_paths,
         history=cfg.dataset.history,
-        action_horizon=cfg.dataset.action_horizon,
-        min_segment_steps=cfg.dataset.min_segment_steps,
-        max_segment_steps=cfg.dataset.max_segment_steps,
-        segment_stride=cfg.dataset.segment_stride,
+        prediction_horizon=cfg.dataset.prediction_horizon,
+        execution_offset=cfg.dataset.execution_offset,
+        goal_horizon_steps=cfg.dataset.goal_horizon_steps,
         step_stride=cfg.dataset.step_stride,
         dt=cfg.dataset.dt,
         v_req_clip=cfg.dataset.v_req_clip,
         symmetry_mode=cfg.dataset.symmetry_mode,
-        max_stats_samples=cfg.dataset.max_stats_samples,
     )
-    normalizer_stats = dataset.get_normalizer_stats().to_dict()
-
-    val_size = max(1, int(len(dataset) * cfg.dataset.val_fraction))
-    train_size = len(dataset) - val_size
-    train_dataset, val_dataset = random_split(
-        dataset,
-        [train_size, val_size],
-        generator=torch.Generator().manual_seed(cfg.optim.seed),
-    )
+    episode_split = split_episode_indices(len(dataset.demos), cfg.dataset.val_fraction, cfg.optim.seed)
+    train_indices = dataset.sample_indices_for_demos(episode_split.train_demo_indices)
+    val_indices = dataset.sample_indices_for_demos(episode_split.val_demo_indices)
+    normalizer_stats = dataset.build_normalizer_stats(
+        episode_split.train_demo_indices,
+        max_goal_samples=cfg.dataset.max_stats_samples,
+        seed=cfg.optim.seed,
+    ).to_dict()
+    train_dataset = Subset(dataset, train_indices)
+    val_dataset = Subset(dataset, val_indices)
+    split_manifest = {
+        "seed": cfg.optim.seed,
+        "val_fraction": cfg.dataset.val_fraction,
+        "train": dataset.manifest_for_demos(episode_split.train_demo_indices),
+        "validation": dataset.manifest_for_demos(episode_split.val_demo_indices),
+    }
+    with (output_dir / "split_manifest.json").open("w", encoding="utf-8") as file:
+        json.dump(split_manifest, file, indent=2)
     train_loader = DataLoader(
         train_dataset,
         batch_size=cfg.optim.batch_size,
@@ -371,7 +384,8 @@ def main() -> None:
     wandb = maybe_init_wandb(cfg)
 
     print(
-        f"[INFO] demos={len(dataset.demos)} samples={len(dataset)} train={train_size} val={val_size} "
+        f"[INFO] demos={len(dataset.demos)} samples={len(dataset)} "
+        f"train={len(train_dataset)} val={len(val_dataset)} "
         f"symmetry={cfg.dataset.symmetry_mode} steps/epoch={steps_per_epoch} total_steps={total_steps} "
         f"lr_warmup={cfg.optim.lr_warmup_steps} device={device}"
     )
@@ -425,6 +439,7 @@ def main() -> None:
                         global_step=global_step,
                         normalizer_stats=normalizer_stats,
                         val_loss=val_loss,
+                        split_manifest=split_manifest,
                     )
                     print(f"[INFO] New best val_loss={val_loss:.6f} saved to best.pt")
 
@@ -441,6 +456,7 @@ def main() -> None:
                         global_step=global_step,
                         normalizer_stats=normalizer_stats,
                         val_loss=val_loss,
+                        split_manifest=split_manifest,
                     )
 
         ema.averaged_model.set_normalizer_stats(normalizer_stats)
@@ -464,6 +480,7 @@ def main() -> None:
                 global_step=global_step,
                 normalizer_stats=normalizer_stats,
                 val_loss=val_loss,
+                split_manifest=split_manifest,
             )
         if epoch % cfg.optim.save_every == 0 or epoch == cfg.optim.epochs:
             save_checkpoint(
@@ -477,6 +494,7 @@ def main() -> None:
                 global_step=global_step,
                 normalizer_stats=normalizer_stats,
                 val_loss=val_loss,
+                split_manifest=split_manifest,
             )
 
 

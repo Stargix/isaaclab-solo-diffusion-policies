@@ -36,8 +36,8 @@ parser.add_argument("--guidance_scale", type=float, default=1.0, help="CFG scale
 parser.add_argument("--num_envs", type=int, default=1)
 parser.add_argument("--num_inference_steps", type=int, default=None, help="Denoising steps; default from checkpoint.")
 parser.add_argument("--path_file", type=str, default=None, help="Optional .npy path [N,3] or [N,4].")
-parser.add_argument("--goal_horizon_steps", type=int, default=100, help="Lookahead horizon in sim steps (matches training).")
-parser.add_argument("--v_req_clip", type=float, default=2.0)
+parser.add_argument("--goal_horizon_steps", type=int, default=None, help="Override the training lookahead horizon.")
+parser.add_argument("--v_req_clip", type=float, default=None)
 parser.add_argument("--desired_speed", type=float, default=0.4, help="Speed used for spatial goal lookahead.")
 parser.add_argument("--warmup_steps", type=int, default=25, help="Stand-hold steps before activating the policy.")
 parser.add_argument("--temporal_blend_alpha", type=float, default=1.0, help="1.0 = no chunk blending (less tremor).")
@@ -300,7 +300,7 @@ def compute_goals(
         goals_tensor[:, 5] = 0.0
         goals_tensor[:, 6] = 0.8
         goals_tensor[:, 7] = 0.0
-        goals_tensor[:, 8] = 0.0
+        goals_tensor[:, 8] = 0.24
         goals_tensor[:, 9] = 0.0
         goals_tensor[:, 10] = 1.0
     return goals_tensor
@@ -313,7 +313,8 @@ def _model_cfg_from_checkpoint(config_dict: dict) -> Solo12DiffusionPolicyConfig
         action_hist_dim=model.get("action_hist_dim", 12),
         goal_dim=model.get("goal_dim", 11),
         history=config_dict["dataset"]["history"],
-        action_horizon=config_dict["dataset"]["action_horizon"],
+        prediction_horizon=config_dict["dataset"]["prediction_horizon"],
+        execution_offset=config_dict["dataset"]["execution_offset"],
         d_model=model["d_model"],
         nhead=model["nhead"],
         num_layers=model["num_layers"],
@@ -340,16 +341,15 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[INFO] Loading checkpoint: {checkpoint_path} ({device})")
 
-    checkpoint = load_training_checkpoint(checkpoint_path, device)
+    checkpoint = load_training_checkpoint(
+        checkpoint_path, device, expected_policy_kind="spatial_hindsight_ddpm"
+    )
     config_dict = checkpoint["config"]
     normalizer_stats = NormalizerStats.from_dict(checkpoint["normalizer_stats"])
-    # Clamp goal std to a minimum value of 0.1 to prevent tiny divisions from amplifying noise
-    normalizer_stats.goal.std = np.maximum(normalizer_stats.goal.std, 0.1)
-    
     infer_steps = resolve_inference_steps(args_cli.num_inference_steps, config_dict["diffusion"])
     policy_cfg = _model_cfg_from_checkpoint(config_dict)
     policy_cfg.num_inference_steps = infer_steps
-    goal_horizon_steps = args_cli.goal_horizon_steps or config_dict["dataset"].get("min_segment_steps", 100)
+    goal_horizon_steps = args_cli.goal_horizon_steps or config_dict["dataset"]["goal_horizon_steps"]
 
     policy = Solo12DiffusionPolicy(policy_cfg)
     policy.load_state_dict(checkpoint["ema_model_state_dict"])
@@ -366,6 +366,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
     history_len = policy_cfg.history
     v_req_clip = args_cli.v_req_clip or config_dict["dataset"].get("v_req_clip", 2.0)
+    future_horizon = policy_cfg.prediction_horizon - policy_cfg.execution_offset
+    if not 1 <= args_cli.exec_horizon <= future_horizon:
+        raise ValueError(f"exec_horizon must be in [1, {future_horizon}].")
 
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
@@ -392,9 +395,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         f"| guidance={args_cli.guidance_scale}"
     )
 
-    proprio_buffer = torch.zeros((num_envs, history_len, 30), device=device)
-    action_buffer = torch.zeros((num_envs, history_len, 12), device=device)
-    goal_buffer = torch.zeros((num_envs, history_len, 11), device=device)
+    proprio_buffer = torch.zeros((num_envs, history_len, policy_cfg.proprio_dim), device=device)
+    action_buffer = torch.zeros((num_envs, history_len, policy_cfg.action_hist_dim), device=device)
+    goal_buffer = torch.zeros((num_envs, history_len, policy_cfg.goal_dim), device=device)
 
     vec_env.reset()
     start_pos = raw_env._robot.data.root_pos_w.cpu().numpy()
@@ -467,21 +470,24 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 latest_goal = goal_buffer[:, -1]
                 for env_idx in range(num_envs):
                     dx = latest_goal[env_idx, 6].item()
-                    dz = latest_goal[env_idx, 8].item()
+                    target_height = latest_goal[env_idx, 8].item()
                     v_req = latest_goal[env_idx, 10].item()
                     assert abs(dx) < 3.0, f"Env {env_idx}: dx={dx:.2f} está OOD (entrenamiento max ~3m)"
-                    assert abs(dz) < 0.25, f"Env {env_idx}: dz={dz:.2f} fuera de rango físico"
+                    assert 0.10 <= target_height <= 0.40, (
+                        f"Env {env_idx}: target_height={target_height:.2f} fuera de rango fisico"
+                    )
                     assert 0.0 <= v_req <= 2.0, f"Env {env_idx}: v_req={v_req:.2f} fuera de rango"
 
                 if device.type == "cuda":
                     torch.cuda.synchronize()
                 t0 = time.perf_counter()
-                actions_chunk = policy.predict_action_denormalized(
+                full_trajectory = policy.predict_action_denormalized(
                     proprio_buffer,
                     action_buffer,
                     goal_buffer,
                     guidance_scale=args_cli.guidance_scale,
                 )
+                actions_chunk = policy.executable_chunk(full_trajectory, args_cli.exec_horizon)
                 if device.type == "cuda":
                     torch.cuda.synchronize()
                 infer_ms = (time.perf_counter() - t0) * 1000.0
@@ -499,26 +505,29 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             if agent_cfg.clip_actions is not None:
                 action_step = torch.clamp(action_step, -agent_cfg.clip_actions, agent_cfg.clip_actions)
 
+            # Capture the same pre-action tuple used by the offline dataset.
+            proprio_before_action = get_proprio_30d(raw_env, joint_ids)
+            goal_before_action = compute_goals(
+                raw_env,
+                path_plan.path_w,
+                path_plan.yaws_w,
+                path_plan.cumulative_lengths,
+                path_progress,
+                goal_horizon_steps=goal_horizon_steps,
+                dt=dt,
+                speed=args_cli.desired_speed,
+                v_req_clip=v_req_clip,
+                device=device,
+            )
             _, _, dones, _ = vec_env.step(action_step)
 
             update_delayed_buffers(
                 proprio_buffer,
                 action_buffer,
                 goal_buffer,
-                proprio_value=get_proprio_30d(raw_env, joint_ids),
+                proprio_value=proprio_before_action,
                 action_value=prev_applied_action,
-                goal_value=compute_goals(
-                    raw_env,
-                    path_plan.path_w,
-                    path_plan.yaws_w,
-                    path_plan.cumulative_lengths,
-                    path_progress,
-                    goal_horizon_steps=goal_horizon_steps,
-                    dt=dt,
-                    speed=args_cli.desired_speed,
-                    v_req_clip=v_req_clip,
-                    device=device,
-                ),
+                goal_value=goal_before_action,
             )
             prev_applied_action = action_step.clone()
             current_goal = goal_buffer[:, -1].clone()
@@ -563,14 +572,14 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             goal_z = goal_zscore(current_goal[0], normalizer_stats)
             z_max = float(goal_z.abs().max().item())
             target_dx = current_goal[0, 6].item()
-            target_dz = current_goal[0, 8].item()
+            target_height = current_goal[0, 8].item()
             v_req_val = current_goal[0, 10].item()
             mode_str = "CROUCHING" if robot_z < 0.20 else "WALKING"
             dist_rem = float(np.linalg.norm(path_plan.path_w[-1, :2] - robot_pos[:2]))
             infer_per_step = infer_ms / max(1, args_cli.exec_horizon)
             print(
                 f"Step {step_count:04d} | {mode_str:^10s} | Z={robot_z:.3f}m | "
-                f"dx={target_dx:+.2f} dz={target_dz:+.2f} | v_req={v_req_val:.2f} | "
+                f"dx={target_dx:+.2f} target_z={target_height:+.2f} | v_req={v_req_val:.2f} | "
                 f"goal|z|max={z_max:.2f} | infer={infer_ms:.0f}ms (~{infer_per_step:.0f}/step) | "
                 f"prog={path_progress[0]} | dist_rem={dist_rem:.2f}m"
             )
