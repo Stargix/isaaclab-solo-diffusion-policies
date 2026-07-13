@@ -9,9 +9,9 @@ import torch.nn.functional as F
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 
 try:
-    from ..train.normalization import NormalizerStats, denormalize_minmax, normalize_minmax, normalize_zscore
+    from ..train.data.normalization import NormalizerStats, denormalize_minmax, normalize_minmax, normalize_zscore
 except ImportError:  # pragma: no cover - script entrypoint
-    from train.normalization import NormalizerStats, denormalize_minmax, normalize_minmax, normalize_zscore
+    from train.data.normalization import NormalizerStats, denormalize_minmax, normalize_minmax, normalize_zscore
 
 from .transformer_policy import TransformerDiffusionPolicy
 
@@ -20,7 +20,7 @@ from .transformer_policy import TransformerDiffusionPolicy
 class Solo12DiffusionPolicyConfig:
     proprio_dim: int = 30
     action_hist_dim: int = 12
-    goal_dim: int = 3
+    goal_dim: int = 4
     action_dim: int = 12
     history: int = 8
     prediction_horizon: int = 16

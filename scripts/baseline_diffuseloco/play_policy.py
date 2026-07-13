@@ -30,6 +30,12 @@ parser.add_argument(
     default=(0.4, 0.0, 0.0),
     help="Body-frame velocity command [vx, vy, yaw_rate].",
 )
+parser.add_argument(
+    "--desired_height",
+    type=float,
+    required=True,
+    help="Desired base height in metres; must be in the collection/training support.",
+)
 parser.add_argument("--num_envs", type=int, default=1)
 parser.add_argument("--num_inference_steps", type=int, default=None)
 parser.add_argument("--exec_horizon", type=int, default=1)
@@ -51,9 +57,9 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
-from train.checkpoint_utils import load_training_checkpoint
+from train.runtime.checkpoint import load_training_checkpoint
 from train.config import resolve_inference_steps
-from train.obs_utils import proprio_from_env_tensors
+from train.data.obs_utils import proprio_from_env_tensors
 
 
 def get_proprio(raw_env: Any, joint_ids: slice) -> torch.Tensor:
@@ -122,13 +128,13 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     checkpoint_path = os.path.abspath(args_cli.checkpoint)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint = load_training_checkpoint(
-        checkpoint_path, device, expected_policy_kind="diffuseloco_command_ddpm"
+        checkpoint_path, device, expected_policy_kind="diffuseloco_velocity_height_ddpm"
     )
     config = checkpoint["config"]
     inference_steps = resolve_inference_steps(args_cli.num_inference_steps, config["diffusion"])
     policy_cfg = model_config(config, inference_steps)
-    if policy_cfg.goal_dim != 3:
-        raise ValueError(f"Command baseline requires goal_dim=3, got {policy_cfg.goal_dim}.")
+    if policy_cfg.goal_dim != 4:
+        raise ValueError(f"Velocity-height baseline requires goal_dim=4, got {policy_cfg.goal_dim}.")
     future_horizon = policy_cfg.prediction_horizon - policy_cfg.execution_offset
     if not 1 <= args_cli.exec_horizon <= future_horizon:
         raise ValueError(f"exec_horizon must be in [1, {future_horizon}].")
@@ -153,9 +159,12 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     raw_env = env.unwrapped
     joint_ids = raw_env._joint_ids
     dt = env.step_dt if hasattr(env, "step_dt") else raw_env.step_dt
-    command = torch.tensor(args_cli.command, device=device, dtype=torch.float32).repeat(args_cli.num_envs, 1)
+    velocity_command = torch.tensor(args_cli.command, device=device, dtype=torch.float32).repeat(args_cli.num_envs, 1)
+    command = torch.cat(
+        [velocity_command, torch.full((args_cli.num_envs, 1), args_cli.desired_height, device=device)], dim=-1,
+    )
     if hasattr(raw_env, "_commands"):
-        raw_env._commands[:, :3] = command
+        raw_env._commands[:, :3] = velocity_command
 
     proprio_buffer = torch.zeros(
         (args_cli.num_envs, policy_cfg.history, policy_cfg.proprio_dim), device=device
@@ -182,7 +191,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         previous_action = stand_action.clone()
 
     print(
-        f"[INFO] baseline command={tuple(args_cli.command)} control={1 / dt:.0f}Hz "
+        f"[INFO] baseline command={tuple(args_cli.command)}, h={args_cli.desired_height:.3f}m control={1 / dt:.0f}Hz "
         f"K={inference_steps} trajectory={policy_cfg.prediction_horizon} "
         f"execute_from={policy_cfg.execution_offset} exec_horizon={args_cli.exec_horizon}"
     )

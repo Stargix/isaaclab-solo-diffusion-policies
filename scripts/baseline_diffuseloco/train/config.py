@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .obs_utils import ACTION_HIST_DIM, GOAL_DIM, PROPRIO_DIM
+from .data.obs_utils import ACTION_HIST_DIM, GOAL_DIM, PROPRIO_DIM
 
 
 @dataclass
@@ -76,8 +76,8 @@ class TrainConfig:
     run_name: str = "solo12_diffusion_policy"
     wandb_project: str | None = None
     wandb_entity: str | None = None
-    schema_version: int = 2
-    policy_kind: str = "diffuseloco_command_ddpm"
+    schema_version: int = 3
+    policy_kind: str = "diffuseloco_velocity_height_ddpm"
 
     def to_dict(self) -> dict:
         return asdict(self)

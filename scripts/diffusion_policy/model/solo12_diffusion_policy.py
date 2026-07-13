@@ -9,9 +9,9 @@ import torch.nn.functional as F
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 
 try:
-    from ..train.normalization import NormalizerStats, denormalize_minmax, normalize_minmax, normalize_zscore
+    from ..train.data.normalization import NormalizerStats, denormalize_minmax, normalize_minmax, normalize_zscore
 except ImportError:  # pragma: no cover - script entrypoint
-    from train.normalization import NormalizerStats, denormalize_minmax, normalize_minmax, normalize_zscore
+    from train.data.normalization import NormalizerStats, denormalize_minmax, normalize_minmax, normalize_zscore
 
 from .transformer_policy import TransformerDiffusionPolicy
 

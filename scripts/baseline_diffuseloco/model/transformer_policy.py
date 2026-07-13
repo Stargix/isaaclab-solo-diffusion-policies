@@ -16,7 +16,7 @@ class TransformerDiffusionPolicy(nn.Module):
         *,
         proprio_dim: int = 30,
         action_hist_dim: int = 12,
-        goal_dim: int = 3,
+        goal_dim: int = 4,
         action_dim: int = 12,
         history: int = 8,
         prediction_horizon: int = 16,

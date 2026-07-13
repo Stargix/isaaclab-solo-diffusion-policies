@@ -19,12 +19,13 @@ Collection command/skill sampling is seeded and the seed is stored in the HDF5.
 
 ```powershell
 conda run --no-capture-output -n env_isaaclab python scripts/diffusion_policy/data/collect_data.py `
-  --mode single --task solo12-v0 `
-  --checkpoint checkpoints/walk_safe.pt `
+  --mode single --task solo12-sprint-v0 `
+  --checkpoint checkpoints/sprint_safe.pt --skill_name sprint `
   --num_envs 128 --num_steps 1500000 `
   --command_resample_time_s 2.0 `
   --physics_dr_mode light --seed 42 `
-  --output_name walk_raw_v2.hdf5 --headless
+  --desired_base_height 0.25 --command_profile shared_height `
+  --output_name sprint_raw_v3.hdf5 --headless
 ```
 
 Collect every expert separately. Do not use chained data in the first baseline
@@ -34,12 +35,15 @@ or first spatial run. It is reserved for a later, explicit transition ablation.
 
 ```powershell
 conda run --no-capture-output -n env_isaaclab python scripts/diffusion_policy/data/merge_datasets.py `
-  --inputs scripts/diffusion_policy/data/datasets/walk_raw_v2.hdf5 `
-           scripts/diffusion_policy/data/datasets/crouch_raw_v2.hdf5 `
-  --output scripts/diffusion_policy/data/datasets/walk_crouch_v2.hdf5 `
+  --inputs scripts/diffusion_policy/data/datasets/sprint_raw_v3.hdf5 `
+           scripts/diffusion_policy/data/datasets/crouch_raw_v3.hdf5 `
+  --output scripts/diffusion_policy/data/datasets/sprint_crouch_v3.hdf5 `
   --shuffle_seed 42
 ```
 
-Existing files that pass the loader's alignment and numeric validation can be
-reused. Regeneration is recommended when exact collection provenance/seed is
-required for the final reported experiment.
+Schema-v3 merge rejects files without `desired_base_height`, so regenerate
+sprint/crouch data before the first multi-skill baseline. The current expert
+configs provide a defensible pair: sprint is trained with a 0.25 m height reward
+and crouch with a 0.16 m height reward. `shared_height` keeps their velocity
+commands in the same support, so height—not disjoint command ranges—must select
+the skill.

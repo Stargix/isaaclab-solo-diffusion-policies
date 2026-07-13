@@ -9,7 +9,7 @@ import torch
 PROPRIO_KEYS = ("joint_pos", "joint_vel", "base_ang_vel", "projected_gravity")
 PROPRIO_DIM = 30
 ACTION_HIST_DIM = 12
-GOAL_DIM = 3
+GOAL_DIM = 4  # [vx, vy, wz, desired_base_height]
 IO_DIM = PROPRIO_DIM + ACTION_HIST_DIM
 
 

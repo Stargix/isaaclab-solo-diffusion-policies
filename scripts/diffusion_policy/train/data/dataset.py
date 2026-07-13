@@ -12,8 +12,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from .geometry import cumulative_xy_lengths
-from .goal_builder import build_goal_vector
+from ..conditioning.geometry import cumulative_xy_lengths
+from ..conditioning.goal_builder import build_goal_vector
 from .normalization import NormalizerStats, build_stats_with_action_range
 from .obs_utils import GOAL_DIM, PROPRIO_DIM, delayed_io_windows, read_proprio_vector
 from .symmetry import apply_symmetry, symmetry_count

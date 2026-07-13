@@ -42,8 +42,8 @@ if __package__ in (None, ""):
         TrainConfig,
         load_training_config_overrides,
     )
-    from train.dataset import SpatialHindsightDataset
-    from train.episode_split import split_episode_indices
+    from train.data.dataset import SpatialHindsightDataset
+    from train.data.episode_split import split_episode_indices
 else:  # pragma: no cover
     from ..model.ema_model import EMAModel
     from ..model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
@@ -59,8 +59,8 @@ else:  # pragma: no cover
         TrainConfig,
         load_training_config_overrides,
     )
-    from .dataset import SpatialHindsightDataset
-    from .episode_split import split_episode_indices
+    from .data.dataset import SpatialHindsightDataset
+    from .data.episode_split import split_episode_indices
 
 
 def _find_cli_value(argv: list[str], flag: str) -> str | None:

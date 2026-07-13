@@ -60,7 +60,7 @@ ablation, not a normal deployment option.
 ## Pre-flight checks
 
 ```powershell
-conda run --no-capture-output -n env_isaaclab python scripts/diffusion_policy/train/test_contracts.py
+conda run --no-capture-output -n env_isaaclab python scripts/diffusion_policy/train/tests/test_contracts.py
 conda run --no-capture-output -n env_isaaclab python -m compileall -q scripts/diffusion_policy
 ```
 

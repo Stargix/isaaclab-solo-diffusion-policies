@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .obs_utils import ACTION_HIST_DIM, GOAL_DIM, PROPRIO_DIM
+from .data.obs_utils import ACTION_HIST_DIM, GOAL_DIM, PROPRIO_DIM
 
 
 @dataclass

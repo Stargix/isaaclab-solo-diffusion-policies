@@ -11,13 +11,13 @@ import h5py
 import numpy as np
 import torch
 
-_PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+_PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_PACKAGE_ROOT))
 
 from model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
 from model.transformer_for_diffusion import TransformerForDiffusion
-from train.dataset import DiffuseLocoCommandDataset
-from train.episode_split import split_episode_indices
+from train.data.dataset import DiffuseLocoCommandDataset
+from train.data.episode_split import split_episode_indices
 
 
 def write_dataset(path: Path, *, demos: int = 3, length: int = 140) -> None:
@@ -29,6 +29,7 @@ def write_dataset(path: Path, *, demos: int = 3, length: int = 140) -> None:
             "last_action[t] = actions[t-1] (last_action[0] = 0)."
         )
         data.attrs["skill_names"] = np.asarray(["walk"], dtype=h5py.string_dtype())
+        data.attrs["condition_schema"] = "velocity_xyyaw_plus_desired_base_height_v1"
         for demo_idx in range(demos):
             demo = data.create_group(f"demo_{demo_idx}")
             obs = demo.create_group("obs")
@@ -43,6 +44,7 @@ def write_dataset(path: Path, *, demos: int = 3, length: int = 140) -> None:
             last_action[1:] = actions[:-1]
             obs.create_dataset("last_action", data=last_action)
             obs.create_dataset("command_speed", data=np.repeat(np.array([[0.4, 0.1, -0.2]], np.float32), length, axis=0))
+            obs.create_dataset("desired_base_height", data=np.full((length, 1), 0.24, np.float32))
             demo.create_dataset("actions", data=actions)
             dones = np.zeros(length, dtype=bool)
             dones[-1] = True
@@ -84,7 +86,7 @@ class CommandContractTests(unittest.TestCase):
             horizon=16,
             n_obs_steps=8,
             cond_dim=42,
-            goal_dim=3,
+            goal_dim=4,
             n_layer=1,
             n_head=4,
             n_emb=32,
@@ -99,7 +101,7 @@ class CommandContractTests(unittest.TestCase):
         dataset = DiffuseLocoCommandDataset([str(self.path)], symmetry_mode="none")
         stats = dataset.build_normalizer_stats([0, 1])
         cfg = Solo12DiffusionPolicyConfig(
-            goal_dim=3,
+            goal_dim=4,
             d_model=32,
             nhead=4,
             num_layers=1,

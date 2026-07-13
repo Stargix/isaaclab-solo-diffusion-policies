@@ -69,6 +69,9 @@ def _reflect_goal_x(goal_hist: torch.Tensor) -> torch.Tensor:
     if goal.shape[-1] == 3:
         goal *= _device_tensor(torch.tensor([1.0, -1.0, -1.0]), goal)
         return goal
+    if goal.shape[-1] == 4:
+        goal *= _device_tensor(torch.tensor([1.0, -1.0, -1.0, 1.0]), goal)
+        return goal
     xy_sign = _device_tensor(GOAL_XY_REFLECT_X, goal)
     xyz_sign = _device_tensor(VECTOR_REFLECT_X, goal)
     goal[..., 0:2] *= xy_sign
@@ -83,6 +86,9 @@ def _reflect_goal_y(goal_hist: torch.Tensor) -> torch.Tensor:
     goal = goal_hist.clone()
     if goal.shape[-1] == 3:
         goal *= _device_tensor(torch.tensor([-1.0, 1.0, -1.0]), goal)
+        return goal
+    if goal.shape[-1] == 4:
+        goal *= _device_tensor(torch.tensor([-1.0, 1.0, -1.0, 1.0]), goal)
         return goal
     xy_sign = _device_tensor(GOAL_XY_REFLECT_Y, goal)
     xyz_sign = _device_tensor(VECTOR_REFLECT_Y, goal)

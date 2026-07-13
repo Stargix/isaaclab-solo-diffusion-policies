@@ -18,7 +18,7 @@ from .symmetry import apply_symmetry, symmetry_count
 
 os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 EXPECTED_CONVENTION_PREFIX = "aligned: obs[t] is the proprioceptive state BEFORE executing actions[t]"
 REQUIRED_OBS = (
     "joint_pos",
@@ -27,6 +27,7 @@ REQUIRED_OBS = (
     "projected_gravity",
     "last_action",
     "command_speed",
+    "desired_base_height",
 )
 
 
@@ -61,6 +62,12 @@ def _validate_file(path: str) -> None:
         if "data" not in file:
             raise KeyError(f"{path}: missing data group.")
         data = file["data"]
+        condition_schema = _decode(data.attrs.get("condition_schema", ""))
+        if condition_schema != "velocity_xyyaw_plus_desired_base_height_v1":
+            raise ValueError(
+                f"{path}: expected velocity-plus-height condition schema; got {condition_schema!r}. "
+                "Regenerate the dataset with the current collector."
+            )
         convention = data.attrs.get("convention")
         if convention is None or not _decode(convention).startswith(EXPECTED_CONVENTION_PREFIX):
             raise ValueError(f"{path}: unsupported alignment convention {convention!r}.")
@@ -79,6 +86,10 @@ def _validate_file(path: str) -> None:
                 raise ValueError(f"{path}/{demo_name}: empty demonstration.")
             if any(int(obs[key].shape[0]) != length for key in REQUIRED_OBS):
                 raise ValueError(f"{path}/{demo_name}: observation length mismatch.")
+            if obs["command_speed"].ndim != 2 or obs["command_speed"].shape[1] != 3:
+                raise ValueError(f"{path}/{demo_name}: command_speed must have shape (T, 3).")
+            if obs["desired_base_height"].ndim != 2 or obs["desired_base_height"].shape[1] != 1:
+                raise ValueError(f"{path}/{demo_name}: desired_base_height must have shape (T, 1).")
             dones = demo["dones"][:]
             if len(dones) != length or (length and not bool(dones[-1])) or np.any(dones[:-1]):
                 raise ValueError(f"{path}/{demo_name}: invalid dones convention.")
@@ -160,7 +171,9 @@ class DiffuseLocoCommandDataset(Dataset):
                         demo_name=demo_name,
                         proprio=read_proprio_vector(obs),
                         actions=demo["actions"][:].astype(np.float32),
-                        commands=obs["command_speed"][:].astype(np.float32),
+                        commands=np.concatenate(
+                            [obs["command_speed"][:], obs["desired_base_height"][:]], axis=-1,
+                        ).astype(np.float32),
                     )
                 )
                 first_anchor = self.history + 1

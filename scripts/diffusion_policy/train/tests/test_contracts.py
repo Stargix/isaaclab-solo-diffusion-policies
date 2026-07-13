@@ -10,12 +10,12 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-_PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+_PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_PACKAGE_ROOT))
 
-from train.dataset import SpatialHindsightDataset
-from train.episode_split import split_episode_indices
-from train.goal_builder import build_goal_vector
+from train.data.dataset import SpatialHindsightDataset
+from train.data.episode_split import split_episode_indices
+from train.conditioning.goal_builder import build_goal_vector
 
 
 def write_dataset(path: Path, *, demos: int = 3, length: int = 140) -> None:

@@ -60,12 +60,12 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
-from train.checkpoint_utils import load_training_checkpoint
+from train.runtime.checkpoint import load_training_checkpoint
 from train.config import resolve_inference_steps
-from train.geometry import cumulative_xy_lengths, quat_wxyz_to_rotmat, yaw_from_rotmat
-from train.goal_builder import build_goal_batch_from_path
-from train.normalization import NormalizerStats
-from train.obs_utils import proprio_from_env_tensors
+from train.conditioning.geometry import cumulative_xy_lengths, quat_wxyz_to_rotmat, yaw_from_rotmat
+from train.conditioning.goal_builder import build_goal_batch_from_path
+from train.data.normalization import NormalizerStats
+from train.data.obs_utils import proprio_from_env_tensors
 
 
 @dataclass

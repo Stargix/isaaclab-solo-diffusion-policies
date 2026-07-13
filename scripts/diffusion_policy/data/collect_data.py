@@ -20,6 +20,7 @@ HDF5 schema (per demo, under ``data/demo_<k>``)::
             root_pos_w         (T, 3)    float32   -- base position in world (viz only)
             root_quat_w        (T, 4)    float32   -- base orientation (WXYZ, world; viz only)
             command_speed      (T, 3)    float32   -- commanded (vx, vy, wz)
+            desired_base_height(T, 1)    float32   -- commanded base height, not measured height
         actions                (T, 12)   float32   -- expert action executed at step t
         dones                  (T,)      bool      -- True only on the last step of the demo
         skill_idx              (T,)      int8      -- index into data.attrs["skill_names"]
@@ -80,6 +81,8 @@ parser.add_argument("--mode", type=str, choices=["single", "chained"], default="
 parser.add_argument("--task", type=str, required=True, help="Task name (e.g. solo12-v0).")
 parser.add_argument("--checkpoint", type=str, default=None,
                     help="Path to expert checkpoint (required for single mode).")
+parser.add_argument("--skill_name", type=str, default=None,
+                    help="Explicit expert name (for example sprint or crouch); avoids filename-based inference.")
 parser.add_argument("--checkpoints", type=str, nargs="+", default=[],
                     help="Paths to expert checkpoints for chained mode (walk crouch jump ...).")
 parser.add_argument("--num_envs", type=int, default=128, help="Number of parallel environments.")
@@ -89,6 +92,10 @@ parser.add_argument("--output_name", type=str, default="raw_dataset.hdf5", help=
 parser.add_argument("--seed", type=int, default=42, help="Seed for command/skill sampling and collection metadata.")
 parser.add_argument("--command_resample_time_s", type=float, default=2.0,
                     help="Time interval (s) to resample speed commands within an episode.")
+parser.add_argument("--command_profile", choices=["native", "shared_height"], default="native",
+                    help="native: each expert's envelope; shared_height: common sprint/crouch envelope for a fair height ablation.")
+parser.add_argument("--desired_base_height", type=float, required=True,
+                    help="Expert's commanded base height in metres; recorded for the velocity-height baseline.")
 parser.add_argument("--min_demo_len", type=int, default=100,
                     help="Minimum recorded step length to keep an episode.")
 parser.add_argument("--warmup_steps", type=int, default=25,
@@ -144,7 +151,9 @@ SKILL_COMMAND_RANGES: Dict[str, Dict[str, Tuple[float, float]]] = {
     # crouch policy's stable envelope (trained up to +-1.0 / +-0.5 / +-1.0).
     "crouch": {"vx": (-0.75, 0.75), "vy": (-0.5, 0.5), "wz": (-0.5, 0.5)},
     "jump":   {"vx": (-1.2, 1.2),  "vy": (-0.6, 0.6),  "wz": (-0.6, 0.6)},
+    "sprint": {"vx": (0.3, 2.0), "vy": (-0.2, 0.2), "wz": (-0.2, 0.2)},
 }
+SHARED_HEIGHT_COMMAND_RANGE = {"vx": (0.3, 0.75), "vy": (-0.2, 0.2), "wz": (-0.2, 0.2)}
 
 # HDF5 convention string stored as an attribute for downstream consumers.
 HDF5_CONVENTION = (
@@ -249,7 +258,11 @@ def configure_env_for_collection(env_cfg: Any, args: argparse.Namespace) -> None
 def resample_command(env_idx: int, skill: str,
                      commands_tensor: torch.Tensor, device: torch.device) -> None:
     """Sample a skill-specific (vx, vy, wz) command for one environment in-place."""
-    ranges = SKILL_COMMAND_RANGES.get(skill)
+    ranges = (
+        SHARED_HEIGHT_COMMAND_RANGE
+        if args_cli.command_profile == "shared_height" and skill in {"sprint", "crouch"}
+        else SKILL_COMMAND_RANGES.get(skill)
+    )
     if ranges is None:
         vx = vy = wz = 0.0
     else:
@@ -264,7 +277,7 @@ def resample_command(env_idx: int, skill: str,
 def infer_skill_name(checkpoint_path: str) -> str:
     """Map a checkpoint filename to one of the known skill names."""
     name = Path(checkpoint_path).stem.lower()
-    for skill in ("walk", "crouch", "jump", "crab"):
+    for skill in ("walk", "crouch", "jump", "crab", "sprint"):
         if skill in name:
             return skill
     return name
@@ -345,7 +358,7 @@ class PolicyManager:
     """Loads expert policies and produces per-env actions (with optional blending)."""
 
     def __init__(self, vec_env, agent_cfg, device, mode: str,
-                 checkpoint: str | None, checkpoints: Sequence[str]):
+                 checkpoint: str | None, checkpoints: Sequence[str], skill_name: str | None = None):
         self.vec_env = vec_env
         self.device = device
         self.mode = mode
@@ -358,7 +371,11 @@ class PolicyManager:
         if mode == "single":
             if not checkpoint:
                 raise ValueError("Single mode requires the --checkpoint argument.")
-            name = infer_skill_name(checkpoint)
+            name = skill_name or infer_skill_name(checkpoint)
+            if name not in SKILL_COMMAND_RANGES:
+                raise ValueError(
+                    f"Unknown skill {name!r}. Pass --skill_name using one of {sorted(SKILL_COMMAND_RANGES)}."
+                )
             self._load(name, os.path.abspath(checkpoint), agent_cfg, vec_env)
         else:
             if len(checkpoints) < 2:
@@ -460,7 +477,7 @@ class PolicyManager:
 class HDF5Writer:
     """Writes kept episodes to an HDF5 file in the diffusion_policy schema."""
 
-    def __init__(self, path: Path, skill_names: List[str], seed: int):
+    def __init__(self, path: Path, skill_names: List[str], seed: int, desired_base_height: float):
         path.parent.mkdir(parents=True, exist_ok=True)
         self._f = h5py.File(path, "w")
         self._data = self._f.create_group("data")
@@ -468,6 +485,8 @@ class HDF5Writer:
         self._data.attrs["convention"] = HDF5_CONVENTION
         self._data.attrs["control_rate_hz"] = 50.0
         self._data.attrs["collection_seed"] = int(seed)
+        self._data.attrs["condition_schema"] = "velocity_xyyaw_plus_desired_base_height_v1"
+        self._data.attrs["desired_base_height_m"] = float(desired_base_height)
         self._demo_counter = 0
         self._total_steps = 0
 
@@ -484,7 +503,7 @@ class HDF5Writer:
             return False
 
         keys = ("joint_pos", "joint_vel", "base_ang_vel", "projected_gravity",
-                "last_action", "root_pos_w", "root_quat_w", "command", "actions", "skill_idx")
+                "last_action", "root_pos_w", "root_quat_w", "command", "desired_base_height", "actions", "skill_idx")
         stacked = {k: np.stack([fr[k] for fr in frames], axis=0) for k in keys}
 
         demo_name = f"demo_{self._demo_counter}"
@@ -498,6 +517,7 @@ class HDF5Writer:
         obs_grp.create_dataset("root_pos_w", data=stacked["root_pos_w"].astype(np.float32))
         obs_grp.create_dataset("root_quat_w", data=stacked["root_quat_w"].astype(np.float32))
         obs_grp.create_dataset("command_speed", data=stacked["command"].astype(np.float32))
+        obs_grp.create_dataset("desired_base_height", data=stacked["desired_base_height"].astype(np.float32))
 
         grp.create_dataset("actions", data=stacked["actions"].astype(np.float32))
         grp.create_dataset("dones", data=self._make_dones(len(frames)))
@@ -590,6 +610,12 @@ class CollectionState:
 def main(env_cfg: Any, agent_cfg: Any) -> None:
     output_path = _THIS_DIR / "datasets" / args_cli.output_name
 
+    if args_cli.mode != "single":
+        raise ValueError(
+            "The velocity-height schema is intentionally single-expert only. "
+            "Collect one file per expert and merge them; chained transitions need an explicit per-skill height schedule."
+        )
+
     configure_env_for_collection(env_cfg, args_cli)
 
     env = gym.make(args_cli.task, cfg=env_cfg)
@@ -602,7 +628,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     np.random.seed(args_cli.seed)
     torch.manual_seed(args_cli.seed)
     policy_mgr = PolicyManager(vec_env, agent_cfg, device, args_cli.mode,
-                               args_cli.checkpoint, args_cli.checkpoints)
+                               args_cli.checkpoint, args_cli.checkpoints, args_cli.skill_name)
     skill_names = policy_mgr.skill_names
     num_envs = args_cli.num_envs
 
@@ -614,7 +640,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         resample_command(i, skill_names[state_tracker.current_skill_idx[i]],
                          raw_env._commands, device)
 
-    writer = HDF5Writer(output_path, skill_names, args_cli.seed)
+    writer = HDF5Writer(output_path, skill_names, args_cli.seed, args_cli.desired_base_height)
     stats = CollectionStats()
     print(f"[INFO] Starting collection ({args_cli.mode} mode). Output: {output_path}")
     dr_status = "off" if args_cli.disable_physics_dr else args_cli.physics_dr_mode
@@ -649,8 +675,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         for i in range(num_envs):
             if state_tracker.steps_since_start[i] < args_cli.warmup_steps:
                 continue
-            buffers[i].append(_make_frame(cached_state, i, actions_np[i],
-                                          state_tracker.current_skill_idx[i]))
+            buffers[i].append(_make_frame(
+                cached_state, i, actions_np[i], state_tracker.current_skill_idx[i], args_cli.desired_base_height,
+            ))
 
         # --- 3. Step the simulator (advances to time t+1). --- #
         obs, _, dones, _ = vec_env.step(actions)
@@ -721,7 +748,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
 
 def _make_frame(state: Dict[str, np.ndarray], env_idx: int,
-                action: np.ndarray, skill_idx: int) -> Dict[str, np.ndarray]:
+                action: np.ndarray, skill_idx: int, desired_base_height: float) -> Dict[str, np.ndarray]:
     """Build an aligned recorded frame from the raw state of one env."""
     return {
         "joint_pos":         state["joint_pos"][env_idx],
@@ -732,6 +759,7 @@ def _make_frame(state: Dict[str, np.ndarray], env_idx: int,
         "root_pos_w":        state["root_pos_w"][env_idx],
         "root_quat_w":       state["root_quat_w"][env_idx],
         "command":           state["command"][env_idx],
+        "desired_base_height": np.asarray([desired_base_height], dtype=np.float32),
         "actions":           action,
         "skill_idx":         np.int8(skill_idx),
     }
