@@ -44,6 +44,7 @@ if __package__ in (None, ""):
     )
     from train.data.dataset import SpatialHindsightDataset
     from train.data.episode_split import split_episode_indices
+    from train.runtime.checkpoint import load_training_checkpoint
 else:  # pragma: no cover
     from ..model.ema_model import EMAModel
     from ..model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
@@ -61,6 +62,7 @@ else:  # pragma: no cover
     )
     from .data.dataset import SpatialHindsightDataset
     from .data.episode_split import split_episode_indices
+    from .runtime.checkpoint import load_training_checkpoint
 
 
 def _find_cli_value(argv: list[str], flag: str) -> str | None:
@@ -80,6 +82,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output_dir", required=True, help="Directory for checkpoints and config.")
     parser.add_argument("--run_name", default="solo12_diffusion_policy", help="Run name for logs.")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--resume", type=str, default=None, help="Resume model/EMA/optimizer/scheduler from a v3 checkpoint.")
 
     parser.add_argument("--history", type=int, default=DATASET_DEFAULTS.history)
     parser.add_argument("--prediction_horizon", type=int, default=DATASET_DEFAULTS.prediction_horizon)
@@ -285,6 +288,7 @@ def save_checkpoint(
     ema: EMAModel,
     optimizer: torch.optim.Optimizer,
     lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
+    scaler: torch.amp.GradScaler,
     epoch: int,
     global_step: int,
     normalizer_stats: dict,
@@ -302,6 +306,8 @@ def save_checkpoint(
             "noise_scheduler_config": dict(policy.noise_scheduler.config),
             "optimizer_state_dict": optimizer.state_dict(),
             "lr_scheduler_state_dict": lr_scheduler.state_dict(),
+            "scaler_state_dict": scaler.state_dict(),
+            "ema_optimization_step": ema.optimization_step,
             "epoch": epoch,
             "global_step": global_step,
             "normalizer_stats": normalizer_stats,
@@ -404,7 +410,32 @@ def main() -> None:
 
     global_step = 0
     best_val = float("inf")
-    for epoch in range(1, cfg.optim.epochs + 1):
+    start_epoch = 1
+    if args.resume is not None:
+        resume = load_training_checkpoint(
+            args.resume, device, expected_policy_kind="spatial_time_preview_ddpm"
+        )
+        previous_cfg = resume["config"]
+        for section in ("dataset", "model", "diffusion"):
+            if previous_cfg[section] != cfg.to_dict()[section]:
+                raise ValueError(f"Resume {section} config does not match the requested run.")
+        policy.load_state_dict(resume["model_state_dict"])
+        ema.averaged_model.load_state_dict(resume["ema_model_state_dict"])
+        optimizer.load_state_dict(resume["optimizer_state_dict"])
+        lr_scheduler.load_state_dict(resume["lr_scheduler_state_dict"])
+        if "scaler_state_dict" in resume:
+            scaler.load_state_dict(resume["scaler_state_dict"])
+        global_step = int(resume["global_step"])
+        start_epoch = int(resume["epoch"]) + 1
+        best_val = float(resume.get("val_loss", float("inf")))
+        ema.optimization_step = int(resume.get("ema_optimization_step", global_step))
+        if start_epoch > cfg.optim.epochs:
+            raise ValueError(
+                f"Checkpoint completed epoch {start_epoch - 1}, but requested epochs={cfg.optim.epochs}."
+            )
+        print(f"[INFO] Resuming at epoch={start_epoch} global_step={global_step} best_val={best_val:.6f}")
+
+    for epoch in range(start_epoch, cfg.optim.epochs + 1):
         policy.train()
         epoch_start = time.time()
         train_losses = []
@@ -447,6 +478,7 @@ def main() -> None:
                         ema=ema,
                         optimizer=optimizer,
                         lr_scheduler=lr_scheduler,
+                        scaler=scaler,
                         epoch=epoch,
                         global_step=global_step,
                         normalizer_stats=normalizer_stats,
@@ -464,6 +496,7 @@ def main() -> None:
                         ema=ema,
                         optimizer=optimizer,
                         lr_scheduler=lr_scheduler,
+                        scaler=scaler,
                         epoch=epoch,
                         global_step=global_step,
                         normalizer_stats=normalizer_stats,
@@ -488,6 +521,7 @@ def main() -> None:
                 ema=ema,
                 optimizer=optimizer,
                 lr_scheduler=lr_scheduler,
+                scaler=scaler,
                 epoch=epoch,
                 global_step=global_step,
                 normalizer_stats=normalizer_stats,
@@ -502,6 +536,7 @@ def main() -> None:
                 ema=ema,
                 optimizer=optimizer,
                 lr_scheduler=lr_scheduler,
+                scaler=scaler,
                 epoch=epoch,
                 global_step=global_step,
                 normalizer_stats=normalizer_stats,
