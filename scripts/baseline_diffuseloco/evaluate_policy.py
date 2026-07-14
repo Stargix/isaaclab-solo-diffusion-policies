@@ -461,7 +461,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
     dynamic_rows: list[dict[str, float | bool]] = []
     if not args_cli.skip_dynamic:
-        vec_env.reset()
+        # The direct environment stores the last action tensor. Since policy
+        # actions are created under inference_mode, reset must mutate it under
+        # the same mode on PyTorch 2.7+.
+        with torch.inference_mode():
+            vec_env.reset()
         dynamic_velocity = torch.tensor((0.4, 0.0, 0.0), device=device).repeat(num_envs, 1)
         dynamic_command = torch.cat(
             [dynamic_velocity, torch.full((num_envs, 1), DYNAMIC_HEIGHTS[0], device=device)], dim=-1
