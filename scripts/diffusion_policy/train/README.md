@@ -59,7 +59,7 @@ conda run --no-capture-output -n env_isaaclab python scripts/diffusion_policy/pl
   --task solo12-v0 `
   --checkpoint scripts/diffusion_policy/runs/spatial_walk_crouch_time_preview_v3/best.pt `
   --path_file scripts/diffusion_policy/paths/s_curve_crouch.npy `
-  --exec_horizon 1 `
+  --exec_horizon 8 --torchscript_denoiser `
   --guidance_scale 1.0
 ```
 

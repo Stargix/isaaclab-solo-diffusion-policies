@@ -12,6 +12,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import sys
 import time
@@ -41,10 +42,16 @@ parser.add_argument("--v_req_clip", type=float, default=None)
 parser.add_argument("--desired_speed", type=float, default=0.4, help="Speed used for spatial goal lookahead.")
 parser.add_argument("--warmup_steps", type=int, default=25, help="Stand-hold steps before activating the policy.")
 parser.add_argument("--temporal_blend_alpha", type=float, default=1.0, help="1.0 = no chunk blending (less tremor).")
-parser.add_argument("--exec_horizon", type=int, default=1, help="RHC: execute N chunk steps before replanning (DiffuseLoco uses 1).")
+parser.add_argument(
+    "--exec_horizon",
+    type=int,
+    default=8,
+    help="Execute N chunk actions before replanning; eight matches the validated baseline deployment.",
+)
 parser.add_argument("--real_time_viewer", action="store_true", default=True, help="Sleep to match sim dt (GUI).")
 parser.add_argument("--no_real_time_viewer", action="store_false", dest="real_time_viewer")
 parser.add_argument("--compile_policy", action="store_true", help="Try torch.compile on the policy.")
+parser.add_argument("--torchscript_denoiser", action="store_true", help="Trace the denoiser without changing DDPM sampling.")
 parser.add_argument("--force_walk_goal", action="store_true", help="Override conditioning goals to force walk commands.")
 
 AppLauncher.add_app_launcher_args(parser)
@@ -61,6 +68,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
 from train.runtime.checkpoint import load_training_checkpoint
+from train.runtime.optimization import trace_denoiser
 from train.config import resolve_inference_steps
 from train.conditioning.geometry import cumulative_xy_lengths, quat_wxyz_to_rotmat, yaw_from_rotmat
 from train.conditioning.goal_builder import build_goal_batch_from_path
@@ -364,12 +372,21 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     policy.to(device)
     policy.eval()
 
+    if args_cli.torchscript_denoiser:
+        print("[INFO] Tracing denoiser with TorchScript...")
+        trace_denoiser(policy, device)
+
     if args_cli.compile_policy:
-        try:
-            policy = torch.compile(policy, mode="reduce-overhead")
-            print("[INFO] torch.compile enabled.")
-        except Exception as exc:
-            print(f"[WARN] torch.compile failed: {exc}")
+        if args_cli.torchscript_denoiser:
+            raise ValueError("Choose --torchscript_denoiser or --compile_policy, not both.")
+        if importlib.util.find_spec("triton") is None:
+            print("[WARN] --compile_policy skipped because Triton is not installed; use --torchscript_denoiser.")
+        else:
+            try:
+                policy = torch.compile(policy, mode="reduce-overhead")
+                print("[INFO] torch.compile enabled.")
+            except Exception as exc:
+                print(f"[WARN] torch.compile failed: {exc}")
 
     history_len = policy_cfg.history
     v_req_clip = args_cli.v_req_clip or config_dict["dataset"].get("v_req_clip", 2.0)
@@ -456,8 +473,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     print(f"[INFO] Inference latency - Avg: {avg_latency:.1f} ms | Max: {max_latency:.1f} ms (budget @50Hz = 20 ms)")
     if avg_latency > 20.0 * max(1, args_cli.exec_horizon):
         print(
-            f"[WARN] Inference is slow. Use --num_inference_steps 4 --exec_horizon 4 "
-            f"and --no_real_time_viewer so sim control is not wall-clock limited."
+            f"[WARN] Inference misses its amortized deadline. Profile --torchscript_denoiser "
+            f"and --exec_horizon 8 before reducing denoising steps."
         )
 
     camera_look_at = np.array([0.0, 0.0, 0.35])
@@ -470,6 +487,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     infer_ms = 0.0
     prev_applied_action = torch.zeros((num_envs, 12), device=device)
     current_goal = goal_buffer[:, -1].clone()
+    next_control_deadline = time.perf_counter()
 
     while simulation_app.is_running():
         with torch.inference_mode():
@@ -596,7 +614,12 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
         step_count += 1
         if args_cli.real_time_viewer:
-            time.sleep(dt)
+            next_control_deadline += dt
+            remaining = next_control_deadline - time.perf_counter()
+            if remaining > 0.0:
+                time.sleep(remaining)
+            elif remaining < -1.0:
+                next_control_deadline = time.perf_counter()
 
     print("[INFO] Evaluation finished.")
     vec_env.close()
