@@ -5,10 +5,10 @@ waypoints and terminal pose from the problem. The policy is conditioned on the
 expert command `[vx, vy, wz, desired_height]`. The fourth value is an explicit
 desired height label, never the measured base height.
 
-For the currently working walk/crouch experts, it is a fixed posture-reference
-label (walk `0.2932`, crouch `0.1705`), not evidence of continuous height
-control. It becomes a true desired-height command after training experts with
-explicit, distinct height objectives.
+For the currently working walk/crouch experts, training uses two fixed
+posture-reference labels (walk `0.2932`, crouch `0.1705`). Closed-loop evaluation
+shows monotonic, stable interpolation at unseen values in between. This is
+emergent interpolation, not dense supervision of continuous height tracking.
 
 ## Versioned contract (schema v3)
 
@@ -44,17 +44,41 @@ For a cheap pipeline smoke test, add `--epochs 1 --batch_size 32 --step_stride 2
 ```powershell
 conda run --no-capture-output -n env_isaaclab python scripts/baseline_diffuseloco/play_policy.py `
   --task solo12-v0 `
-  --checkpoint scripts/baseline_diffuseloco/runs/velocity_height_compact_k10/best.pt `
+  --checkpoint scripts/baseline_diffuseloco/runs/walk_crouch_posture_conditioned/best.pt `
   --command 0.4 0.0 0.0 `
   --desired_height 0.2932 `
-  --interactive_commands `
-  --exec_horizon 1
+  --command_ui `
+  --exec_horizon 8 `
+  --torchscript_denoiser
 ```
 
-With `--interactive_commands`, the Isaac Lab keyboard controls velocity while
-keys are held (arrows/numpad), `R/F` raise/lower the height, and `1/2` select the
-walk/crouch posture references. The camera follows env 0 in the robot yaw frame;
-use `--no_camera_follow` to disable it.
+The floating window controls velocity and height. Keyboard control remains
+available through `--interactive_commands`. The camera follows env 0 in the
+robot yaw frame; use `--no_camera_follow` to disable it.
+
+The K=10, `exec_horizon=1` reference misses the 20 ms wall-clock deadline on the
+measured Windows setup. K=10 with TorchScript and `exec_horizon=8` has a 160 ms
+chunk deadline and passed the complete 45-scenario grid with 100% survival. It
+also improved smoothness and tracking relative to replanning stochastically at
+every action.
+
+## Reproduce the evaluation
+
+```powershell
+conda run --no-capture-output -n env_isaaclab python scripts/baseline_diffuseloco/evaluate_policy.py `
+  --task solo12-v0 `
+  --checkpoint scripts/baseline_diffuseloco/runs/walk_crouch_posture_conditioned/best.pt `
+  --output_dir scripts/baseline_diffuseloco/evaluations/walk_crouch_epoch25_k10_exec1 `
+  --repeats 3 --duration_s 8 --settling_s 2 --dynamic_segment_s 2 `
+  --latency_samples 100 --exec_horizon 1 --headless
+
+conda run --no-capture-output -n env_isaaclab python scripts/baseline_diffuseloco/evaluate_policy.py `
+  --task solo12-v0 `
+  --checkpoint scripts/baseline_diffuseloco/runs/walk_crouch_posture_conditioned/best.pt `
+  --output_dir scripts/baseline_diffuseloco/evaluations/walk_crouch_epoch25_k10_exec8_ts `
+  --repeats 3 --duration_s 8 --settling_s 2 --latency_samples 100 `
+  --exec_horizon 8 --torchscript_denoiser --skip_dynamic --headless
+```
 
 Run the regression checks before every long training:
 

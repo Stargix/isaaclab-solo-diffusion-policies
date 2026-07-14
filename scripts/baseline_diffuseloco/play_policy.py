@@ -40,7 +40,12 @@ parser.add_argument(
 )
 parser.add_argument("--num_envs", type=int, default=1)
 parser.add_argument("--num_inference_steps", type=int, default=None)
-parser.add_argument("--exec_horizon", type=int, default=1)
+parser.add_argument(
+    "--exec_horizon",
+    type=int,
+    default=8,
+    help="Actions executed per DDPM sample. Eight is the validated real-time deployment; one is the RHC reference.",
+)
 parser.add_argument("--warmup_steps", type=int, default=25)
 parser.add_argument("--guidance_scale", type=float, default=1.0)
 parser.add_argument(
