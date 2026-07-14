@@ -40,6 +40,15 @@ parser.add_argument("--path_file", type=str, default=None, help="Optional .npy p
 parser.add_argument("--goal_horizon_steps", type=int, default=None, help="Override the training lookahead horizon.")
 parser.add_argument("--v_req_clip", type=float, default=None)
 parser.add_argument("--desired_speed", type=float, default=0.4, help="Speed used for spatial goal lookahead.")
+parser.add_argument(
+    "--default_path_mode",
+    choices=("walk", "crouch", "walk_to_crouch"),
+    default="walk",
+    help=(
+        "Built-in route when --path_file is omitted.  walk_to_crouch is an explicit "
+        "out-of-distribution diagnostic until transition demonstrations are collected."
+    ),
+)
 parser.add_argument("--warmup_steps", type=int, default=25, help="Stand-hold steps before activating the policy.")
 parser.add_argument("--temporal_blend_alpha", type=float, default=1.0, help="1.0 = no chunk blending (less tremor).")
 parser.add_argument(
@@ -82,11 +91,14 @@ class PathPlan:
     yaws_w: np.ndarray
     cumulative_lengths: np.ndarray
     is_custom: bool
+    default_path_mode: str = "walk"
 
     def rebuild_from_robot(self, pos_w: np.ndarray, quat_w: np.ndarray, env_idx: int = 0) -> None:
         if self.is_custom:
             return
-        self.path_w, self.yaws_w = build_default_path(pos_w[env_idx], quat_w[env_idx])
+        self.path_w, self.yaws_w = build_default_path(
+            pos_w[env_idx], quat_w[env_idx], mode=self.default_path_mode
+        )
         self.cumulative_lengths = cumulative_xy_lengths(self.path_w)
 
 
@@ -100,11 +112,20 @@ def build_default_path(
     *,
     length_m: float = 3.0,
     num_points: int = 60,
-    crouch_start_m: float = 1.5,
     walk_z: float = 0.2932,
     crouch_z: float = 0.1705,
+    mode: str = "walk",
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Build a straight path in the robot's forward (yaw) direction."""
+    """Build a straight path in the robot's forward (yaw) direction.
+
+    The first spatial checkpoint was trained on separately collected walk and
+    crouch trajectories.  It therefore has no actual posture-transition
+    windows.  A constant-height route is the safe default; the mixed route is
+    retained only as an explicit future diagnostic.
+    """
+
+    if mode not in {"walk", "crouch", "walk_to_crouch"}:
+        raise ValueError(f"Unsupported default path mode: {mode}")
 
     yaw = robot_yaw_w(start_quat_w)
     cos_y = float(np.cos(yaw))
@@ -114,7 +135,12 @@ def build_default_path(
     for s in np.linspace(0.0, length_m, num_points):
         x = float(start_pos_w[0] + cos_y * s)
         y = float(start_pos_w[1] + sin_y * s)
-        z = walk_z if s < crouch_start_m else crouch_z
+        if mode == "walk":
+            z = walk_z
+        elif mode == "crouch":
+            z = crouch_z
+        else:
+            z = walk_z if s < 0.5 * length_m else crouch_z
         path_points.append([x, y, z])
         yaws.append(yaw)
     return np.array(path_points, dtype=np.float32), np.array(yaws, dtype=np.float32)
@@ -124,6 +150,7 @@ def load_or_build_path(
     start_pos: np.ndarray,
     start_quat: np.ndarray,
     path_file: str | None,
+    default_path_mode: str,
 ) -> PathPlan:
     if path_file is not None and os.path.exists(path_file):
         print(f"[INFO] Loading path: {path_file}")
@@ -141,9 +168,15 @@ def load_or_build_path(
             yaws_w = path_array[:, 3].astype(np.float32)
         return PathPlan(path_w, yaws_w, cumulative_xy_lengths(path_w), is_custom=True)
 
-    print("[INFO] Generating default 3 m walk->crouch path aligned to robot yaw.")
-    path_w, yaws_w = build_default_path(start_pos[0], start_quat[0])
-    return PathPlan(path_w, yaws_w, cumulative_xy_lengths(path_w), is_custom=False)
+    print(f"[INFO] Generating default 3 m {default_path_mode} path aligned to robot yaw.")
+    path_w, yaws_w = build_default_path(start_pos[0], start_quat[0], mode=default_path_mode)
+    return PathPlan(
+        path_w,
+        yaws_w,
+        cumulative_xy_lengths(path_w),
+        is_custom=False,
+        default_path_mode=default_path_mode,
+    )
 
 
 def get_proprio_30d(raw_env: Any, joint_ids: slice) -> torch.Tensor:
@@ -428,7 +461,12 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     start_quat = raw_env._robot.data.root_quat_w.cpu().numpy()
     time.sleep(0.5)
 
-    path_plan = load_or_build_path(start_pos, start_quat, args_cli.path_file)
+    path_plan = load_or_build_path(
+        start_pos,
+        start_quat,
+        args_cli.path_file,
+        args_cli.default_path_mode,
+    )
     path_progress = np.zeros(num_envs, dtype=np.int32)
 
     run_warmup(

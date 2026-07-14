@@ -122,3 +122,4 @@ scripts/diffusion_policy/data/datasets/
 # Generated closed-loop evaluation and dataset-coverage artifacts.
 scripts/baseline_diffuseloco/evaluations/
 scripts/diffusion_policy/data/coverage/
+scripts/diffusion_policy/data/audits/

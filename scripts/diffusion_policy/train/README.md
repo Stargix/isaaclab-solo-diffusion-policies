@@ -58,10 +58,15 @@ and:
 conda run --no-capture-output -n env_isaaclab python scripts/diffusion_policy/play_policy.py `
   --task solo12-v0 `
   --checkpoint scripts/diffusion_policy/runs/spatial_walk_crouch_time_preview_v3/best.pt `
-  --path_file scripts/diffusion_policy/paths/s_curve_crouch.npy `
+  --default_path_mode walk --desired_speed 0.4 `
   --exec_horizon 8 --torchscript_denoiser `
   --guidance_scale 1.0
 ```
+
+Do not evaluate `s_curve_crouch.npy` or `--default_path_mode walk_to_crouch`
+with the current merged separate-skill dataset: it contains no real
+walk-to-crouch transition windows.  Those routes are reserved for the next
+dataset iteration, which must record an expert/reference height schedule.
 
 `goal_horizon_steps`, prediction horizon and execution offset are loaded from
 the checkpoint. Overriding the goal horizon is an explicit distribution-shift
@@ -75,3 +80,20 @@ conda run --no-capture-output -n env_isaaclab python -m compileall -q scripts/di
 ```
 
 Spatial checkpoints before schema v3 are deliberately rejected.
+
+## Dataset-support audit
+
+Before interpreting a spatial loss, check whether the route goals and reset
+history used at deployment exist in the offline data:
+
+```powershell
+conda run --no-capture-output -n env_isaaclab python scripts/diffusion_policy/data/audit_spatial_dataset.py `
+  --datasets scripts/diffusion_policy/data/datasets/walk_crouch_v3.hdf5 `
+  --checkpoint scripts/diffusion_policy/runs/spatial_walk_crouch_time_preview_v3/best.pt `
+  --output_dir scripts/diffusion_policy/data/audits/spatial_epoch7_design
+```
+
+The audit is diagnostic, not a substitute for closed-loop tracking.  In
+particular, an all-zero reset action history must be represented explicitly by
+the demonstrations (or bootstrapped by a teacher) before it is considered an
+in-distribution policy state.
