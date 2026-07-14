@@ -85,6 +85,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prediction_horizon", type=int, default=DATASET_DEFAULTS.prediction_horizon)
     parser.add_argument("--execution_offset", type=int, default=DATASET_DEFAULTS.execution_offset)
     parser.add_argument("--goal_horizon_steps", type=int, default=DATASET_DEFAULTS.goal_horizon_steps)
+    parser.add_argument(
+        "--waypoint_time_offsets_s",
+        type=float,
+        nargs=3,
+        default=DATASET_DEFAULTS.waypoint_time_offsets_s,
+        metavar=("T1", "T2", "T3"),
+        help="Temporal preview offsets in seconds; all must precede the terminal horizon.",
+    )
     parser.add_argument("--step_stride", type=int, default=DATASET_DEFAULTS.step_stride, help="Temporal stride to sub-sample step windows.")
     parser.add_argument("--v_req_clip", type=float, default=DATASET_DEFAULTS.v_req_clip)
     parser.add_argument("--symmetry_mode", choices=["none", "mirror", "quadruped"], default=DATASET_DEFAULTS.symmetry_mode)
@@ -152,6 +160,7 @@ def make_config(args: argparse.Namespace) -> TrainConfig:
             prediction_horizon=args.prediction_horizon,
             execution_offset=args.execution_offset,
             goal_horizon_steps=args.goal_horizon_steps,
+            waypoint_time_offsets_s=tuple(args.waypoint_time_offsets_s),
             step_stride=args.step_stride,
             v_req_clip=args.v_req_clip,
             symmetry_mode=args.symmetry_mode,
@@ -327,6 +336,7 @@ def main() -> None:
         prediction_horizon=cfg.dataset.prediction_horizon,
         execution_offset=cfg.dataset.execution_offset,
         goal_horizon_steps=cfg.dataset.goal_horizon_steps,
+        waypoint_time_offsets_s=cfg.dataset.waypoint_time_offsets_s,
         step_stride=cfg.dataset.step_stride,
         dt=cfg.dataset.dt,
         v_req_clip=cfg.dataset.v_req_clip,

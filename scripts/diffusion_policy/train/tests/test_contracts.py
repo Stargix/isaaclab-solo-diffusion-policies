@@ -9,16 +9,18 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+import torch
 
 _PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_PACKAGE_ROOT))
 
 from train.data.dataset import SpatialHindsightDataset
 from train.data.episode_split import split_episode_indices
-from train.conditioning.goal_builder import build_goal_vector
+from train.conditioning.goal_builder import advance_path_progress, build_goal_vector
+from model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
 
 
-def write_dataset(path: Path, *, demos: int = 3, length: int = 140) -> None:
+def write_dataset(path: Path, *, demos: int = 3, length: int = 240) -> None:
     with h5py.File(path, "w") as file:
         data = file.create_group("data")
         data.attrs["control_rate_hz"] = 50.0
@@ -67,7 +69,7 @@ class SpatialContractTests(unittest.TestCase):
 
     def test_target_and_rolling_hindsight_alignment(self) -> None:
         dataset = SpatialHindsightDataset(
-            [str(self.path)], goal_horizon_steps=10, symmetry_mode="none"
+            [str(self.path)], goal_horizon_steps=100, symmetry_mode="none"
         )
         item = dataset[0]
         np.testing.assert_allclose(item["proprio_hist"][:, 0], np.arange(1, 9))
@@ -79,17 +81,18 @@ class SpatialContractTests(unittest.TestCase):
             demo.root_pos_w,
             demo.cumulative_xy,
             1,
-            11,
+            101,
             demo.root_pos_w[1],
             demo.root_quat_w[1],
             quat_w=demo.root_quat_w,
         )
         np.testing.assert_allclose(item["goal_hist"][0], expected_first, atol=1e-6)
         self.assertFalse(np.allclose(item["goal_hist"][0], item["goal_hist"][-1]))
+        np.testing.assert_allclose(item["goal_hist"][0, [0, 2, 4]], [0.5, 1.0, 1.5], atol=1e-6)
 
     def test_episode_split_and_train_only_stats(self) -> None:
         dataset = SpatialHindsightDataset(
-            [str(self.path)], goal_horizon_steps=10, symmetry_mode="none"
+            [str(self.path)], goal_horizon_steps=100, symmetry_mode="none"
         )
         split = split_episode_indices(len(dataset.demos), 0.34, 3)
         self.assertFalse(set(split.train_demo_indices) & set(split.val_demo_indices))
@@ -98,7 +101,38 @@ class SpatialContractTests(unittest.TestCase):
             & set(dataset.sample_indices_for_demos(split.val_demo_indices))
         )
         stats = dataset.build_normalizer_stats([0], max_stats_samples=2, seed=3)
-        self.assertEqual(float(stats.action.max.max()), 139.0)
+        self.assertEqual(float(stats.action.max.max()), 239.0)
+
+    def test_progress_search_does_not_jump_to_crossing_branch(self) -> None:
+        path = np.zeros((120, 3), dtype=np.float32)
+        path[:, 0] = np.arange(120, dtype=np.float32) * 0.05
+        path[100, :2] = path[10, :2]
+        progress = advance_path_progress(path, path[10, :2], 10, search_forward=20)
+        self.assertEqual(progress, 10)
+
+    def test_small_spatial_policy_loss_and_sampling(self) -> None:
+        dataset = SpatialHindsightDataset(
+            [str(self.path)], goal_horizon_steps=100, symmetry_mode="none"
+        )
+        policy = Solo12DiffusionPolicy(
+            Solo12DiffusionPolicyConfig(
+                goal_dim=11,
+                d_model=32,
+                nhead=4,
+                num_layers=1,
+                p_drop_attn=0.0,
+                num_train_timesteps=2,
+                num_inference_steps=2,
+            )
+        )
+        policy.set_normalizer_stats(dataset.build_normalizer_stats([0, 1], max_stats_samples=50))
+        batch = {key: value.unsqueeze(0) for key, value in dataset[0].items()}
+        self.assertTrue(torch.isfinite(policy.compute_loss(batch)))
+        trajectory = policy.predict_action_denormalized(
+            batch["proprio_hist"], batch["action_hist"], batch["goal_hist"]
+        )
+        self.assertEqual(tuple(trajectory.shape), (1, 16, 12))
+        self.assertEqual(tuple(policy.executable_chunk(trajectory, 2).shape), (1, 2, 12))
 
 
 if __name__ == "__main__":

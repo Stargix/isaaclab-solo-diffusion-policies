@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .data.obs_utils import ACTION_HIST_DIM, GOAL_DIM, PROPRIO_DIM
+from .conditioning.goal_builder import GOAL_SCHEMA_NAME, WAYPOINT_TIME_OFFSETS_S
 
 
 @dataclass
@@ -17,6 +18,7 @@ class DatasetConfig:
     prediction_horizon: int = 16
     execution_offset: int = 8
     goal_horizon_steps: int = 100
+    waypoint_time_offsets_s: tuple[float, float, float] = WAYPOINT_TIME_OFFSETS_S
     step_stride: int = 1
     dt: float = 0.02
     v_req_clip: float = 2.0
@@ -79,8 +81,9 @@ class TrainConfig:
     run_name: str = "solo12_diffusion_policy"
     wandb_project: str | None = None
     wandb_entity: str | None = None
-    schema_version: int = 2
-    policy_kind: str = "spatial_hindsight_ddpm"
+    schema_version: int = 3
+    policy_kind: str = "spatial_time_preview_ddpm"
+    goal_schema: str = GOAL_SCHEMA_NAME
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -97,6 +100,7 @@ TRAINING_CONFIG_KEYS = frozenset(
         "prediction_horizon",
         "execution_offset",
         "goal_horizon_steps",
+        "waypoint_time_offsets_s",
         "step_stride",
         "v_req_clip",
         "symmetry_mode",

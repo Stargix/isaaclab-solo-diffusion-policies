@@ -13,14 +13,14 @@ import torch
 from torch.utils.data import Dataset
 
 from ..conditioning.geometry import cumulative_xy_lengths
-from ..conditioning.goal_builder import build_goal_vector
+from ..conditioning.goal_builder import WAYPOINT_TIME_OFFSETS_S, build_goal_vector
 from .normalization import NormalizerStats, build_stats_with_action_range
 from .obs_utils import GOAL_DIM, PROPRIO_DIM, delayed_io_windows, read_proprio_vector
 from .symmetry import apply_symmetry, symmetry_count
 
 os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 EXPECTED_CONVENTION_PREFIX = "aligned: obs[t] is the proprioceptive state BEFORE executing actions[t]"
 HDF5_OBS_KEYS = (
     "joint_pos",
@@ -149,14 +149,14 @@ class SpatialHindsightDataset(Dataset):
         goal_horizon_steps: int = 100,
         step_stride: int = 1,
         dt: float = 0.02,
-        waypoint_distances: tuple[float, float, float] = (0.4, 0.8, 1.2),
+        waypoint_time_offsets_s: tuple[float, float, float] = WAYPOINT_TIME_OFFSETS_S,
         v_req_clip: float = 2.0,
         symmetry_mode: str = "none",
     ) -> None:
         if history < 1:
             raise ValueError("history must be >= 1.")
         if execution_offset != history:
-            raise ValueError("Schema v2 requires execution_offset == history.")
+            raise ValueError("Spatial schema v3 requires execution_offset == history.")
         if prediction_horizon <= execution_offset:
             raise ValueError("prediction_horizon must include at least one future action.")
         if goal_horizon_steps < 1:
@@ -164,7 +164,13 @@ class SpatialHindsightDataset(Dataset):
         if step_stride < 1:
             raise ValueError("step_stride must be >= 1.")
         if not np.isclose(dt, 0.02):
-            raise ValueError("Schema v2 is fixed at 50 Hz and requires dt=0.02.")
+            raise ValueError("Spatial schema v3 is fixed at 50 Hz and requires dt=0.02.")
+        terminal_time_s = goal_horizon_steps * dt
+        if max(waypoint_time_offsets_s) >= terminal_time_s:
+            raise ValueError(
+                "Temporal preview offsets must be earlier than goal_horizon_steps * dt "
+                f"({terminal_time_s:.3f}s)."
+            )
 
         self.history = history
         self.prediction_horizon = prediction_horizon
@@ -173,7 +179,7 @@ class SpatialHindsightDataset(Dataset):
         self.goal_horizon_steps = goal_horizon_steps
         self.step_stride = step_stride
         self.dt = dt
-        self.waypoint_distances = waypoint_distances
+        self.waypoint_time_offsets_s = tuple(float(value) for value in waypoint_time_offsets_s)
         self.v_req_clip = v_req_clip
         self.symmetry_mode = symmetry_mode
         self._symmetry_count = symmetry_count(symmetry_mode)
@@ -238,7 +244,7 @@ class SpatialHindsightDataset(Dataset):
             demo.root_quat_w[state_step],
             quat_w=demo.root_quat_w,
             dt=self.dt,
-            waypoint_distances=self.waypoint_distances,
+            waypoint_time_offsets_s=self.waypoint_time_offsets_s,
             v_req_clip=self.v_req_clip,
         )
 
@@ -246,6 +252,16 @@ class SpatialHindsightDataset(Dataset):
         demo = self.demos[sample.demo_idx]
         start = sample.anchor_step - self.history
         return np.stack([self._goal_for_state(demo, state_step) for state_step in range(start, sample.anchor_step)])
+
+    def goal_for_sample(self, sample_index: int, history_index: int = -1) -> np.ndarray:
+        """Return one raw goal token for coverage/preflight analysis."""
+
+        sample = self.samples[int(sample_index)]
+        history_index = history_index if history_index >= 0 else self.history + history_index
+        if not 0 <= history_index < self.history:
+            raise IndexError(f"history_index must be in [-{self.history}, {self.history - 1}].")
+        state_step = sample.anchor_step - self.history + history_index
+        return self._goal_for_state(self.demos[sample.demo_idx], state_step)
 
     def _raw_sample(self, sample: HindsightSample) -> tuple[torch.Tensor, ...]:
         demo = self.demos[sample.demo_idx]

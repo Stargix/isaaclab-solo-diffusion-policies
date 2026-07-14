@@ -93,8 +93,8 @@ def build_default_path(
     length_m: float = 3.0,
     num_points: int = 60,
     crouch_start_m: float = 1.5,
-    walk_z: float = 0.24,
-    crouch_z: float = 0.16,
+    walk_z: float = 0.2932,
+    crouch_z: float = 0.1705,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build a straight path in the robot's forward (yaw) direction."""
 
@@ -176,6 +176,7 @@ def run_warmup(
     *,
     warmup_steps: int,
     goal_horizon_steps: int,
+    waypoint_time_offsets_s: tuple[float, float, float],
     dt: float,
     speed: float,
     v_req_clip: float,
@@ -196,6 +197,7 @@ def run_warmup(
             cumulative_lengths,
             path_progress,
             goal_horizon_steps=goal_horizon_steps,
+            waypoint_time_offsets_s=waypoint_time_offsets_s,
             dt=dt,
             speed=speed,
             v_req_clip=v_req_clip,
@@ -226,6 +228,7 @@ def reset_env_history(
     path_progress: np.ndarray,
     *,
     goal_horizon_steps: int,
+    waypoint_time_offsets_s: tuple[float, float, float],
     dt: float,
     speed: float,
     v_req_clip: float,
@@ -240,6 +243,7 @@ def reset_env_history(
         cumulative_lengths,
         path_progress,
         goal_horizon_steps=goal_horizon_steps,
+        waypoint_time_offsets_s=waypoint_time_offsets_s,
         dt=dt,
         speed=speed,
         v_req_clip=v_req_clip,
@@ -270,6 +274,7 @@ def compute_goals(
     path_progress: np.ndarray,
     *,
     goal_horizon_steps: int,
+    waypoint_time_offsets_s: tuple[float, float, float],
     dt: float,
     speed: float,
     v_req_clip: float,
@@ -285,6 +290,7 @@ def compute_goals(
         pos_w,
         quat_w,
         goal_horizon_steps=goal_horizon_steps,
+        waypoint_time_offsets_s=waypoint_time_offsets_s,
         dt=dt,
         speed=speed,
         path_progress=path_progress,
@@ -292,17 +298,17 @@ def compute_goals(
     )
     goals_tensor = torch.from_numpy(goals).to(device)
     if getattr(args_cli, "force_walk_goal", False):
-        goals_tensor[:, 0] = 0.4
+        goals_tensor[:, 0] = 0.2
         goals_tensor[:, 1] = 0.0
-        goals_tensor[:, 2] = 0.8
+        goals_tensor[:, 2] = 0.4
         goals_tensor[:, 3] = 0.0
-        goals_tensor[:, 4] = 1.2
+        goals_tensor[:, 4] = 0.6
         goals_tensor[:, 5] = 0.0
         goals_tensor[:, 6] = 0.8
         goals_tensor[:, 7] = 0.0
-        goals_tensor[:, 8] = 0.24
+        goals_tensor[:, 8] = 0.2932
         goals_tensor[:, 9] = 0.0
-        goals_tensor[:, 10] = 1.0
+        goals_tensor[:, 10] = 0.4
     return goals_tensor
 
 
@@ -342,7 +348,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     print(f"[INFO] Loading checkpoint: {checkpoint_path} ({device})")
 
     checkpoint = load_training_checkpoint(
-        checkpoint_path, device, expected_policy_kind="spatial_hindsight_ddpm"
+        checkpoint_path, device, expected_policy_kind="spatial_time_preview_ddpm"
     )
     config_dict = checkpoint["config"]
     normalizer_stats = NormalizerStats.from_dict(checkpoint["normalizer_stats"])
@@ -350,6 +356,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     policy_cfg = _model_cfg_from_checkpoint(config_dict)
     policy_cfg.num_inference_steps = infer_steps
     goal_horizon_steps = args_cli.goal_horizon_steps or config_dict["dataset"]["goal_horizon_steps"]
+    waypoint_time_offsets_s = tuple(config_dict["dataset"]["waypoint_time_offsets_s"])
 
     policy = Solo12DiffusionPolicy(policy_cfg)
     policy.load_state_dict(checkpoint["ema_model_state_dict"])
@@ -420,6 +427,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         path_progress,
         warmup_steps=max(args_cli.warmup_steps, history_len + 1),
         goal_horizon_steps=goal_horizon_steps,
+        waypoint_time_offsets_s=waypoint_time_offsets_s,
         dt=dt,
         speed=args_cli.desired_speed,
         v_req_clip=v_req_clip,
@@ -514,6 +522,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 path_plan.cumulative_lengths,
                 path_progress,
                 goal_horizon_steps=goal_horizon_steps,
+                waypoint_time_offsets_s=waypoint_time_offsets_s,
                 dt=dt,
                 speed=args_cli.desired_speed,
                 v_req_clip=v_req_clip,
@@ -554,6 +563,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                         path_plan.cumulative_lengths,
                         path_progress,
                         goal_horizon_steps=goal_horizon_steps,
+                        waypoint_time_offsets_s=waypoint_time_offsets_s,
                         dt=dt,
                         speed=args_cli.desired_speed,
                         v_req_clip=v_req_clip,
