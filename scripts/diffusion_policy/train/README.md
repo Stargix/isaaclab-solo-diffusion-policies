@@ -35,10 +35,22 @@ conda run --no-capture-output -n env_isaaclab python scripts/diffusion_policy/tr
   --datasets scripts/diffusion_policy/data/datasets/walk_crouch_v3.hdf5 `
   --output_dir scripts/diffusion_policy/runs/spatial_walk_crouch_time_preview_v3 `
   --config scripts/diffusion_policy/train/configs/compact_k10.json `
-  --symmetry_mode quadruped
+  --symmetry_mode quadruped `
+  --batch_size 1024 --epochs 30 --save_every 5 `
+  --run_name spatial_walk_crouch_time_preview_v3_seed42 `
+  --wandb_project solo12-diffusion-policy
 ```
 
 A walk-only train is a diagnostic only if this run fails to learn path geometry.
+Thirty epochs give approximately the same optimization budget as the successful
+baseline run stopped at epoch 25; do not default to a blind 200-epoch run.
+
+Resume an interrupted epoch-boundary checkpoint with the same data/config flags
+and:
+
+```powershell
+--resume scripts/diffusion_policy/runs/spatial_walk_crouch_time_preview_v3/checkpoint_epoch_0010.pt
+```
 
 ## Evaluate
 
