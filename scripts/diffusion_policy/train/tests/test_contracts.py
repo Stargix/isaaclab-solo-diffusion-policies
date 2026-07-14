@@ -51,6 +51,17 @@ def write_dataset(path: Path, *, demos: int = 3, length: int = 240) -> None:
             root_quat[:, 0] = 1.0
             obs.create_dataset("root_pos_w", data=root_pos)
             obs.create_dataset("root_quat_w", data=root_quat)
+            reference_pos = root_pos.copy()
+            # Deliberately diverge from achieved motion so the test catches an
+            # accidental fallback to hindsight positions.
+            reference_pos[:, 1] = np.arange(length, dtype=np.float32) * 0.01
+            reference_pos[:, 2] = 0.2932
+            obs.create_dataset("reference_pos_w", data=reference_pos)
+            obs.create_dataset("reference_yaw_w", data=np.zeros((length, 1), dtype=np.float32))
+            obs.create_dataset(
+                "reference_command",
+                data=np.repeat(np.array([[0.4, 0.0, 0.0]], np.float32), length, axis=0),
+            )
             demo.create_dataset("actions", data=actions)
             demo.create_dataset("skill_idx", data=np.zeros(length, dtype=np.int8))
             dones = np.zeros(length, dtype=bool)
@@ -133,6 +144,25 @@ class SpatialContractTests(unittest.TestCase):
         )
         self.assertEqual(tuple(trajectory.shape), (1, 16, 12))
         self.assertEqual(tuple(policy.executable_chunk(trajectory, 2).shape), (1, 2, 12))
+
+    def test_reference_goal_and_padded_reset_contract(self) -> None:
+        dataset = SpatialHindsightDataset(
+            [str(self.path)],
+            goal_horizon_steps=100,
+            goal_source="reference",
+            include_padded_starts=True,
+            startup_sample_multiplier=2,
+            symmetry_mode="none",
+        )
+        item = dataset[0]
+        # Anchor t=0 executes token H = expert action a[0]. The preceding
+        # action trajectory and history are padded zeros, matching deployment.
+        np.testing.assert_allclose(item["proprio_hist"][:, 0], 0.0)
+        np.testing.assert_allclose(item["action_hist"], 0.0)
+        np.testing.assert_allclose(item["actions"][:8], 0.0)
+        np.testing.assert_allclose(item["actions"][8, 0], 0.0)
+        # The reference curves much more than the achieved trajectory.
+        self.assertGreater(float(item["goal_hist"][-1, 7]), 0.5)
 
 
 if __name__ == "__main__":

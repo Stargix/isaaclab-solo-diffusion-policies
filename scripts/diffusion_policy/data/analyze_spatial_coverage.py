@@ -15,7 +15,7 @@ import numpy as np
 _PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_PACKAGE_ROOT))
 
-from train.conditioning.goal_builder import GOAL_SCHEMA_NAME, WAYPOINT_TIME_OFFSETS_S
+from train.conditioning.goal_builder import GOAL_SCHEMA_NAME, REFERENCE_GOAL_SCHEMA_NAME, WAYPOINT_TIME_OFFSETS_S
 from train.data.dataset import SpatialHindsightDataset
 
 
@@ -30,7 +30,7 @@ FEATURE_NAMES = (
     "target_2p0_y",
     "target_height_abs",
     "target_yaw_rel",
-    "achieved_speed_2p0",
+    "preview_speed_2p0",
 )
 
 
@@ -114,7 +114,7 @@ def make_plots(values: np.ndarray, output: Path) -> None:
 
     target_distance = np.linalg.norm(values[:, 6:8], axis=-1)
     axes[0, 1].scatter(values[:, 10], target_distance, c=values[:, 8], s=4, alpha=0.25)
-    axes[0, 1].set(title="Speed and two-second reach", xlabel="achieved speed [m/s]", ylabel="target distance [m]")
+    axes[0, 1].set(title="Speed and two-second reach", xlabel="preview speed [m/s]", ylabel="target distance [m]")
 
     axes[1, 0].scatter(values[:, 6], values[:, 7], c=values[:, 8], s=4, alpha=0.25)
     axes[1, 0].set(title="Terminal XY support", xlabel="target x [m]", ylabel="target y [m]")
@@ -139,6 +139,9 @@ def main() -> None:
     parser.add_argument("--max_samples", type=int, default=50_000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--goal_horizon_steps", type=int, default=100)
+    parser.add_argument("--goal_source", choices=["achieved", "reference"], default="achieved")
+    parser.add_argument("--include_padded_starts", action="store_true")
+    parser.add_argument("--startup_sample_multiplier", type=int, default=1)
     args = parser.parse_args()
 
     output = Path(args.output_dir)
@@ -147,6 +150,9 @@ def main() -> None:
         args.datasets,
         goal_horizon_steps=args.goal_horizon_steps,
         waypoint_time_offsets_s=WAYPOINT_TIME_OFFSETS_S,
+        goal_source=args.goal_source,
+        include_padded_starts=args.include_padded_starts,
+        startup_sample_multiplier=args.startup_sample_multiplier,
         symmetry_mode="none",
     )
     rng = np.random.default_rng(args.seed)
@@ -166,9 +172,10 @@ def main() -> None:
         skill_demo_counts[name] = skill_demo_counts.get(name, 0) + 1
 
     summary = {
-        "goal_schema": GOAL_SCHEMA_NAME,
+        "goal_schema": REFERENCE_GOAL_SCHEMA_NAME if args.goal_source == "reference" else GOAL_SCHEMA_NAME,
         "waypoint_time_offsets_s": WAYPOINT_TIME_OFFSETS_S,
         "goal_horizon_steps": args.goal_horizon_steps,
+        "goal_source": args.goal_source,
         "control_rate_hz": 50.0,
         "datasets": {str(Path(path).resolve()): sha256(path) for path in args.datasets},
         "demos": len(dataset.demos),
@@ -187,4 +194,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

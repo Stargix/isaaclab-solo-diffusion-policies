@@ -3,6 +3,61 @@
 Run this after the command-only baseline. It keeps the same tested generative
 backbone and changes only the conditioning/data problem.
 
+## Phase A: walk-only reference-path tracker
+
+The first valid waypoint experiment is **walk only**. It does not train on
+achieved-future hindsight positions. Collection integrates the commanded
+`[vx, vy, wz]` in world coordinates and stores `reference_pos_w`,
+`reference_yaw_w` and `reference_command` alongside the measured robot state.
+Thus the target remains a desired route when the expert has tracking error.
+
+The collector also records a zero-command reset hold, starts, stops, arcs and
+lateral phases. The Phase-A dataset loader includes padded reset samples and
+oversamples them modestly; this makes the all-zero action history used at
+deployment an explicit training condition instead of an accidental OOD state.
+
+### Collect and preflight
+
+```powershell
+conda run --no-capture-output -n env_isaaclab python scripts/diffusion_policy/data/collect_data.py `
+  --mode single --task solo12-v0 `
+  --checkpoint checkpoints/walk_safe.pt --skill_name walk `
+  --desired_base_height 0.2932 `
+  --route_profile phase_a --command_resample_time_s 1.0 `
+  --startup_hold_steps 25 --include_warmup_frames `
+  --num_envs 128 --num_steps 1500000 `
+  --physics_dr_mode light --seed 42 `
+  --output_name walk_phase_a_reference_v1.hdf5 --headless
+
+conda run --no-capture-output -n env_isaaclab python scripts/diffusion_policy/data/validate_phase_a_dataset.py `
+  --dataset scripts/diffusion_policy/data/datasets/walk_phase_a_reference_v1.hdf5 `
+  --output_dir scripts/diffusion_policy/data/coverage/walk_phase_a_reference_v1
+
+conda run --no-capture-output -n env_isaaclab python scripts/diffusion_policy/data/analyze_spatial_coverage.py `
+  --datasets scripts/diffusion_policy/data/datasets/walk_phase_a_reference_v1.hdf5 `
+  --goal_source reference --include_padded_starts --startup_sample_multiplier 16 `
+  --output_dir scripts/diffusion_policy/data/coverage/walk_phase_a_reference_v1_goals
+```
+
+Do not merge this file with crouch data. Posture transitions are Phase B and
+need a teacher that actually executes a height schedule within each episode.
+
+### Train Phase A
+
+```powershell
+conda run --no-capture-output -n env_isaaclab python scripts/diffusion_policy/train/train.py `
+  --datasets scripts/diffusion_policy/data/datasets/walk_phase_a_reference_v1.hdf5 `
+  --output_dir scripts/diffusion_policy/runs/phase_a_walk_reference_k10_v1 `
+  --config scripts/diffusion_policy/train/configs/phase_a_walk_reference_k10.json `
+  --symmetry_mode quadruped `
+  --run_name phase_a_walk_reference_k10_v1_seed42 `
+  --wandb_project solo12-diffusion-policy
+```
+
+The resulting checkpoint uses schema v4 / `spatial_reference_path_ddpm`; it is
+intentionally incompatible with the old achieved-hindsight run. Evaluate it on
+a constant-height straight `walk` route first, then on gentle curves.
+
 ## Schema v3 contract
 
 - 50 Hz control and `H=8` observation tokens.
@@ -25,7 +80,7 @@ the planned path at approximately `speed * time_offset` metres. This preserves
 the meaning of every feature across speeds and avoids duplicated far waypoints
 when a slow trajectory travels less than 1.2 m in the terminal horizon.
 
-## Train
+## Legacy achieved-hindsight run (diagnostic only)
 
 Use the validated separate-skill walk+crouch dataset for the single main spatial
 train:

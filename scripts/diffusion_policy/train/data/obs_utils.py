@@ -39,6 +39,8 @@ def delayed_io_windows(
     actions: np.ndarray,
     step: int,
     history: int,
+    *,
+    pad_start: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build delayed proprio/action histories for anchor ``step``.
 
@@ -47,7 +49,15 @@ def delayed_io_windows(
     - actions: ``a_{step-history-1:step-1}`` (ends at ``step-2``)
     """
 
-    proprio_hist = proprio[step - history : step].astype(np.float32)
+    if not pad_start:
+        proprio_hist = proprio[step - history : step].astype(np.float32)
+    else:
+        if step < 0 or step >= len(proprio):
+            raise IndexError(f"step={step} is outside the demonstration.")
+        proprio_hist = np.empty((history, proprio.shape[-1]), dtype=np.float32)
+        for k in range(history):
+            state_idx = step - history + k
+            proprio_hist[k] = proprio[max(0, state_idx)]
     action_hist = np.zeros((history, ACTION_HIST_DIM), dtype=np.float32)
     for k in range(history):
         action_idx = step - history + k - 1

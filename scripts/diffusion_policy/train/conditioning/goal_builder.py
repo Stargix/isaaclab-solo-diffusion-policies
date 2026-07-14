@@ -9,7 +9,11 @@ import numpy as np
 from .geometry import relative_yaw, transform_point_to_yaw_frame
 
 
+# The vector layout is identical for achieved-hindsight and explicit-reference
+# data.  The schema name carries the semantic distinction so checkpoints cannot
+# silently train on one and deploy as the other.
 GOAL_SCHEMA_NAME = "spatial_time_preview11_v1"
+REFERENCE_GOAL_SCHEMA_NAME = "spatial_reference_path11_v1"
 WAYPOINT_TIME_OFFSETS_S = (0.5, 1.0, 1.5)
 
 

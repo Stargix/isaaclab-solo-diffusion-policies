@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import torch
 
-from ..conditioning.goal_builder import GOAL_SCHEMA_NAME
+from ..conditioning.goal_builder import GOAL_SCHEMA_NAME, REFERENCE_GOAL_SCHEMA_NAME
 
 
 def load_training_checkpoint(
     path: str | Path,
     device: torch.device | str,
     *,
-    expected_policy_kind: str | None = None,
+    expected_policy_kind: str | Iterable[str] | None = None,
 ) -> dict[str, Any]:
     """Load a Solo12 diffusion-policy checkpoint saved by ``train.py``.
 
@@ -29,17 +29,21 @@ def load_training_checkpoint(
     schema_version = checkpoint.get("schema_version", config.get("schema_version"))
     policy_kind = checkpoint.get("policy_kind", config.get("policy_kind"))
     goal_schema = config.get("goal_schema")
-    if schema_version != 3:
+    if schema_version not in {3, 4}:
         raise ValueError(
             f"Checkpoint {path} uses unsupported schema_version={schema_version!r}. "
-            "Retrain with the temporal-preview conditioning contract (schema v3)."
+            "Retrain with a supported temporal-preview conditioning contract."
         )
-    if expected_policy_kind is not None and policy_kind != expected_policy_kind:
+    expected_kinds = None
+    if expected_policy_kind is not None:
+        expected_kinds = {expected_policy_kind} if isinstance(expected_policy_kind, str) else set(expected_policy_kind)
+    if expected_kinds is not None and policy_kind not in expected_kinds:
         raise ValueError(
-            f"Checkpoint {path} has policy_kind={policy_kind!r}; expected {expected_policy_kind!r}."
+            f"Checkpoint {path} has policy_kind={policy_kind!r}; expected one of {sorted(expected_kinds)!r}."
         )
-    if goal_schema != GOAL_SCHEMA_NAME:
+    expected_goal_schema = REFERENCE_GOAL_SCHEMA_NAME if schema_version == 4 else GOAL_SCHEMA_NAME
+    if goal_schema != expected_goal_schema:
         raise ValueError(
-            f"Checkpoint {path} has goal_schema={goal_schema!r}; expected {GOAL_SCHEMA_NAME!r}."
+            f"Checkpoint {path} has goal_schema={goal_schema!r}; expected {expected_goal_schema!r}."
         )
     return checkpoint

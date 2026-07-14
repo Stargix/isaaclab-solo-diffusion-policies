@@ -22,6 +22,9 @@ class DatasetConfig:
     step_stride: int = 1
     dt: float = 0.02
     v_req_clip: float = 2.0
+    goal_source: str = "achieved"
+    include_padded_starts: bool = False
+    startup_sample_multiplier: int = 1
     symmetry_mode: str = "quadruped"
     max_stats_samples: int = 20000
     val_fraction: float = 0.05
@@ -103,6 +106,9 @@ TRAINING_CONFIG_KEYS = frozenset(
         "waypoint_time_offsets_s",
         "step_stride",
         "v_req_clip",
+        "goal_source",
+        "include_padded_starts",
+        "startup_sample_multiplier",
         "symmetry_mode",
         "max_stats_samples",
         "val_fraction",

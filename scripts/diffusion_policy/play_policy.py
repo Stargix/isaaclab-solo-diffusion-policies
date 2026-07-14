@@ -389,9 +389,15 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     print(f"[INFO] Loading checkpoint: {checkpoint_path} ({device})")
 
     checkpoint = load_training_checkpoint(
-        checkpoint_path, device, expected_policy_kind="spatial_time_preview_ddpm"
+        checkpoint_path,
+        device,
+        expected_policy_kind=("spatial_time_preview_ddpm", "spatial_reference_path_ddpm"),
     )
     config_dict = checkpoint["config"]
+    print(
+        f"[INFO] policy_kind={checkpoint['policy_kind']} "
+        f"goal_source={config_dict['dataset'].get('goal_source', 'achieved')}"
+    )
     normalizer_stats = NormalizerStats.from_dict(checkpoint["normalizer_stats"])
     infer_steps = resolve_inference_steps(args_cli.num_inference_steps, config_dict["diffusion"])
     policy_cfg = _model_cfg_from_checkpoint(config_dict)

@@ -32,6 +32,11 @@ HDF5_OBS_KEYS = (
     "root_quat_w",
     "command_speed",
 )
+REFERENCE_OBS_KEYS = (
+    "reference_pos_w",
+    "reference_yaw_w",
+    "reference_command",
+)
 
 
 @dataclass(frozen=True)
@@ -44,6 +49,9 @@ class DemoSequence:
     root_quat_w: np.ndarray
     cumulative_xy: np.ndarray
     skill_idx: np.ndarray | None
+    reference_pos_w: np.ndarray | None = None
+    reference_yaw_w: np.ndarray | None = None
+    reference_cumulative_xy: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -63,7 +71,7 @@ def _demo_sort_key(name: str) -> tuple[int, str]:
         return 0, name
 
 
-def _validate_hdf5(path: str) -> None:
+def _validate_hdf5(path: str, *, require_reference_path: bool) -> None:
     with h5py.File(path, "r") as file:
         if "data" not in file:
             raise KeyError(f"{path}: missing 'data' group.")
@@ -89,12 +97,22 @@ def _validate_hdf5(path: str) -> None:
                 raise KeyError(f"{path}/{demo_name}: missing obs keys {missing}.")
             if "actions" not in demo or "dones" not in demo:
                 raise KeyError(f"{path}/{demo_name}: missing actions or dones.")
+            if require_reference_path:
+                missing_reference = [key for key in REFERENCE_OBS_KEYS if key not in obs]
+                if missing_reference:
+                    raise KeyError(
+                        f"{path}/{demo_name}: reference goal source requires obs keys {missing_reference}."
+                    )
             length = int(demo["actions"].shape[0])
             if length == 0:
                 raise ValueError(f"{path}/{demo_name}: empty demonstration.")
             for key in HDF5_OBS_KEYS:
                 if int(obs[key].shape[0]) != length:
                     raise ValueError(f"{path}/{demo_name}: obs/{key} length mismatch.")
+            if require_reference_path:
+                for key in REFERENCE_OBS_KEYS:
+                    if int(obs[key].shape[0]) != length:
+                        raise ValueError(f"{path}/{demo_name}: obs/{key} length mismatch.")
             dones = demo["dones"][:]
             if len(dones) != length or (length and not bool(dones[-1])) or np.any(dones[:-1]):
                 raise ValueError(f"{path}/{demo_name}: dones must be false except at the final sample.")
@@ -108,6 +126,10 @@ def _validate_hdf5(path: str) -> None:
                 for key in HDF5_OBS_KEYS:
                     if not np.isfinite(obs[key][start:end]).all():
                         raise ValueError(f"{path}/{demo_name}: non-finite obs/{key}.")
+                if require_reference_path:
+                    for key in REFERENCE_OBS_KEYS:
+                        if not np.isfinite(obs[key][start:end]).all():
+                            raise ValueError(f"{path}/{demo_name}: non-finite obs/{key}.")
                 expected = np.empty_like(actions)
                 if start == 0:
                     expected[0] = 0.0
@@ -151,6 +173,9 @@ class SpatialHindsightDataset(Dataset):
         dt: float = 0.02,
         waypoint_time_offsets_s: tuple[float, float, float] = WAYPOINT_TIME_OFFSETS_S,
         v_req_clip: float = 2.0,
+        goal_source: str = "achieved",
+        include_padded_starts: bool = False,
+        startup_sample_multiplier: int = 1,
         symmetry_mode: str = "none",
     ) -> None:
         if history < 1:
@@ -163,6 +188,10 @@ class SpatialHindsightDataset(Dataset):
             raise ValueError("goal_horizon_steps must be >= 1.")
         if step_stride < 1:
             raise ValueError("step_stride must be >= 1.")
+        if goal_source not in {"achieved", "reference"}:
+            raise ValueError("goal_source must be 'achieved' or 'reference'.")
+        if startup_sample_multiplier < 1:
+            raise ValueError("startup_sample_multiplier must be >= 1.")
         if not np.isclose(dt, 0.02):
             raise ValueError("Spatial schema v3 is fixed at 50 Hz and requires dt=0.02.")
         terminal_time_s = goal_horizon_steps * dt
@@ -181,6 +210,9 @@ class SpatialHindsightDataset(Dataset):
         self.dt = dt
         self.waypoint_time_offsets_s = tuple(float(value) for value in waypoint_time_offsets_s)
         self.v_req_clip = v_req_clip
+        self.goal_source = goal_source
+        self.include_padded_starts = bool(include_padded_starts)
+        self.startup_sample_multiplier = int(startup_sample_multiplier)
         self.symmetry_mode = symmetry_mode
         self._symmetry_count = symmetry_count(symmetry_mode)
 
@@ -195,7 +227,7 @@ class SpatialHindsightDataset(Dataset):
             raise ValueError("No valid samples: check episode lengths, history and goal horizon.")
 
     def _load_file(self, path: str) -> None:
-        _validate_hdf5(path)
+        _validate_hdf5(path, require_reference_path=self.goal_source == "reference")
         resolved = str(Path(path).resolve())
         with h5py.File(path, "r") as file:
             data = file["data"]
@@ -209,6 +241,16 @@ class SpatialHindsightDataset(Dataset):
                 demo = data[demo_name]
                 obs = demo["obs"]
                 demo_idx = len(self.demos)
+                reference_pos_w = (
+                    obs["reference_pos_w"][:].astype(np.float32)
+                    if self.goal_source == "reference"
+                    else None
+                )
+                reference_yaw_w = (
+                    obs["reference_yaw_w"][:].astype(np.float32).reshape(-1)
+                    if self.goal_source == "reference"
+                    else None
+                )
                 self.demos.append(
                     DemoSequence(
                         source_file=resolved,
@@ -219,22 +261,48 @@ class SpatialHindsightDataset(Dataset):
                         root_quat_w=obs["root_quat_w"][:].astype(np.float32),
                         cumulative_xy=cumulative_xy_lengths(obs["root_pos_w"][:].astype(np.float32)),
                         skill_idx=demo["skill_idx"][:].astype(np.int16) if "skill_idx" in demo else None,
+                        reference_pos_w=reference_pos_w,
+                        reference_yaw_w=reference_yaw_w,
+                        reference_cumulative_xy=(
+                            cumulative_xy_lengths(reference_pos_w) if reference_pos_w is not None else None
+                        ),
                     )
                 )
                 self._index_demo(demo_idx)
 
     def _index_demo(self, demo_idx: int) -> None:
         length = len(self.demos[demo_idx].actions)
-        first_anchor = self.history + 1
+        first_anchor = 0 if self.include_padded_starts else self.history + 1
         # Latest goal history token is at t-1 and looks goal_horizon_steps ahead.
         last_for_goal_exclusive = length - self.goal_horizon_steps + 1
         last_for_actions_exclusive = length - self.future_horizon + 1
         last_anchor_exclusive = min(last_for_goal_exclusive, last_for_actions_exclusive)
         for anchor in range(first_anchor, last_anchor_exclusive, self.step_stride):
-            self.samples.append(HindsightSample(demo_idx, anchor))
+            repeats = self.startup_sample_multiplier if anchor < self.history else 1
+            self.samples.extend(HindsightSample(demo_idx, anchor) for _ in range(repeats))
 
     def _goal_for_state(self, demo: DemoSequence, state_step: int) -> np.ndarray:
+        state_step = max(0, int(state_step))
         end_step = state_step + self.goal_horizon_steps
+        if self.goal_source == "reference":
+            if (
+                demo.reference_pos_w is None
+                or demo.reference_yaw_w is None
+                or demo.reference_cumulative_xy is None
+            ):
+                raise RuntimeError("Reference goal requested but the demonstration has no reference path.")
+            return build_goal_vector(
+                demo.reference_pos_w,
+                demo.reference_cumulative_xy,
+                state_step,
+                end_step,
+                demo.root_pos_w[state_step],
+                demo.root_quat_w[state_step],
+                yaws_w=demo.reference_yaw_w,
+                dt=self.dt,
+                waypoint_time_offsets_s=self.waypoint_time_offsets_s,
+                v_req_clip=self.v_req_clip,
+            )
         return build_goal_vector(
             demo.root_pos_w,
             demo.cumulative_xy,
@@ -266,15 +334,26 @@ class SpatialHindsightDataset(Dataset):
     def _raw_sample(self, sample: HindsightSample) -> tuple[torch.Tensor, ...]:
         demo = self.demos[sample.demo_idx]
         proprio_hist, action_hist = delayed_io_windows(
-            demo.proprio, demo.actions, sample.anchor_step, self.history
+            demo.proprio,
+            demo.actions,
+            sample.anchor_step,
+            self.history,
+            pad_start=self.include_padded_starts,
         )
         target_start = sample.anchor_step - self.execution_offset
         target_end = target_start + self.prediction_horizon
+        target_actions = np.zeros((self.prediction_horizon, demo.actions.shape[-1]), dtype=np.float32)
+        source_start = max(0, target_start)
+        source_end = min(len(demo.actions), target_end)
+        destination_start = source_start - target_start
+        destination_end = destination_start + max(0, source_end - source_start)
+        if source_end > source_start:
+            target_actions[destination_start:destination_end] = demo.actions[source_start:source_end]
         return (
             torch.from_numpy(proprio_hist.copy()),
             torch.from_numpy(action_hist.copy()),
             torch.from_numpy(self._goal_history(sample).astype(np.float32)),
-            torch.from_numpy(demo.actions[target_start:target_end].copy()),
+            torch.from_numpy(target_actions),
         )
 
     def sample_indices_for_demos(self, demo_indices: Iterable[int]) -> list[int]:

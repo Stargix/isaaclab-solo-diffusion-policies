@@ -42,6 +42,7 @@ if __package__ in (None, ""):
         TrainConfig,
         load_training_config_overrides,
     )
+    from train.conditioning.goal_builder import GOAL_SCHEMA_NAME, REFERENCE_GOAL_SCHEMA_NAME
     from train.data.dataset import SpatialHindsightDataset
     from train.data.episode_split import split_episode_indices
     from train.runtime.checkpoint import load_training_checkpoint
@@ -60,6 +61,7 @@ else:  # pragma: no cover
         TrainConfig,
         load_training_config_overrides,
     )
+    from .conditioning.goal_builder import GOAL_SCHEMA_NAME, REFERENCE_GOAL_SCHEMA_NAME
     from .data.dataset import SpatialHindsightDataset
     from .data.episode_split import split_episode_indices
     from .runtime.checkpoint import load_training_checkpoint
@@ -82,7 +84,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output_dir", required=True, help="Directory for checkpoints and config.")
     parser.add_argument("--run_name", default="solo12_diffusion_policy", help="Run name for logs.")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--resume", type=str, default=None, help="Resume model/EMA/optimizer/scheduler from a v3 checkpoint.")
+    parser.add_argument("--resume", type=str, default=None, help="Resume model/EMA/optimizer/scheduler from a compatible checkpoint.")
 
     parser.add_argument("--history", type=int, default=DATASET_DEFAULTS.history)
     parser.add_argument("--prediction_horizon", type=int, default=DATASET_DEFAULTS.prediction_horizon)
@@ -98,6 +100,24 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--step_stride", type=int, default=DATASET_DEFAULTS.step_stride, help="Temporal stride to sub-sample step windows.")
     parser.add_argument("--v_req_clip", type=float, default=DATASET_DEFAULTS.v_req_clip)
+    parser.add_argument(
+        "--goal_source",
+        choices=["achieved", "reference"],
+        default=DATASET_DEFAULTS.goal_source,
+        help="achieved = legacy hindsight; reference = explicit route stored in the HDF5.",
+    )
+    parser.add_argument(
+        "--include_padded_starts",
+        action="store_true",
+        default=DATASET_DEFAULTS.include_padded_starts,
+        help="Include reset samples with left-padded state/action/goal histories.",
+    )
+    parser.add_argument(
+        "--startup_sample_multiplier",
+        type=int,
+        default=DATASET_DEFAULTS.startup_sample_multiplier,
+        help="Repeat reset/start anchors so they remain visible among 20-second episodes.",
+    )
     parser.add_argument("--symmetry_mode", choices=["none", "mirror", "quadruped"], default=DATASET_DEFAULTS.symmetry_mode)
     parser.add_argument("--max_stats_samples", type=int, default=DATASET_DEFAULTS.max_stats_samples)
     parser.add_argument("--val_fraction", type=float, default=DATASET_DEFAULTS.val_fraction)
@@ -156,6 +176,7 @@ def set_seed(seed: int) -> None:
 
 
 def make_config(args: argparse.Namespace) -> TrainConfig:
+    is_reference = args.goal_source == "reference"
     return TrainConfig(
         dataset=DatasetConfig(
             hdf5_paths=args.datasets,
@@ -166,6 +187,9 @@ def make_config(args: argparse.Namespace) -> TrainConfig:
             waypoint_time_offsets_s=tuple(args.waypoint_time_offsets_s),
             step_stride=args.step_stride,
             v_req_clip=args.v_req_clip,
+            goal_source=args.goal_source,
+            include_padded_starts=args.include_padded_starts,
+            startup_sample_multiplier=args.startup_sample_multiplier,
             symmetry_mode=args.symmetry_mode,
             max_stats_samples=args.max_stats_samples,
             val_fraction=args.val_fraction,
@@ -202,6 +226,9 @@ def make_config(args: argparse.Namespace) -> TrainConfig:
         run_name=args.run_name,
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
+        schema_version=4 if is_reference else 3,
+        policy_kind="spatial_reference_path_ddpm" if is_reference else "spatial_time_preview_ddpm",
+        goal_schema=REFERENCE_GOAL_SCHEMA_NAME if is_reference else GOAL_SCHEMA_NAME,
     )
 
 
@@ -346,6 +373,9 @@ def main() -> None:
         step_stride=cfg.dataset.step_stride,
         dt=cfg.dataset.dt,
         v_req_clip=cfg.dataset.v_req_clip,
+        goal_source=cfg.dataset.goal_source,
+        include_padded_starts=cfg.dataset.include_padded_starts,
+        startup_sample_multiplier=cfg.dataset.startup_sample_multiplier,
         symmetry_mode=cfg.dataset.symmetry_mode,
     )
     episode_split = split_episode_indices(len(dataset.demos), cfg.dataset.val_fraction, cfg.optim.seed)
@@ -404,6 +434,7 @@ def main() -> None:
     print(
         f"[INFO] demos={len(dataset.demos)} samples={len(dataset)} "
         f"train={len(train_dataset)} val={len(val_dataset)} "
+        f"goal_source={cfg.dataset.goal_source} padded_starts={cfg.dataset.include_padded_starts} "
         f"symmetry={cfg.dataset.symmetry_mode} steps/epoch={steps_per_epoch} total_steps={total_steps} "
         f"lr_warmup={cfg.optim.lr_warmup_steps} device={device}"
     )
@@ -412,9 +443,7 @@ def main() -> None:
     best_val = float("inf")
     start_epoch = 1
     if args.resume is not None:
-        resume = load_training_checkpoint(
-            args.resume, device, expected_policy_kind="spatial_time_preview_ddpm"
-        )
+        resume = load_training_checkpoint(args.resume, device, expected_policy_kind=cfg.policy_kind)
         previous_cfg = resume["config"]
         for section in ("dataset", "model", "diffusion"):
             if previous_cfg[section] != cfg.to_dict()[section]:

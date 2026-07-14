@@ -153,8 +153,8 @@ def main() -> None:
     if args.max_samples < 1:
         raise ValueError("--max_samples must be positive.")
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-    if checkpoint.get("policy_kind") != "spatial_time_preview_ddpm":
-        raise ValueError("Checkpoint is not a spatial_time_preview_ddpm policy.")
+    if checkpoint.get("policy_kind") not in {"spatial_time_preview_ddpm", "spatial_reference_path_ddpm"}:
+        raise ValueError("Checkpoint is not a supported spatial diffusion policy.")
     config = checkpoint["config"]
     dataset_cfg = config["dataset"]
     dataset = SpatialHindsightDataset(
@@ -164,6 +164,9 @@ def main() -> None:
         execution_offset=int(dataset_cfg["execution_offset"]),
         goal_horizon_steps=int(dataset_cfg["goal_horizon_steps"]),
         waypoint_time_offsets_s=tuple(dataset_cfg["waypoint_time_offsets_s"]),
+        goal_source=str(dataset_cfg.get("goal_source", "achieved")),
+        include_padded_starts=bool(dataset_cfg.get("include_padded_starts", False)),
+        startup_sample_multiplier=int(dataset_cfg.get("startup_sample_multiplier", 1)),
         symmetry_mode="none",
     )
     normalizer = NormalizerStats.from_dict(checkpoint["normalizer_stats"])
@@ -197,6 +200,7 @@ def main() -> None:
         "schema": config.get("goal_schema"),
         "checkpoint_epoch": checkpoint.get("epoch"),
         "checkpoint_val_loss": checkpoint.get("val_loss"),
+        "goal_source": dataset.goal_source,
         "sample_count": sample_count,
         "demos": len(dataset.demos),
         "action_history_rms": summary(action_rms),
