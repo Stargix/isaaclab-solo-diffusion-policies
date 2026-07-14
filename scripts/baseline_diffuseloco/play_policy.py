@@ -47,7 +47,14 @@ parser.add_argument(
     help="Actions executed per DDPM sample. Eight is the validated real-time deployment; one is the RHC reference.",
 )
 parser.add_argument("--warmup_steps", type=int, default=25)
+parser.add_argument("--max_steps", type=int, default=None, help="Optional finite rollout length for smoke tests.")
 parser.add_argument("--guidance_scale", type=float, default=1.0)
+parser.add_argument("--path_file", type=str, default=None, help="Optional [N,3/4] .npy route for the hierarchical baseline.")
+parser.add_argument("--path_world_frame", action="store_true", help="Interpret path XY/yaw as world coordinates instead of robot-relative.")
+parser.add_argument("--desired_speed", type=float, default=0.4, help="Path-tracker cruise speed in m/s.")
+parser.add_argument("--path_update_hz", type=float, default=10.0, help="High-level path-tracker frequency.")
+parser.add_argument("--path_lookahead_s", type=float, default=0.75)
+parser.add_argument("--height_lookahead_s", type=float, default=2.0)
 parser.add_argument(
     "--torchscript_denoiser",
     action="store_true",
@@ -90,6 +97,7 @@ from isaaclab.devices import Se2Keyboard, Se2KeyboardCfg
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
 from evaluation.optimization import trace_denoiser
+from navigation.path_tracker import PathCommandTracker, PathTrackerConfig
 from train.runtime.checkpoint import load_training_checkpoint
 from train.config import resolve_inference_steps
 from train.data.obs_utils import proprio_from_env_tensors
@@ -313,12 +321,35 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     raw_env = env.unwrapped
     joint_ids = raw_env._joint_ids
     dt = env.step_dt if hasattr(env, "step_dt") else raw_env.step_dt
+    vec_env.reset()
     velocity_command = torch.tensor(args_cli.command, device=device, dtype=torch.float32).repeat(args_cli.num_envs, 1)
     live_keyboard = None
     live_goal = None
     live_ui = None
     command_window = None
     command_window_keepalive = None
+    path_tracker = None
+    path_command = None
+    path_tick = 0
+    if args_cli.path_update_hz <= 0.0:
+        raise ValueError("--path_update_hz must be positive.")
+    path_update_interval = max(1, int(round((1.0 / dt) / args_cli.path_update_hz)))
+    if args_cli.path_file is not None:
+        origin_pos = None if args_cli.path_world_frame else raw_env._robot.data.root_pos_w[0].detach().cpu().numpy()
+        origin_quat = None if args_cli.path_world_frame else raw_env._robot.data.root_quat_w[0].detach().cpu().numpy()
+        path_tracker = PathCommandTracker.from_file(
+            args_cli.path_file,
+            PathTrackerConfig(
+                desired_speed=args_cli.desired_speed,
+                position_lookahead_s=args_cli.path_lookahead_s,
+                height_lookahead_s=args_cli.height_lookahead_s,
+            ),
+            num_envs=args_cli.num_envs,
+            origin_pos_w=origin_pos,
+            origin_quat_w=origin_quat,
+        )
+    if sum((args_cli.command_ui, args_cli.interactive_commands, path_tracker is not None)) > 1:
+        raise ValueError("Choose only one command source: --command_ui, --interactive_commands, or --path_file.")
     if args_cli.command_ui and args_cli.headless:
         raise ValueError("--command_ui requires a graphical Isaac session; remove --headless.")
     if args_cli.command_ui:
@@ -331,18 +362,29 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
     def refresh_command() -> torch.Tensor:
         nonlocal velocity_command
-        if live_ui is not None:
+        nonlocal path_command, path_tick
+        if path_tracker is not None:
+            if path_command is None or path_tick % path_update_interval == 0:
+                path_command_np = path_tracker.command_batch(
+                    raw_env._robot.data.root_pos_w.detach().cpu().numpy(),
+                    raw_env._robot.data.root_quat_w.detach().cpu().numpy(),
+                )
+                path_command = torch.from_numpy(path_command_np).to(device=device)
+            path_tick += 1
+            velocity_command = path_command[:, :3]
+            height_values = path_command[:, 3:4]
+        elif live_ui is not None:
             vx, vy, wz, height = live_ui.get()
             velocity_command = torch.tensor((vx, vy, wz), device=device).repeat(args_cli.num_envs, 1)
+            height_values = torch.full((args_cli.num_envs, 1), height, device=device)
         elif live_keyboard is not None and live_goal is not None:
             keyboard_velocity = live_keyboard.advance().to(device=device)
             velocity_command = keyboard_velocity.repeat(args_cli.num_envs, 1)
             height = live_goal.height()
+            height_values = torch.full((args_cli.num_envs, 1), height, device=device)
         else:
-            height = args_cli.desired_height
-        command_value = torch.cat(
-            [velocity_command, torch.full((args_cli.num_envs, 1), height, device=device)], dim=-1,
-        )
+            height_values = torch.full((args_cli.num_envs, 1), args_cli.desired_height, device=device)
+        command_value = torch.cat([velocity_command, height_values], dim=-1)
         if hasattr(raw_env, "_commands"):
             raw_env._commands[:, :3] = velocity_command
         return command_value
@@ -359,7 +401,6 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     previous_action = torch.zeros((args_cli.num_envs, policy_cfg.action_dim), device=device)
     stand_action = torch.zeros_like(previous_action)
 
-    vec_env.reset()
     if args_cli.camera_follow:
         eye, target = camera_view_from_robot(
             raw_env, np.asarray(args_cli.camera_offset, dtype=np.float32),
@@ -390,6 +431,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     step_count = 0
     next_control_deadline = time.perf_counter()
     while simulation_app.is_running():
+        if args_cli.max_steps is not None and step_count >= args_cli.max_steps:
+            break
         command = refresh_command()
         with torch.inference_mode():
             if current_chunk is None or chunk_index == 0:
@@ -431,6 +474,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
             done_indices = torch.nonzero(dones, as_tuple=False).flatten()
             for env_idx in done_indices.tolist():
+                if path_tracker is not None:
+                    path_tracker.reset(env_idx)
+                    path_command = None
                 current = get_proprio(raw_env, joint_ids)[env_idx]
                 proprio_buffer[env_idx] = current
                 action_buffer[env_idx].zero_()

@@ -56,6 +56,24 @@ The floating window controls velocity and height. Keyboard control remains
 available through `--interactive_commands`. The camera follows env 0 in the
 robot yaw frame; use `--no_camera_follow` to disable it.
 
+The non-learned hierarchical comparison consumes a complete `.npy` route and
+converts it to the same four-dimensional command at 10 Hz:
+
+```powershell
+conda run --no-capture-output -n env_isaaclab python scripts/baseline_diffuseloco/play_policy.py `
+  --task solo12-v0 `
+  --checkpoint scripts/baseline_diffuseloco/runs/walk_crouch_posture_conditioned/best.pt `
+  --desired_height 0.2932 `
+  --path_file scripts/diffusion_policy/paths/s_curve_crouch.npy `
+  --desired_speed 0.4 --path_update_hz 10 `
+  --exec_horizon 8 --torchscript_denoiser
+```
+
+Paths are robot-relative in XY/yaw by default and retain their absolute height
+agenda. Pass `--path_world_frame` only for a route already expressed in the
+Isaac world frame. Progress search is local and monotonic, avoiding jumps to a
+distant branch of a self-crossing route.
+
 The K=10, `exec_horizon=1` reference misses the 20 ms wall-clock deadline on the
 measured Windows setup. K=10 with TorchScript and `exec_horizon=8` has a 160 ms
 chunk deadline and passed the complete 45-scenario grid with 100% survival. It
