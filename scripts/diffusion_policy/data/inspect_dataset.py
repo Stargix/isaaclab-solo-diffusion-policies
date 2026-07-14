@@ -82,8 +82,8 @@ def main():
     heights = root_pos_w[:, 2]
     axs[0].plot(time, heights, label="Base Height (Z)", color="blue", linewidth=2)
     # Add target references
-    axs[0].axhline(y=0.24, color="green", linestyle="--", alpha=0.7, label="Nominal Walk Height (24cm)")
-    axs[0].axhline(y=0.16, color="red", linestyle="--", alpha=0.7, label="Nominal Crouch Height (16cm)")
+    axs[0].axhline(y=0.2932, color="green", linestyle="--", alpha=0.7, label="Walk reference (29.32cm)")
+    axs[0].axhline(y=0.1705, color="red", linestyle="--", alpha=0.7, label="Crouch reference (17.05cm)")
     axs[0].set_ylabel("Height [m]")
     axs[0].set_title(f"Trajectory Visualization - {selected_demo} ({args.dataset})")
     axs[0].grid(True, alpha=0.3)
