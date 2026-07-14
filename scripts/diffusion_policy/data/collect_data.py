@@ -943,7 +943,7 @@ def _make_frame(
         "root_quat_w":       state["root_quat_w"][env_idx],
         "command":           state["command"][env_idx],
         "desired_base_height": np.asarray([desired_base_height], dtype=np.float32),
-        "reference_pos_w":  np.asarray(reference_pos_w, dtype=np.float32),
+        "reference_pos_w":  np.array(reference_pos_w, dtype=np.float32),
         "reference_yaw_w":  np.asarray([reference_yaw_w], dtype=np.float32),
         "reference_command": state["command"][env_idx],
         "actions":           action,
