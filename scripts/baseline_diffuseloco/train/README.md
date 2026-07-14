@@ -47,8 +47,14 @@ conda run --no-capture-output -n env_isaaclab python scripts/baseline_diffuseloc
   --checkpoint scripts/baseline_diffuseloco/runs/velocity_height_compact_k10/best.pt `
   --command 0.4 0.0 0.0 `
   --desired_height 0.2932 `
+  --interactive_commands `
   --exec_horizon 1
 ```
+
+With `--interactive_commands`, the Isaac Lab keyboard controls velocity while
+keys are held (arrows/numpad), `R/F` raise/lower the height, and `1/2` select the
+walk/crouch posture references. The camera follows env 0 in the robot yaw frame;
+use `--no_camera_follow` to disable it.
 
 Run the regression checks before every long training:
 

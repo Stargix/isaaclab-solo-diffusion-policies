@@ -6,10 +6,12 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -41,6 +43,20 @@ parser.add_argument("--num_inference_steps", type=int, default=None)
 parser.add_argument("--exec_horizon", type=int, default=1)
 parser.add_argument("--warmup_steps", type=int, default=25)
 parser.add_argument("--guidance_scale", type=float, default=1.0)
+parser.add_argument(
+    "--interactive_commands",
+    action="store_true",
+    help="Enable Isaac Lab keyboard control of vx/vy/wz and desired height.",
+)
+parser.add_argument("--height_step", type=float, default=0.005,
+                    help="Height increment in metres for R/F keyboard control.")
+parser.add_argument("--no_camera_follow", action="store_false", dest="camera_follow",
+                    help="Keep the Isaac camera fixed instead of following env 0.")
+parser.set_defaults(camera_follow=True)
+parser.add_argument("--camera_offset", type=float, nargs=3, default=(-2.0, 0.0, 0.8),
+                    metavar=("DX", "DY", "DZ"), help="Camera eye offset from robot root in world axes.")
+parser.add_argument("--camera_lookat", type=float, nargs=3, default=(0.0, 0.0, 0.35),
+                    metavar=("DX", "DY", "DZ"), help="Camera target offset from robot root in world axes.")
 parser.add_argument("--real_time_viewer", action="store_true", default=True)
 parser.add_argument("--no_real_time_viewer", action="store_false", dest="real_time_viewer")
 
@@ -54,6 +70,7 @@ simulation_app = app_launcher.app
 import gymnasium as gym
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 from isaaclab_tasks.utils.hydra import hydra_task_config
+from isaaclab.devices import Se2Keyboard, Se2KeyboardCfg
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
@@ -75,6 +92,60 @@ def get_proprio(raw_env: Any, joint_ids: slice) -> torch.Tensor:
 def slide_buffer(buffer: torch.Tensor, value: torch.Tensor) -> None:
     buffer[:, :-1] = buffer[:, 1:].clone()
     buffer[:, -1] = value
+
+
+class LiveGoal:
+    """Thread-safe desired-height state for Isaac keyboard callbacks."""
+
+    def __init__(self, height: float, step: float):
+        self._height = float(height)
+        self._step = float(step)
+        self._lock = threading.Lock()
+
+    def change_height(self, delta: float) -> None:
+        with self._lock:
+            self._height = float(np.clip(self._height + delta, 0.10, 0.40))
+
+    def set_height(self, value: float) -> None:
+        with self._lock:
+            self._height = float(np.clip(value, 0.10, 0.40))
+
+    def height(self) -> float:
+        with self._lock:
+            return self._height
+
+
+def setup_keyboard(initial_height: float, height_step: float) -> tuple[Se2Keyboard, LiveGoal]:
+    """Create the standard Isaac Lab SE(2) keyboard plus height callbacks.
+
+    Arrow keys/numpad control ``vx, vy, wz`` while held. R/F change height;
+    1/2 select the two posture references used by the current dataset.
+    """
+    keyboard = Se2Keyboard(Se2KeyboardCfg(v_x_sensitivity=0.1, v_y_sensitivity=0.1, omega_z_sensitivity=0.2))
+    goal = LiveGoal(initial_height, height_step)
+    keyboard.add_callback("R", lambda: goal.change_height(+height_step))
+    keyboard.add_callback("F", lambda: goal.change_height(-height_step))
+    keyboard.add_callback("1", lambda: goal.set_height(0.2932))
+    keyboard.add_callback("2", lambda: goal.set_height(0.1705))
+    print(keyboard)
+    print("Height: R=raise, F=lower, 1=walk reference, 2=crouch reference")
+    return keyboard, goal
+
+
+def camera_view_from_robot(raw_env: Any, camera_offset: np.ndarray, camera_lookat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return a chase-camera pose using the robot yaw, not fixed world axes."""
+    root = raw_env._robot.data.root_pos_w[0].detach().cpu().numpy()
+    quat = raw_env._robot.data.root_quat_w[0].detach().cpu().numpy()
+    w, x, y, z = [float(v) for v in quat]
+    yaw = np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    c, s = np.cos(yaw), np.sin(yaw)
+    offset_w = np.array([c * camera_offset[0] - s * camera_offset[1],
+                         s * camera_offset[0] + c * camera_offset[1],
+                         camera_offset[2]], dtype=np.float32)
+    lookat_w = np.array([c * camera_lookat[0] - s * camera_lookat[1],
+                         s * camera_lookat[0] + c * camera_lookat[1],
+                         camera_lookat[2]], dtype=np.float32)
+    return root + offset_w, root + lookat_w
 
 
 def update_history(
@@ -160,11 +231,25 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     joint_ids = raw_env._joint_ids
     dt = env.step_dt if hasattr(env, "step_dt") else raw_env.step_dt
     velocity_command = torch.tensor(args_cli.command, device=device, dtype=torch.float32).repeat(args_cli.num_envs, 1)
-    command = torch.cat(
-        [velocity_command, torch.full((args_cli.num_envs, 1), args_cli.desired_height, device=device)], dim=-1,
-    )
-    if hasattr(raw_env, "_commands"):
-        raw_env._commands[:, :3] = velocity_command
+    live_keyboard = None
+    live_goal = None
+    if args_cli.interactive_commands:
+        live_keyboard, live_goal = setup_keyboard(args_cli.desired_height, args_cli.height_step)
+
+    def refresh_command() -> torch.Tensor:
+        nonlocal velocity_command
+        if live_keyboard is not None and live_goal is not None:
+            keyboard_velocity = live_keyboard.advance().to(device=device)
+            velocity_command = keyboard_velocity.repeat(args_cli.num_envs, 1)
+        height = live_goal.height() if live_goal is not None else args_cli.desired_height
+        command_value = torch.cat(
+            [velocity_command, torch.full((args_cli.num_envs, 1), height, device=device)], dim=-1,
+        )
+        if hasattr(raw_env, "_commands"):
+            raw_env._commands[:, :3] = velocity_command
+        return command_value
+
+    command = refresh_command()
 
     proprio_buffer = torch.zeros(
         (args_cli.num_envs, policy_cfg.history, policy_cfg.proprio_dim), device=device
@@ -177,7 +262,14 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     stand_action = torch.zeros_like(previous_action)
 
     vec_env.reset()
+    if args_cli.camera_follow:
+        eye, target = camera_view_from_robot(
+            raw_env, np.asarray(args_cli.camera_offset, dtype=np.float32),
+            np.asarray(args_cli.camera_lookat, dtype=np.float32),
+        )
+        raw_env.sim.set_camera_view(eye=eye, target=target)
     for _ in range(max(args_cli.warmup_steps, policy_cfg.history + 1)):
+        command = refresh_command()
         pre_action_proprio = get_proprio(raw_env, joint_ids)
         update_history(
             proprio_buffer,
@@ -199,6 +291,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     chunk_index = 0
     step_count = 0
     while simulation_app.is_running():
+        command = refresh_command()
         with torch.inference_mode():
             if current_chunk is None or chunk_index == 0:
                 trajectory = policy.predict_action_denormalized(
@@ -225,6 +318,17 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 command=command,
             )
             previous_action = action.clone()
+
+            if args_cli.camera_follow:
+                try:
+                    eye, target = camera_view_from_robot(
+                        raw_env, np.asarray(args_cli.camera_offset, dtype=np.float32),
+                        np.asarray(args_cli.camera_lookat, dtype=np.float32),
+                    )
+                    raw_env.sim.set_camera_view(eye=eye, target=target)
+                except Exception:
+                    # Camera updates must never stop control if the Kit viewport is unavailable.
+                    pass
 
             done_indices = torch.nonzero(dones, as_tuple=False).flatten()
             for env_idx in done_indices.tolist():
