@@ -48,6 +48,11 @@ parser.add_argument(
     action="store_true",
     help="Enable Isaac Lab keyboard control of vx/vy/wz and desired height.",
 )
+parser.add_argument(
+    "--command_ui",
+    action="store_true",
+    help="Open the Isaac floating command panel for vx, vy, wz and desired height.",
+)
 parser.add_argument("--height_step", type=float, default=0.005,
                     help="Height increment in metres for R/F keyboard control.")
 parser.add_argument("--no_camera_follow", action="store_false", dest="camera_follow",
@@ -113,6 +118,70 @@ class LiveGoal:
     def height(self) -> float:
         with self._lock:
             return self._height
+
+
+class LiveCommandState:
+    """Thread-safe command state shared by Omni.UI callbacks and simulation."""
+
+    def __init__(self, command: tuple[float, float, float], height: float):
+        self._command = np.asarray(command, dtype=np.float32)
+        self._height = float(np.clip(height, 0.10, 0.40))
+        self._lock = threading.Lock()
+
+    def get(self) -> tuple[float, float, float, float]:
+        with self._lock:
+            vx, vy, wz = self._command.tolist()
+            return float(vx), float(vy), float(wz), self._height
+
+    def _set_component(self, index: int, value: float, low: float, high: float) -> None:
+        with self._lock:
+            self._command[index] = np.clip(value, low, high)
+
+    def set_vx(self, value: float) -> None:
+        self._set_component(0, value, -0.75, 0.75)
+
+    def set_vy(self, value: float) -> None:
+        self._set_component(1, value, -0.50, 0.50)
+
+    def set_wz(self, value: float) -> None:
+        self._set_component(2, value, -0.50, 0.50)
+
+    def set_height(self, value: float) -> None:
+        with self._lock:
+            self._height = float(np.clip(value, 0.10, 0.40))
+
+
+def build_command_window(state: LiveCommandState):
+    """Create the same floating Omni.UI panel used by the RL policies."""
+    import omni.ui as ui
+
+    window = ui.Window("DiffuseLoco command", width=470, height=300, visible=True)
+    keepalive = []
+    with window.frame:
+        with ui.VStack(spacing=8, height=0):
+            ui.Label("DiffuseLoco live command", height=24)
+            ui.Label("Edit the command while the policy is running.", height=18)
+
+            def add_row(label: str, getter, setter, minimum: float, maximum: float):
+                with ui.HStack(spacing=8, height=28):
+                    ui.Label(label, width=145)
+                    model = ui.SimpleFloatModel(getter(), min=minimum, max=maximum)
+                    ui.FloatField(model, width=115)
+                    ui.FloatSlider(model, min=minimum, max=maximum, width=170)
+                    callback = lambda m: setter(m.get_value_as_float())
+                    if hasattr(model, "subscribe_value_changed_fn"):
+                        keepalive.append(model.subscribe_value_changed_fn(callback))
+                    else:
+                        model.add_value_changed_fn(callback)
+                        keepalive.append(callback)
+
+            add_row("vx [m/s]", lambda: state.get()[0], state.set_vx, -0.75, 0.75)
+            add_row("vy [m/s]", lambda: state.get()[1], state.set_vy, -0.50, 0.50)
+            add_row("wz [rad/s]", lambda: state.get()[2], state.set_wz, -0.50, 0.50)
+            add_row("height [m]", lambda: state.get()[3], state.set_height, 0.10, 0.40)
+            ui.Label("The current checkpoint was trained mainly at walk/crouch heights.", height=18)
+            ui.Label("Intermediate heights are useful for probing, not yet validated.", height=18)
+    return window, keepalive
 
 
 def setup_keyboard(initial_height: float, height_step: float) -> tuple[Se2Keyboard, LiveGoal]:
@@ -233,15 +302,30 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     velocity_command = torch.tensor(args_cli.command, device=device, dtype=torch.float32).repeat(args_cli.num_envs, 1)
     live_keyboard = None
     live_goal = None
+    live_ui = None
+    command_window = None
+    command_window_keepalive = None
+    if args_cli.command_ui and args_cli.headless:
+        raise ValueError("--command_ui requires a graphical Isaac session; remove --headless.")
+    if args_cli.command_ui:
+        live_ui = LiveCommandState(tuple(args_cli.command), args_cli.desired_height)
+        command_window, command_window_keepalive = build_command_window(live_ui)
     if args_cli.interactive_commands:
+        if live_ui is not None:
+            raise ValueError("Choose one command interface: --command_ui or --interactive_commands.")
         live_keyboard, live_goal = setup_keyboard(args_cli.desired_height, args_cli.height_step)
 
     def refresh_command() -> torch.Tensor:
         nonlocal velocity_command
-        if live_keyboard is not None and live_goal is not None:
+        if live_ui is not None:
+            vx, vy, wz, height = live_ui.get()
+            velocity_command = torch.tensor((vx, vy, wz), device=device).repeat(args_cli.num_envs, 1)
+        elif live_keyboard is not None and live_goal is not None:
             keyboard_velocity = live_keyboard.advance().to(device=device)
             velocity_command = keyboard_velocity.repeat(args_cli.num_envs, 1)
-        height = live_goal.height() if live_goal is not None else args_cli.desired_height
+            height = live_goal.height()
+        else:
+            height = args_cli.desired_height
         command_value = torch.cat(
             [velocity_command, torch.full((args_cli.num_envs, 1), height, device=device)], dim=-1,
         )
