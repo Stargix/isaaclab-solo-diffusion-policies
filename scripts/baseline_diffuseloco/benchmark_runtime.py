@@ -53,11 +53,20 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Also run the six-segment height sequence for every point (slower).",
     )
-    parser.add_argument(
-        "--no_torchscript",
+    torchscript_group = parser.add_mutually_exclusive_group()
+    torchscript_group.add_argument(
+        "--torchscript_denoiser",
+        dest="use_torchscript",
         action="store_true",
-        help="Benchmark eager PyTorch instead of the validated TorchScript denoiser.",
+        help="Use the validated TorchScript denoiser (default).",
     )
+    torchscript_group.add_argument(
+        "--no_torchscript",
+        dest="use_torchscript",
+        action="store_false",
+        help="Benchmark eager PyTorch instead of TorchScript.",
+    )
+    parser.set_defaults(use_torchscript=True)
     parser.add_argument(
         "--reuse_existing",
         action="store_true",
@@ -226,7 +235,7 @@ def main() -> None:
                 ]
                 if not args.include_dynamic:
                     command.append("--skip_dynamic")
-                if not args.no_torchscript:
+                if args.use_torchscript:
                     command.append("--torchscript_denoiser")
                 log_path = run_dir / "run.log"
                 print(f"[SWEEP] K={inference_steps} H={horizon}")
@@ -262,7 +271,7 @@ def main() -> None:
         "duration_s": args.duration_s,
         "settling_s": args.settling_s,
         "include_dynamic": args.include_dynamic,
-        "torchscript_denoiser": not args.no_torchscript,
+        "torchscript_denoiser": args.use_torchscript,
         "points": len(points),
     }
     (output_dir / "benchmark.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
