@@ -11,3 +11,6 @@ The default grid contains five heights, three commands and three stochastic
 repeats. It uses one vectorized environment per condition, so it is not a list
 of manual launches.
 
+`--torchscript_denoiser` reduces denoiser dispatch overhead without changing the
+checkpoint. `--exec_horizon 8` evaluates the real-time action-chunk deployment;
+the scientific receding-horizon reference remains `--exec_horizon 1`.

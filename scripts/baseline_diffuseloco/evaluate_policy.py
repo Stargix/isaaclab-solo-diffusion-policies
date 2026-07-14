@@ -48,6 +48,11 @@ parser.add_argument("--num_inference_steps", type=int, default=None)
 parser.add_argument("--exec_horizon", type=int, default=1)
 parser.add_argument("--guidance_scale", type=float, default=1.0)
 parser.add_argument("--latency_samples", type=int, default=100)
+parser.add_argument(
+    "--torchscript_denoiser",
+    action="store_true",
+    help="Trace the denoiser to reduce Windows inference overhead without changing the checkpoint.",
+)
 parser.add_argument("--seed", type=int, default=42)
 
 AppLauncher.add_app_launcher_args(parser)
@@ -71,6 +76,7 @@ from evaluation.reporting import (
     write_csv,
     write_json,
 )
+from evaluation.optimization import trace_denoiser
 from model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
 from train.config import resolve_inference_steps
 from train.data.obs_utils import proprio_from_env_tensors
@@ -332,6 +338,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     policy.load_state_dict(checkpoint["ema_model_state_dict"])
     policy.set_normalizer_stats(checkpoint["normalizer_stats"])
     policy.to(device).eval()
+    if args_cli.torchscript_denoiser:
+        trace_denoiser(policy, device)
 
     env_cfg.scene.num_envs = num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
@@ -549,6 +557,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         "effective_vectorized_steps_hz": duration_steps / static_elapsed,
         "num_inference_steps": inference_steps,
         "exec_horizon": args_cli.exec_horizon,
+        "torchscript_denoiser": args_cli.torchscript_denoiser,
         "single_env_latency": latency_summary,
         "vectorized_batch_latency": batch_summary,
         "survival_rate": float(np.mean(~failures)),

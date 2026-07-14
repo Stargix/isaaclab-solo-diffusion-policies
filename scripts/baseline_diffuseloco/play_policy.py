@@ -44,6 +44,11 @@ parser.add_argument("--exec_horizon", type=int, default=1)
 parser.add_argument("--warmup_steps", type=int, default=25)
 parser.add_argument("--guidance_scale", type=float, default=1.0)
 parser.add_argument(
+    "--torchscript_denoiser",
+    action="store_true",
+    help="Trace the denoiser to reduce Windows inference overhead without changing its outputs.",
+)
+parser.add_argument(
     "--interactive_commands",
     action="store_true",
     help="Enable Isaac Lab keyboard control of vx/vy/wz and desired height.",
@@ -79,6 +84,7 @@ from isaaclab.devices import Se2Keyboard, Se2KeyboardCfg
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
+from evaluation.optimization import trace_denoiser
 from train.runtime.checkpoint import load_training_checkpoint
 from train.config import resolve_inference_steps
 from train.data.obs_utils import proprio_from_env_tensors
@@ -283,6 +289,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     policy.load_state_dict(checkpoint["ema_model_state_dict"])
     policy.set_normalizer_stats(checkpoint["normalizer_stats"])
     policy.to(device).eval()
+    if args_cli.torchscript_denoiser:
+        print("[INFO] Tracing denoiser with TorchScript...")
+        trace_denoiser(policy, device)
 
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
@@ -374,6 +383,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     current_chunk: torch.Tensor | None = None
     chunk_index = 0
     step_count = 0
+    next_control_deadline = time.perf_counter()
     while simulation_app.is_running():
         command = refresh_command()
         with torch.inference_mode():
@@ -429,7 +439,13 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             print(f"[STEP {step_count:05d}] base=({root[0]:+.2f}, {root[1]:+.2f}, {root[2]:+.2f})")
         step_count += 1
         if args_cli.real_time_viewer:
-            time.sleep(dt)
+            next_control_deadline += dt
+            remaining = next_control_deadline - time.perf_counter()
+            if remaining > 0.0:
+                time.sleep(remaining)
+            elif remaining < -1.0:
+                # Do not carry an arbitrarily large startup/viewer lag forever.
+                next_control_deadline = time.perf_counter()
 
     vec_env.close()
 
