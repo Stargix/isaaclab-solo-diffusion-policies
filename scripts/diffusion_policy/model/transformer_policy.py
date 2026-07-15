@@ -19,7 +19,7 @@ class TransformerDiffusionPolicy(nn.Module):
         goal_dim: int = 11,
         action_dim: int = 12,
         history: int = 8,
-        action_horizon: int = 4,
+        prediction_horizon: int = 16,
         d_model: int = 256,
         nhead: int = 8,
         num_layers: int = 6,
@@ -36,14 +36,14 @@ class TransformerDiffusionPolicy(nn.Module):
         self.goal_dim = goal_dim
         self.action_dim = action_dim
         self.history = history
-        self.action_horizon = action_horizon
+        self.prediction_horizon = prediction_horizon
         self.io_dim = proprio_dim + action_hist_dim
         if dim_feedforward != 4 * d_model:
             raise ValueError("TransformerForDiffusion uses dim_feedforward = 4 * d_model; set dim_feedforward accordingly.")
         self.model = TransformerForDiffusion(
             input_dim=action_dim,
             output_dim=action_dim,
-            horizon=action_horizon,
+            horizon=prediction_horizon,
             n_obs_steps=history,
             cond_dim=self.io_dim,
             goal_dim=goal_dim,

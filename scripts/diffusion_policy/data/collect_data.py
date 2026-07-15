@@ -3,10 +3,10 @@
 
 """Collect expert demonstrations from trained RSL-RL policies for Diffusion Policy training.
 
-Two collection modes are supported:
-  * ``single``  (Dataset A): one expert policy per run (walk, crouch, jump, ...).
-  * ``chained`` (Dataset B): several experts alternated in real time to capture
-    physically-realistic skill transitions (walk <-> crouch <-> jump).
+The active schema is ``single`` expert collection. ``phase_a`` is the
+walk-only reference-path dataset: it records a command-integrated desired route
+in addition to the achieved robot trajectory. Chained posture collection is
+deliberately blocked until it has an explicit height-reference schedule.
 
 HDF5 schema (per demo, under ``data/demo_<k>``)::
 
@@ -20,6 +20,10 @@ HDF5 schema (per demo, under ``data/demo_<k>``)::
             root_pos_w         (T, 3)    float32   -- base position in world (viz only)
             root_quat_w        (T, 4)    float32   -- base orientation (WXYZ, world; viz only)
             command_speed      (T, 3)    float32   -- commanded (vx, vy, wz)
+            desired_base_height(T, 1)    float32   -- commanded base height, not measured height
+            reference_pos_w    (T, 3)    float32   -- command-integrated desired base route
+            reference_yaw_w    (T, 1)    float32   -- desired world yaw of that route
+            reference_command  (T, 3)    float32   -- command used to integrate the route
         actions                (T, 12)   float32   -- expert action executed at step t
         dones                  (T,)      bool      -- True only on the last step of the demo
         skill_idx              (T,)      int8      -- index into data.attrs["skill_names"]
@@ -39,19 +43,15 @@ Alignment convention (important for the DataLoader):
 
 Example usage::
 
-    # Single mode (Dataset A)
+    # Phase A: walk-only explicit reference path
     python scripts/diffusion_policy/data/collect_data.py --mode single --task="solo12-v0" \
-        --checkpoint checkpoints/walk_safe.pt --num_envs 128 --num_steps 1500000 \
-        --output_name walk_raw.hdf5 --headless
-
-    # Chained mode (Dataset B, abrupt transitions = physically real, recommended)
-    python scripts/diffusion_policy/data/collect_data.py --mode chained --task="solo12-v0" \
-        --checkpoints checkpoints/walk_safe.pt checkpoints/crouch_exponential.pt checkpoints/jumpy_safe.pt \
-        --num_envs 512 --num_steps 1500000 --output_name chained_abrupt_raw.hdf5 \
-        --transition_blend_steps 0 --headless
+        --checkpoint checkpoints/walk_safe.pt --skill_name walk --desired_base_height 0.2932 \
+        --route_profile phase_a --include_warmup_frames --num_envs 128 --num_steps 1500000 \
+        --output_name walk_phase_a_reference_v1.hdf5 --headless
 """
 
 import argparse
+import math
 import os
 import random
 import sys
@@ -80,14 +80,44 @@ parser.add_argument("--mode", type=str, choices=["single", "chained"], default="
 parser.add_argument("--task", type=str, required=True, help="Task name (e.g. solo12-v0).")
 parser.add_argument("--checkpoint", type=str, default=None,
                     help="Path to expert checkpoint (required for single mode).")
+parser.add_argument("--skill_name", type=str, default=None,
+                    help="Explicit expert name (for example sprint or crouch); avoids filename-based inference.")
 parser.add_argument("--checkpoints", type=str, nargs="+", default=[],
                     help="Paths to expert checkpoints for chained mode (walk crouch jump ...).")
 parser.add_argument("--num_envs", type=int, default=128, help="Number of parallel environments.")
 parser.add_argument("--num_steps", type=int, default=50000,
                     help="Total number of timesteps to SAVE across all kept episodes.")
 parser.add_argument("--output_name", type=str, default="raw_dataset.hdf5", help="Output file name.")
+parser.add_argument("--seed", type=int, default=42, help="Seed for command/skill sampling and collection metadata.")
 parser.add_argument("--command_resample_time_s", type=float, default=2.0,
                     help="Time interval (s) to resample speed commands within an episode.")
+parser.add_argument("--command_profile", choices=["native", "shared_height"], default="native",
+                    help="native: each expert's envelope; shared_height: common walk/crouch envelope for a fair posture-height ablation.")
+parser.add_argument(
+    "--route_profile",
+    choices=["random_velocity", "phase_a"],
+    default="random_velocity",
+    help=(
+        "random_velocity preserves the legacy velocity dataset. phase_a samples walk-only "
+        "start/stop/straight/turn/lateral command phases and records an explicit route reference."
+    ),
+)
+parser.add_argument(
+    "--startup_hold_steps",
+    type=int,
+    default=25,
+    help="phase_a: zero-command steps after each reset before the first motion phase (50 Hz).",
+)
+parser.add_argument(
+    "--include_warmup_frames",
+    action="store_true",
+    help=(
+        "Keep reset/startup frames instead of discarding them. Required for phase_a so the "
+        "offline policy contains the padded-zero deployment history."
+    ),
+)
+parser.add_argument("--desired_base_height", type=float, required=True,
+                    help="Expert's commanded base height in metres; recorded for the velocity-height baseline.")
 parser.add_argument("--min_demo_len", type=int, default=100,
                     help="Minimum recorded step length to keep an episode.")
 parser.add_argument("--warmup_steps", type=int, default=25,
@@ -143,7 +173,9 @@ SKILL_COMMAND_RANGES: Dict[str, Dict[str, Tuple[float, float]]] = {
     # crouch policy's stable envelope (trained up to +-1.0 / +-0.5 / +-1.0).
     "crouch": {"vx": (-0.75, 0.75), "vy": (-0.5, 0.5), "wz": (-0.5, 0.5)},
     "jump":   {"vx": (-1.2, 1.2),  "vy": (-0.6, 0.6),  "wz": (-0.6, 0.6)},
+    "sprint": {"vx": (0.3, 2.0), "vy": (-0.2, 0.2), "wz": (-0.2, 0.2)},
 }
+SHARED_HEIGHT_COMMAND_RANGE = {"vx": (-0.75, 0.75), "vy": (-0.5, 0.5), "wz": (-0.5, 0.5)}
 
 # HDF5 convention string stored as an attribute for downstream consumers.
 HDF5_CONVENTION = (
@@ -191,10 +223,11 @@ def configure_env_for_collection(env_cfg: Any, args: argparse.Namespace) -> None
     anticipate (pushes, actuation delays, observation noise, reset-velocity noise).
     """
     env_cfg.scene.num_envs = args.num_envs
+    env_cfg.seed = args.seed
     env_cfg.sim.device = args.device if args.device is not None else env_cfg.sim.device
 
-    # 20s episodes = 1000 steps at 50Hz. Command resampling is handled manually below.
-    env_cfg.episode_length_s = 20.0
+    # 6s episodes = 300 steps at 50Hz to prevent cumulative tracking drift in Phase A.
+    env_cfg.episode_length_s = 6.0
     env_cfg.command_resampling_time_s = 1.0e9
     env_cfg.standing_env_prob = 0.0
 
@@ -244,16 +277,60 @@ def configure_env_for_collection(env_cfg: Any, args: argparse.Namespace) -> None
 # --------------------------------------------------------------------------- #
 # Command sampling
 # --------------------------------------------------------------------------- #
-def resample_command(env_idx: int, skill: str,
-                     commands_tensor: torch.Tensor, device: torch.device) -> None:
-    """Sample a skill-specific (vx, vy, wz) command for one environment in-place."""
-    ranges = SKILL_COMMAND_RANGES.get(skill)
+def _sample_phase_a_command(rng: random.Random) -> tuple[float, float, float]:
+    """Sample one stable walk command phase for reference-path tracking.
+
+    The discrete mixture deliberately contains stops, starts, forward arcs,
+    lateral motion and a small reverse component.  This is not a global
+    planner: it supplies locally executable command/reference pairs for the
+    first path-following experiment.
+    """
+
+    mode = rng.choices(
+        ("stop", "straight", "arc", "lateral", "reverse"),
+        weights=(0.20, 0.30, 0.30, 0.12, 0.08),
+        k=1,
+    )[0]
+    if mode == "stop":
+        return 0.0, 0.0, 0.0
+    if mode == "straight":
+        return rng.uniform(0.20, 0.65), rng.uniform(-0.10, 0.10), rng.uniform(-0.12, 0.12)
+    if mode == "arc":
+        direction = -1.0 if rng.random() < 0.5 else 1.0
+        return rng.uniform(0.20, 0.55), rng.uniform(-0.08, 0.08), direction * rng.uniform(0.25, 0.70)
+    if mode == "lateral":
+        direction = -1.0 if rng.random() < 0.5 else 1.0
+        return rng.uniform(0.15, 0.40), direction * rng.uniform(0.15, 0.35), rng.uniform(-0.25, 0.25)
+    return rng.uniform(-0.35, -0.12), rng.uniform(-0.12, 0.12), rng.uniform(-0.25, 0.25)
+
+
+def resample_command(
+    env_idx: int,
+    skill: str,
+    commands_tensor: torch.Tensor,
+    device: torch.device,
+    rng: random.Random,
+) -> None:
+    """Sample a reproducible (vx, vy, wz) command for one environment in-place."""
+
+    del device  # The command tensor already owns the correct device.
+    if args_cli.route_profile == "phase_a":
+        vx, vy, wz = _sample_phase_a_command(rng)
+        commands_tensor[env_idx, 0] = vx
+        commands_tensor[env_idx, 1] = vy
+        commands_tensor[env_idx, 2] = wz
+        return
+    ranges = (
+        SHARED_HEIGHT_COMMAND_RANGE
+        if args_cli.command_profile == "shared_height" and skill in {"walk", "crouch"}
+        else SKILL_COMMAND_RANGES.get(skill)
+    )
     if ranges is None:
         vx = vy = wz = 0.0
     else:
-        vx = random.uniform(*ranges["vx"])
-        vy = random.uniform(*ranges["vy"])
-        wz = random.uniform(*ranges["wz"])
+        vx = rng.uniform(*ranges["vx"])
+        vy = rng.uniform(*ranges["vy"])
+        wz = rng.uniform(*ranges["wz"])
     commands_tensor[env_idx, 0] = vx
     commands_tensor[env_idx, 1] = vy
     commands_tensor[env_idx, 2] = wz
@@ -262,7 +339,7 @@ def resample_command(env_idx: int, skill: str,
 def infer_skill_name(checkpoint_path: str) -> str:
     """Map a checkpoint filename to one of the known skill names."""
     name = Path(checkpoint_path).stem.lower()
-    for skill in ("walk", "crouch", "jump", "crab"):
+    for skill in ("walk", "crouch", "jump", "crab", "sprint"):
         if skill in name:
             return skill
     return name
@@ -301,6 +378,36 @@ def state_is_fall(state: Dict[str, np.ndarray], env_idx: int,
     g_z = float(state["projected_gravity"][env_idx, 2])
     h = float(state["root_pos_w"][env_idx, 2])
     return (g_z > gravity_z_thresh) or (h < height_thresh)
+
+
+def yaw_from_quat_wxyz(quat_wxyz: np.ndarray) -> np.ndarray:
+    """Extract world yaw from WXYZ quaternions without importing simulator helpers."""
+
+    quat = np.asarray(quat_wxyz, dtype=np.float32)
+    w, x, y, z = (quat[..., index] for index in range(4))
+    return np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z)).astype(np.float32)
+
+
+def integrate_reference_pose(
+    position_w: np.ndarray,
+    yaw_w: float,
+    command_b: np.ndarray,
+    dt: float,
+) -> tuple[np.ndarray, float]:
+    """Advance the command-generated planar reference one control step.
+
+    ``command_b`` is expressed in the reference body frame, exactly like the
+    RL expert command.  The reference is deliberately independent of the
+    achieved robot state after its initial pose: it remains a desired route
+    when tracking errors occur.
+    """
+
+    vx, vy, wz = (float(value) for value in command_b[:3])
+    cos_yaw, sin_yaw = math.cos(float(yaw_w)), math.sin(float(yaw_w))
+    next_position = np.asarray(position_w, dtype=np.float32).copy()
+    next_position[0] += float(dt) * (cos_yaw * vx - sin_yaw * vy)
+    next_position[1] += float(dt) * (sin_yaw * vx + cos_yaw * vy)
+    return next_position, float(yaw_w + float(dt) * wz)
 
 
 class CollectionStats:
@@ -343,7 +450,7 @@ class PolicyManager:
     """Loads expert policies and produces per-env actions (with optional blending)."""
 
     def __init__(self, vec_env, agent_cfg, device, mode: str,
-                 checkpoint: str | None, checkpoints: Sequence[str]):
+                 checkpoint: str | None, checkpoints: Sequence[str], skill_name: str | None = None):
         self.vec_env = vec_env
         self.device = device
         self.mode = mode
@@ -356,7 +463,11 @@ class PolicyManager:
         if mode == "single":
             if not checkpoint:
                 raise ValueError("Single mode requires the --checkpoint argument.")
-            name = infer_skill_name(checkpoint)
+            name = skill_name or infer_skill_name(checkpoint)
+            if name not in SKILL_COMMAND_RANGES:
+                raise ValueError(
+                    f"Unknown skill {name!r}. Pass --skill_name using one of {sorted(SKILL_COMMAND_RANGES)}."
+                )
             self._load(name, os.path.abspath(checkpoint), agent_cfg, vec_env)
         else:
             if len(checkpoints) < 2:
@@ -458,13 +569,26 @@ class PolicyManager:
 class HDF5Writer:
     """Writes kept episodes to an HDF5 file in the diffusion_policy schema."""
 
-    def __init__(self, path: Path, skill_names: List[str]):
+    def __init__(
+        self,
+        path: Path,
+        skill_names: List[str],
+        seed: int,
+        desired_base_height: float,
+        *,
+        route_profile: str,
+    ):
         path.parent.mkdir(parents=True, exist_ok=True)
         self._f = h5py.File(path, "w")
         self._data = self._f.create_group("data")
         self._data.attrs["skill_names"] = np.array(skill_names, dtype="S32")
         self._data.attrs["convention"] = HDF5_CONVENTION
         self._data.attrs["control_rate_hz"] = 50.0
+        self._data.attrs["collection_seed"] = int(seed)
+        self._data.attrs["condition_schema"] = "velocity_xyyaw_plus_desired_base_height_v1"
+        self._data.attrs["desired_base_height_m"] = float(desired_base_height)
+        self._data.attrs["reference_schema"] = "command_integrated_world_route_v1"
+        self._data.attrs["route_profile"] = str(route_profile)
         self._demo_counter = 0
         self._total_steps = 0
 
@@ -480,8 +604,12 @@ class HDF5Writer:
         if self._total_steps >= target_steps:
             return False
 
-        keys = ("joint_pos", "joint_vel", "base_ang_vel", "projected_gravity",
-                "last_action", "root_pos_w", "root_quat_w", "command", "actions", "skill_idx")
+        keys = (
+            "joint_pos", "joint_vel", "base_ang_vel", "projected_gravity",
+            "last_action", "root_pos_w", "root_quat_w", "command", "desired_base_height",
+            "reference_pos_w", "reference_yaw_w", "reference_command",
+            "actions", "skill_idx",
+        )
         stacked = {k: np.stack([fr[k] for fr in frames], axis=0) for k in keys}
 
         demo_name = f"demo_{self._demo_counter}"
@@ -495,6 +623,10 @@ class HDF5Writer:
         obs_grp.create_dataset("root_pos_w", data=stacked["root_pos_w"].astype(np.float32))
         obs_grp.create_dataset("root_quat_w", data=stacked["root_quat_w"].astype(np.float32))
         obs_grp.create_dataset("command_speed", data=stacked["command"].astype(np.float32))
+        obs_grp.create_dataset("desired_base_height", data=stacked["desired_base_height"].astype(np.float32))
+        obs_grp.create_dataset("reference_pos_w", data=stacked["reference_pos_w"].astype(np.float32))
+        obs_grp.create_dataset("reference_yaw_w", data=stacked["reference_yaw_w"].astype(np.float32))
+        obs_grp.create_dataset("reference_command", data=stacked["reference_command"].astype(np.float32))
 
         grp.create_dataset("actions", data=stacked["actions"].astype(np.float32))
         grp.create_dataset("dones", data=self._make_dones(len(frames)))
@@ -550,6 +682,15 @@ class CollectionState:
         self.last_transition_step = np.zeros(num_envs, dtype=np.int32)
         self.has_transitioned = np.zeros(num_envs, dtype=bool)
 
+        # Phase-A reference route.  It is initialized from the physical pose at
+        # every reset and subsequently integrated from commands, not achieved
+        # base motion. ``reference_ready`` handles simulator resets that happen
+        # after this tracker has been reset.
+        self.reference_pos_w = np.zeros((num_envs, 3), dtype=np.float32)
+        self.reference_yaw_w = np.zeros(num_envs, dtype=np.float32)
+        self.reference_ready = np.zeros(num_envs, dtype=bool)
+        self.route_started = np.zeros(num_envs, dtype=bool)
+
         # Per-env skill sequence (order of first appearance) for metadata.
         self.skill_sequences: List[List[str]] = [
             [policy_names[self.current_skill_idx[i]]] for i in range(num_envs)
@@ -566,6 +707,28 @@ class CollectionState:
         self.last_transition_step[env_idx] = 0
         self.has_transitioned[env_idx] = False
         self.skill_sequences[env_idx] = [new_skill]
+        self.reference_ready[env_idx] = False
+        self.route_started[env_idx] = False
+
+    def initialize_references(self, state: Dict[str, np.ndarray], desired_base_height: float) -> None:
+        """Anchor pending references at the reset pose before recording a frame."""
+
+        pending = ~self.reference_ready
+        if not np.any(pending):
+            return
+        self.reference_pos_w[pending] = state["root_pos_w"][pending]
+        self.reference_pos_w[pending, 2] = float(desired_base_height)
+        self.reference_yaw_w[pending] = yaw_from_quat_wxyz(state["root_quat_w"][pending])
+        self.reference_ready[pending] = True
+
+    def advance_reference(self, env_idx: int, command_b: np.ndarray, dt: float) -> None:
+        if not self.reference_ready[env_idx]:
+            return
+        position, yaw = integrate_reference_pose(
+            self.reference_pos_w[env_idx], self.reference_yaw_w[env_idx], command_b, dt
+        )
+        self.reference_pos_w[env_idx] = position
+        self.reference_yaw_w[env_idx] = yaw
 
     def trigger_transition(self, env_idx: int, rng: random.Random, args: argparse.Namespace) -> None:
         old_skill = self.policy_names[self.current_skill_idx[env_idx]]
@@ -587,6 +750,20 @@ class CollectionState:
 def main(env_cfg: Any, agent_cfg: Any) -> None:
     output_path = _THIS_DIR / "datasets" / args_cli.output_name
 
+    if args_cli.mode != "single":
+        raise ValueError(
+            "The velocity-height schema is intentionally single-expert only. "
+            "Collect one file per expert and merge them; chained transitions need an explicit per-skill height schedule."
+        )
+    if args_cli.route_profile == "phase_a" and args_cli.skill_name not in (None, "walk"):
+        raise ValueError("phase_a is intentionally walk-only; pass --skill_name walk.")
+    if args_cli.route_profile == "phase_a" and not args_cli.include_warmup_frames:
+        raise ValueError(
+            "phase_a requires --include_warmup_frames so reset/start action histories are represented."
+        )
+    if args_cli.startup_hold_steps < 0:
+        raise ValueError("--startup_hold_steps must be non-negative.")
+
     configure_env_for_collection(env_cfg, args_cli)
 
     env = gym.make(args_cli.task, cfg=env_cfg)
@@ -595,26 +772,40 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     device = torch.device(vec_env.unwrapped.device)
     joint_ids = raw_env._joint_ids
 
-    rng = random.Random()  # deterministic-ish per-process; seeded by system time by default
+    rng = random.Random(args_cli.seed)
+    np.random.seed(args_cli.seed)
+    torch.manual_seed(args_cli.seed)
     policy_mgr = PolicyManager(vec_env, agent_cfg, device, args_cli.mode,
-                               args_cli.checkpoint, args_cli.checkpoints)
+                               args_cli.checkpoint, args_cli.checkpoints, args_cli.skill_name)
     skill_names = policy_mgr.skill_names
+    if args_cli.route_profile == "phase_a" and skill_names != ["walk"]:
+        raise ValueError(f"phase_a requires exactly the walk expert, got {skill_names}.")
     num_envs = args_cli.num_envs
 
     state_tracker = CollectionState(num_envs, skill_names, args_cli, rng)
     resample_interval = max(1, int(round(args_cli.command_resample_time_s / raw_env.step_dt)))
 
-    # Initialize commands for every env.
+    # Initialize commands for every env. Phase A starts with an intentional
+    # zero-command hold; later start/stop windows are part of the dataset.
     for i in range(num_envs):
-        resample_command(i, skill_names[state_tracker.current_skill_idx[i]],
-                         raw_env._commands, device)
+        if args_cli.route_profile == "phase_a":
+            raw_env._commands[i, :3] = 0.0
+        else:
+            resample_command(i, skill_names[state_tracker.current_skill_idx[i]], raw_env._commands, device, rng)
 
-    writer = HDF5Writer(output_path, skill_names)
+    writer = HDF5Writer(
+        output_path,
+        skill_names,
+        args_cli.seed,
+        args_cli.desired_base_height,
+        route_profile=args_cli.route_profile,
+    )
     stats = CollectionStats()
     print(f"[INFO] Starting collection ({args_cli.mode} mode). Output: {output_path}")
     dr_status = "off" if args_cli.disable_physics_dr else args_cli.physics_dr_mode
     print(f"[INFO] Skills: {skill_names} | DR={dr_status} | blend_steps={args_cli.transition_blend_steps} "
-          f"| warmup={args_cli.warmup_steps} | resample={args_cli.command_resample_time_s}s")
+          f"| warmup={args_cli.warmup_steps} | resample={args_cli.command_resample_time_s}s "
+          f"| route_profile={args_cli.route_profile}")
 
     # Per-env frame buffers.
     buffers: List[List[Dict[str, np.ndarray]]] = [[] for _ in range(num_envs)]
@@ -624,6 +815,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
     steps_collected = 0
     while writer.total_steps < args_cli.num_steps:
+        state_tracker.initialize_references(cached_state, args_cli.desired_base_height)
         # --- 1. Compute actions a_t from the current (time-t) policy obs. --- #
         # Single mode passes the TensorDict (matches rsl_rl play.py); chained mode
         # passes the "policy" obs tensor so it can be masked per active skill.
@@ -642,10 +834,17 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         # cached_state holds the raw state at time t (post-step of t-1, or post-reset).
         # The action a_t is the expert action taken from state_t -> aligned.
         for i in range(num_envs):
-            if state_tracker.steps_since_start[i] < args_cli.warmup_steps:
+            if not args_cli.include_warmup_frames and state_tracker.steps_since_start[i] < args_cli.warmup_steps:
                 continue
-            buffers[i].append(_make_frame(cached_state, i, actions_np[i],
-                                          state_tracker.current_skill_idx[i]))
+            buffers[i].append(_make_frame(
+                cached_state,
+                i,
+                actions_np[i],
+                state_tracker.current_skill_idx[i],
+                args_cli.desired_base_height,
+                state_tracker.reference_pos_w[i],
+                state_tracker.reference_yaw_w[i],
+            ))
 
         # --- 3. Step the simulator (advances to time t+1). --- #
         obs, _, dones, _ = vec_env.step(actions)
@@ -657,12 +856,21 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         # --- 4. Per-env post-step bookkeeping + episode finalization. --- #
         for i in range(num_envs):
             tr = state_tracker
+            command_used = cached_state["command"][i].copy()
+            tr.advance_reference(i, command_used, raw_env.step_dt)
             tr.steps_since_start[i] += 1
             tr.steps_since_resample[i] += 1
 
-            # Periodic command resampling inside the episode.
-            if tr.steps_since_resample[i] >= resample_interval:
-                resample_command(i, skill_names[tr.current_skill_idx[i]], raw_env._commands, device)
+            # Phase A deliberately starts from a held stop. Afterwards all
+            # resampling is recorded both as an expert command and as an
+            # independently integrated world-frame reference trajectory.
+            if args_cli.route_profile == "phase_a" and not tr.route_started[i]:
+                if tr.steps_since_start[i] >= args_cli.startup_hold_steps:
+                    resample_command(i, skill_names[tr.current_skill_idx[i]], raw_env._commands, device, rng)
+                    tr.steps_since_resample[i] = 0
+                    tr.route_started[i] = True
+            elif tr.steps_since_resample[i] >= resample_interval:
+                resample_command(i, skill_names[tr.current_skill_idx[i]], raw_env._commands, device, rng)
                 tr.steps_since_resample[i] = 0
 
             # Chained: schedule skill transitions.
@@ -670,7 +878,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 tr.steps_left_in_skill[i] -= 1
                 if tr.steps_left_in_skill[i] <= 0:
                     tr.trigger_transition(i, rng, args_cli)
-                    resample_command(i, skill_names[tr.current_skill_idx[i]], raw_env._commands, device)
+                    resample_command(i, skill_names[tr.current_skill_idx[i]], raw_env._commands, device, rng)
                     tr.steps_since_resample[i] = 0
 
             # Episode finalization: sim reset OR active-fall guardrail.
@@ -695,6 +903,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                     is_fall=is_fall, sim_terminated=bool(reset_terminated_np[i]),
                     writer=writer, stats=stats, rng=rng, raw_env=raw_env, device=device,
                 )
+                if args_cli.route_profile == "phase_a":
+                    state_next["command"][i] = 0.0
                 # The cached state for a manually-reset env is now stale (pre-reset
                 # fallen state), but warmup prevents it from ever being recorded and
                 # the next state_next queries refresh it.
@@ -715,8 +925,15 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     vec_env.close()
 
 
-def _make_frame(state: Dict[str, np.ndarray], env_idx: int,
-                action: np.ndarray, skill_idx: int) -> Dict[str, np.ndarray]:
+def _make_frame(
+    state: Dict[str, np.ndarray],
+    env_idx: int,
+    action: np.ndarray,
+    skill_idx: int,
+    desired_base_height: float,
+    reference_pos_w: np.ndarray,
+    reference_yaw_w: float,
+) -> Dict[str, np.ndarray]:
     """Build an aligned recorded frame from the raw state of one env."""
     return {
         "joint_pos":         state["joint_pos"][env_idx],
@@ -727,6 +944,10 @@ def _make_frame(state: Dict[str, np.ndarray], env_idx: int,
         "root_pos_w":        state["root_pos_w"][env_idx],
         "root_quat_w":       state["root_quat_w"][env_idx],
         "command":           state["command"][env_idx],
+        "desired_base_height": np.asarray([desired_base_height], dtype=np.float32),
+        "reference_pos_w":  np.array(reference_pos_w, dtype=np.float32),
+        "reference_yaw_w":  np.asarray([reference_yaw_w], dtype=np.float32),
+        "reference_command": state["command"][env_idx],
         "actions":           action,
         "skill_idx":         np.int8(skill_idx),
     }
@@ -785,8 +1006,16 @@ def _finalize_episode(env_idx: int, buffers: List[List[Dict[str, np.ndarray]]],
 def _reset_after_finalize(env_idx: int, tracker: CollectionState, rng: random.Random,
                           args: argparse.Namespace, raw_env: Any, device: torch.device) -> None:
     tracker.reset_env(env_idx, rng, args)
-    resample_command(env_idx, tracker.policy_names[tracker.current_skill_idx[env_idx]],
-                     raw_env._commands, device)
+    if args.route_profile == "phase_a":
+        raw_env._commands[env_idx, :3] = 0.0
+    else:
+        resample_command(
+            env_idx,
+            tracker.policy_names[tracker.current_skill_idx[env_idx]],
+            raw_env._commands,
+            device,
+            rng,
+        )
 
 
 if __name__ == "__main__":

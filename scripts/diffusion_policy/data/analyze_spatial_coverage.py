@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""Measure temporal-preview goal coverage before the first spatial train."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+
+_PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_PACKAGE_ROOT))
+
+from train.conditioning.goal_builder import GOAL_SCHEMA_NAME, REFERENCE_GOAL_SCHEMA_NAME, WAYPOINT_TIME_OFFSETS_S
+from train.data.dataset import SpatialHindsightDataset
+
+
+FEATURE_NAMES = (
+    "preview_0p5_x",
+    "preview_0p5_y",
+    "preview_1p0_x",
+    "preview_1p0_y",
+    "preview_1p5_x",
+    "preview_1p5_y",
+    "target_2p0_x",
+    "target_2p0_y",
+    "target_height_abs",
+    "target_yaw_rel",
+    "preview_speed_2p0",
+)
+
+
+def sha256(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest().upper()
+
+
+def feature_stats(values: np.ndarray) -> dict[str, dict[str, float]]:
+    output = {}
+    for index, name in enumerate(FEATURE_NAMES):
+        column = values[:, index]
+        output[name] = {
+            "min": float(np.min(column)),
+            "p01": float(np.percentile(column, 1)),
+            "p05": float(np.percentile(column, 5)),
+            "mean": float(np.mean(column)),
+            "std": float(np.std(column)),
+            "p50": float(np.percentile(column, 50)),
+            "p95": float(np.percentile(column, 95)),
+            "p99": float(np.percentile(column, 99)),
+            "max": float(np.max(column)),
+        }
+    return output
+
+
+def derived_metrics(values: np.ndarray) -> dict[str, float]:
+    p1, p2, p3, target = (values[:, start : start + 2] for start in (0, 2, 4, 6))
+    distances = np.stack(
+        [np.linalg.norm(point, axis=-1) for point in (p1, p2, p3, target)], axis=-1
+    )
+    increments = np.stack(
+        [
+            np.linalg.norm(p2 - p1, axis=-1),
+            np.linalg.norm(p3 - p2, axis=-1),
+            np.linalg.norm(target - p3, axis=-1),
+        ],
+        axis=-1,
+    )
+    first = p2 - p1
+    second = p3 - p2
+    cross = first[:, 0] * second[:, 1] - first[:, 1] * second[:, 0]
+    dot = np.sum(first * second, axis=-1)
+    turn_angle = np.arctan2(cross, dot)
+    duplicate = increments < 1.0e-4
+    non_monotonic = np.any(np.diff(distances, axis=-1) < -1.0e-3, axis=-1)
+    return {
+        "preview_duplicate_fraction": float(np.mean(np.any(duplicate, axis=-1))),
+        "individual_duplicate_fraction": float(np.mean(duplicate)),
+        "radial_non_monotonic_fraction": float(np.mean(non_monotonic)),
+        "target_distance_p05_m": float(np.percentile(distances[:, -1], 5)),
+        "target_distance_p50_m": float(np.percentile(distances[:, -1], 50)),
+        "target_distance_p95_m": float(np.percentile(distances[:, -1], 95)),
+        "abs_turn_angle_p50_rad": float(np.percentile(np.abs(turn_angle), 50)),
+        "abs_turn_angle_p95_rad": float(np.percentile(np.abs(turn_angle), 95)),
+    }
+
+
+def write_samples(path: Path, values: np.ndarray) -> None:
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(FEATURE_NAMES)
+        writer.writerows(values.tolist())
+
+
+def make_plots(values: np.ndarray, output: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    figure, axes = plt.subplots(2, 2, figsize=(11, 8))
+    axes[0, 0].hist(values[:, 8], bins=60)
+    axes[0, 0].axvline(0.1705, color="tab:red", linestyle="--", label="crouch reference")
+    axes[0, 0].axvline(0.2932, color="tab:green", linestyle="--", label="walk reference")
+    axes[0, 0].set(title="Hindsight target height", xlabel="height [m]", ylabel="count")
+    axes[0, 0].legend(fontsize=8)
+
+    target_distance = np.linalg.norm(values[:, 6:8], axis=-1)
+    axes[0, 1].scatter(values[:, 10], target_distance, c=values[:, 8], s=4, alpha=0.25)
+    axes[0, 1].set(title="Speed and two-second reach", xlabel="preview speed [m/s]", ylabel="target distance [m]")
+
+    axes[1, 0].scatter(values[:, 6], values[:, 7], c=values[:, 8], s=4, alpha=0.25)
+    axes[1, 0].set(title="Terminal XY support", xlabel="target x [m]", ylabel="target y [m]")
+    axes[1, 0].axis("equal")
+
+    preview_distance = np.stack(
+        [np.linalg.norm(values[:, start : start + 2], axis=-1) for start in (0, 2, 4, 6)], axis=-1
+    )
+    axes[1, 1].boxplot(preview_distance, tick_labels=("0.5s", "1.0s", "1.5s", "2.0s"), showfliers=False)
+    axes[1, 1].set(title="Temporal preview distances", ylabel="distance [m]")
+    for axis in axes.flat:
+        axis.grid(True, alpha=0.2)
+    figure.tight_layout()
+    figure.savefig(output / "spatial_goal_coverage.png", dpi=180)
+    plt.close(figure)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--datasets", nargs="+", required=True)
+    parser.add_argument("--output_dir", required=True)
+    parser.add_argument("--max_samples", type=int, default=50_000)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--goal_horizon_steps", type=int, default=100)
+    parser.add_argument("--goal_source", choices=["achieved", "reference"], default="achieved")
+    parser.add_argument("--include_padded_starts", action="store_true")
+    parser.add_argument("--startup_sample_multiplier", type=int, default=1)
+    args = parser.parse_args()
+
+    output = Path(args.output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    dataset = SpatialHindsightDataset(
+        args.datasets,
+        goal_horizon_steps=args.goal_horizon_steps,
+        waypoint_time_offsets_s=WAYPOINT_TIME_OFFSETS_S,
+        goal_source=args.goal_source,
+        include_padded_starts=args.include_padded_starts,
+        startup_sample_multiplier=args.startup_sample_multiplier,
+        symmetry_mode="none",
+    )
+    rng = np.random.default_rng(args.seed)
+    sample_count = min(max(1, args.max_samples), len(dataset.samples))
+    indices = np.sort(rng.choice(len(dataset.samples), sample_count, replace=False))
+    values = np.stack([dataset.goal_for_sample(int(index)) for index in indices]).astype(np.float32)
+    if not np.isfinite(values).all():
+        raise ValueError("Spatial goal coverage contains NaN or Inf.")
+
+    skill_demo_counts = {}
+    for demo in dataset.demos:
+        if demo.skill_idx is None or len(demo.skill_idx) == 0:
+            name = "unknown"
+        else:
+            skill_id = int(np.bincount(demo.skill_idx.astype(np.int64)).argmax())
+            name = dataset.skill_names[skill_id]
+        skill_demo_counts[name] = skill_demo_counts.get(name, 0) + 1
+
+    summary = {
+        "goal_schema": REFERENCE_GOAL_SCHEMA_NAME if args.goal_source == "reference" else GOAL_SCHEMA_NAME,
+        "waypoint_time_offsets_s": WAYPOINT_TIME_OFFSETS_S,
+        "goal_horizon_steps": args.goal_horizon_steps,
+        "goal_source": args.goal_source,
+        "control_rate_hz": 50.0,
+        "datasets": {str(Path(path).resolve()): sha256(path) for path in args.datasets},
+        "demos": len(dataset.demos),
+        "indexed_windows": len(dataset.samples),
+        "sampled_goals": sample_count,
+        "skill_demo_counts": skill_demo_counts,
+        "feature_stats": feature_stats(values),
+        "derived": derived_metrics(values),
+    }
+    (output / "coverage_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    write_samples(output / "goal_samples.csv", values)
+    make_plots(values, output)
+    print(f"[DONE] Spatial coverage report: {output.resolve()}")
+    print(json.dumps(summary["derived"], indent=2))
+
+
+if __name__ == "__main__":
+    main()

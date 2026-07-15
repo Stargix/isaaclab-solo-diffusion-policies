@@ -7,20 +7,24 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .obs_utils import ACTION_HIST_DIM, GOAL_DIM, PROPRIO_DIM
+from .data.obs_utils import ACTION_HIST_DIM, GOAL_DIM, PROPRIO_DIM
+from .conditioning.goal_builder import GOAL_SCHEMA_NAME, WAYPOINT_TIME_OFFSETS_S
 
 
 @dataclass
 class DatasetConfig:
     hdf5_paths: list[str]
     history: int = 8
-    action_horizon: int = 4
-    min_segment_steps: int = 100
-    max_segment_steps: int = 100
-    segment_stride: int = 1
+    prediction_horizon: int = 16
+    execution_offset: int = 8
+    goal_horizon_steps: int = 100
+    waypoint_time_offsets_s: tuple[float, float, float] = WAYPOINT_TIME_OFFSETS_S
     step_stride: int = 1
     dt: float = 0.02
     v_req_clip: float = 2.0
+    goal_source: str = "achieved"
+    include_padded_starts: bool = False
+    startup_sample_multiplier: int = 1
     symmetry_mode: str = "quadruped"
     max_stats_samples: int = 20000
     val_fraction: float = 0.05
@@ -51,7 +55,7 @@ class DiffusionConfig:
     prediction_type: str = "epsilon"
     variance_type: str = "fixed_small"
     clip_sample: bool = True
-    cfg_dropout_prob: float = 0.2
+    cfg_dropout_prob: float = 0.0
 
 
 @dataclass
@@ -80,6 +84,9 @@ class TrainConfig:
     run_name: str = "solo12_diffusion_policy"
     wandb_project: str | None = None
     wandb_entity: str | None = None
+    schema_version: int = 3
+    policy_kind: str = "spatial_time_preview_ddpm"
+    goal_schema: str = GOAL_SCHEMA_NAME
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -93,13 +100,17 @@ DATASET_DEFAULTS = DatasetConfig(hdf5_paths=[])
 TRAINING_CONFIG_KEYS = frozenset(
     {
         "history",
-        "action_horizon",
-        "min_segment_steps",
-        "max_segment_steps",
-        "segment_stride",
+        "prediction_horizon",
+        "execution_offset",
+        "goal_horizon_steps",
+        "waypoint_time_offsets_s",
         "step_stride",
         "v_req_clip",
+        "goal_source",
+        "include_padded_starts",
+        "startup_sample_multiplier",
         "symmetry_mode",
+        "max_stats_samples",
         "val_fraction",
         "d_model",
         "nhead",

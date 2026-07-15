@@ -12,6 +12,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import sys
 import time
@@ -36,15 +37,30 @@ parser.add_argument("--guidance_scale", type=float, default=1.0, help="CFG scale
 parser.add_argument("--num_envs", type=int, default=1)
 parser.add_argument("--num_inference_steps", type=int, default=None, help="Denoising steps; default from checkpoint.")
 parser.add_argument("--path_file", type=str, default=None, help="Optional .npy path [N,3] or [N,4].")
-parser.add_argument("--goal_horizon_steps", type=int, default=100, help="Lookahead horizon in sim steps (matches training).")
-parser.add_argument("--v_req_clip", type=float, default=2.0)
+parser.add_argument("--goal_horizon_steps", type=int, default=None, help="Override the training lookahead horizon.")
+parser.add_argument("--v_req_clip", type=float, default=None)
 parser.add_argument("--desired_speed", type=float, default=0.4, help="Speed used for spatial goal lookahead.")
+parser.add_argument(
+    "--default_path_mode",
+    choices=("walk", "crouch", "walk_to_crouch"),
+    default="walk",
+    help=(
+        "Built-in route when --path_file is omitted.  walk_to_crouch is an explicit "
+        "out-of-distribution diagnostic until transition demonstrations are collected."
+    ),
+)
 parser.add_argument("--warmup_steps", type=int, default=25, help="Stand-hold steps before activating the policy.")
 parser.add_argument("--temporal_blend_alpha", type=float, default=1.0, help="1.0 = no chunk blending (less tremor).")
-parser.add_argument("--exec_horizon", type=int, default=1, help="RHC: execute N chunk steps before replanning (DiffuseLoco uses 1).")
+parser.add_argument(
+    "--exec_horizon",
+    type=int,
+    default=8,
+    help="Execute N chunk actions before replanning; eight matches the validated baseline deployment.",
+)
 parser.add_argument("--real_time_viewer", action="store_true", default=True, help="Sleep to match sim dt (GUI).")
 parser.add_argument("--no_real_time_viewer", action="store_false", dest="real_time_viewer")
 parser.add_argument("--compile_policy", action="store_true", help="Try torch.compile on the policy.")
+parser.add_argument("--torchscript_denoiser", action="store_true", help="Trace the denoiser without changing DDPM sampling.")
 parser.add_argument("--force_walk_goal", action="store_true", help="Override conditioning goals to force walk commands.")
 
 AppLauncher.add_app_launcher_args(parser)
@@ -60,12 +76,13 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
-from train.checkpoint_utils import load_training_checkpoint
+from train.runtime.checkpoint import load_training_checkpoint
+from train.runtime.optimization import trace_denoiser
 from train.config import resolve_inference_steps
-from train.geometry import cumulative_xy_lengths, quat_wxyz_to_rotmat, yaw_from_rotmat
-from train.goal_builder import build_goal_batch_from_path
-from train.normalization import NormalizerStats
-from train.obs_utils import proprio_from_env_tensors
+from train.conditioning.geometry import cumulative_xy_lengths, quat_wxyz_to_rotmat, yaw_from_rotmat
+from train.conditioning.goal_builder import build_goal_batch_from_path
+from train.data.normalization import NormalizerStats
+from train.data.obs_utils import proprio_from_env_tensors
 
 
 @dataclass
@@ -74,11 +91,14 @@ class PathPlan:
     yaws_w: np.ndarray
     cumulative_lengths: np.ndarray
     is_custom: bool
+    default_path_mode: str = "walk"
 
     def rebuild_from_robot(self, pos_w: np.ndarray, quat_w: np.ndarray, env_idx: int = 0) -> None:
         if self.is_custom:
             return
-        self.path_w, self.yaws_w = build_default_path(pos_w[env_idx], quat_w[env_idx])
+        self.path_w, self.yaws_w = build_default_path(
+            pos_w[env_idx], quat_w[env_idx], mode=self.default_path_mode
+        )
         self.cumulative_lengths = cumulative_xy_lengths(self.path_w)
 
 
@@ -92,11 +112,20 @@ def build_default_path(
     *,
     length_m: float = 3.0,
     num_points: int = 60,
-    crouch_start_m: float = 1.5,
-    walk_z: float = 0.24,
-    crouch_z: float = 0.16,
+    walk_z: float = 0.2932,
+    crouch_z: float = 0.1705,
+    mode: str = "walk",
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Build a straight path in the robot's forward (yaw) direction."""
+    """Build a straight path in the robot's forward (yaw) direction.
+
+    The first spatial checkpoint was trained on separately collected walk and
+    crouch trajectories.  It therefore has no actual posture-transition
+    windows.  A constant-height route is the safe default; the mixed route is
+    retained only as an explicit future diagnostic.
+    """
+
+    if mode not in {"walk", "crouch", "walk_to_crouch"}:
+        raise ValueError(f"Unsupported default path mode: {mode}")
 
     yaw = robot_yaw_w(start_quat_w)
     cos_y = float(np.cos(yaw))
@@ -106,7 +135,12 @@ def build_default_path(
     for s in np.linspace(0.0, length_m, num_points):
         x = float(start_pos_w[0] + cos_y * s)
         y = float(start_pos_w[1] + sin_y * s)
-        z = walk_z if s < crouch_start_m else crouch_z
+        if mode == "walk":
+            z = walk_z
+        elif mode == "crouch":
+            z = crouch_z
+        else:
+            z = walk_z if s < 0.5 * length_m else crouch_z
         path_points.append([x, y, z])
         yaws.append(yaw)
     return np.array(path_points, dtype=np.float32), np.array(yaws, dtype=np.float32)
@@ -116,6 +150,7 @@ def load_or_build_path(
     start_pos: np.ndarray,
     start_quat: np.ndarray,
     path_file: str | None,
+    default_path_mode: str,
 ) -> PathPlan:
     if path_file is not None and os.path.exists(path_file):
         print(f"[INFO] Loading path: {path_file}")
@@ -133,9 +168,15 @@ def load_or_build_path(
             yaws_w = path_array[:, 3].astype(np.float32)
         return PathPlan(path_w, yaws_w, cumulative_xy_lengths(path_w), is_custom=True)
 
-    print("[INFO] Generating default 3 m walk->crouch path aligned to robot yaw.")
-    path_w, yaws_w = build_default_path(start_pos[0], start_quat[0])
-    return PathPlan(path_w, yaws_w, cumulative_xy_lengths(path_w), is_custom=False)
+    print(f"[INFO] Generating default 3 m {default_path_mode} path aligned to robot yaw.")
+    path_w, yaws_w = build_default_path(start_pos[0], start_quat[0], mode=default_path_mode)
+    return PathPlan(
+        path_w,
+        yaws_w,
+        cumulative_xy_lengths(path_w),
+        is_custom=False,
+        default_path_mode=default_path_mode,
+    )
 
 
 def get_proprio_30d(raw_env: Any, joint_ids: slice) -> torch.Tensor:
@@ -176,6 +217,7 @@ def run_warmup(
     *,
     warmup_steps: int,
     goal_horizon_steps: int,
+    waypoint_time_offsets_s: tuple[float, float, float],
     dt: float,
     speed: float,
     v_req_clip: float,
@@ -196,6 +238,7 @@ def run_warmup(
             cumulative_lengths,
             path_progress,
             goal_horizon_steps=goal_horizon_steps,
+            waypoint_time_offsets_s=waypoint_time_offsets_s,
             dt=dt,
             speed=speed,
             v_req_clip=v_req_clip,
@@ -226,6 +269,7 @@ def reset_env_history(
     path_progress: np.ndarray,
     *,
     goal_horizon_steps: int,
+    waypoint_time_offsets_s: tuple[float, float, float],
     dt: float,
     speed: float,
     v_req_clip: float,
@@ -240,6 +284,7 @@ def reset_env_history(
         cumulative_lengths,
         path_progress,
         goal_horizon_steps=goal_horizon_steps,
+        waypoint_time_offsets_s=waypoint_time_offsets_s,
         dt=dt,
         speed=speed,
         v_req_clip=v_req_clip,
@@ -270,6 +315,7 @@ def compute_goals(
     path_progress: np.ndarray,
     *,
     goal_horizon_steps: int,
+    waypoint_time_offsets_s: tuple[float, float, float],
     dt: float,
     speed: float,
     v_req_clip: float,
@@ -285,6 +331,7 @@ def compute_goals(
         pos_w,
         quat_w,
         goal_horizon_steps=goal_horizon_steps,
+        waypoint_time_offsets_s=waypoint_time_offsets_s,
         dt=dt,
         speed=speed,
         path_progress=path_progress,
@@ -292,17 +339,17 @@ def compute_goals(
     )
     goals_tensor = torch.from_numpy(goals).to(device)
     if getattr(args_cli, "force_walk_goal", False):
-        goals_tensor[:, 0] = 0.4
+        goals_tensor[:, 0] = 0.2
         goals_tensor[:, 1] = 0.0
-        goals_tensor[:, 2] = 0.8
+        goals_tensor[:, 2] = 0.4
         goals_tensor[:, 3] = 0.0
-        goals_tensor[:, 4] = 1.2
+        goals_tensor[:, 4] = 0.6
         goals_tensor[:, 5] = 0.0
         goals_tensor[:, 6] = 0.8
         goals_tensor[:, 7] = 0.0
-        goals_tensor[:, 8] = 0.0
+        goals_tensor[:, 8] = 0.2932
         goals_tensor[:, 9] = 0.0
-        goals_tensor[:, 10] = 1.0
+        goals_tensor[:, 10] = 0.4
     return goals_tensor
 
 
@@ -313,7 +360,8 @@ def _model_cfg_from_checkpoint(config_dict: dict) -> Solo12DiffusionPolicyConfig
         action_hist_dim=model.get("action_hist_dim", 12),
         goal_dim=model.get("goal_dim", 11),
         history=config_dict["dataset"]["history"],
-        action_horizon=config_dict["dataset"]["action_horizon"],
+        prediction_horizon=config_dict["dataset"]["prediction_horizon"],
+        execution_offset=config_dict["dataset"]["execution_offset"],
         d_model=model["d_model"],
         nhead=model["nhead"],
         num_layers=model["num_layers"],
@@ -340,16 +388,22 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[INFO] Loading checkpoint: {checkpoint_path} ({device})")
 
-    checkpoint = load_training_checkpoint(checkpoint_path, device)
+    checkpoint = load_training_checkpoint(
+        checkpoint_path,
+        device,
+        expected_policy_kind=("spatial_time_preview_ddpm", "spatial_reference_path_ddpm"),
+    )
     config_dict = checkpoint["config"]
+    print(
+        f"[INFO] policy_kind={checkpoint['policy_kind']} "
+        f"goal_source={config_dict['dataset'].get('goal_source', 'achieved')}"
+    )
     normalizer_stats = NormalizerStats.from_dict(checkpoint["normalizer_stats"])
-    # Clamp goal std to a minimum value of 0.1 to prevent tiny divisions from amplifying noise
-    normalizer_stats.goal.std = np.maximum(normalizer_stats.goal.std, 0.1)
-    
     infer_steps = resolve_inference_steps(args_cli.num_inference_steps, config_dict["diffusion"])
     policy_cfg = _model_cfg_from_checkpoint(config_dict)
     policy_cfg.num_inference_steps = infer_steps
-    goal_horizon_steps = args_cli.goal_horizon_steps or config_dict["dataset"].get("min_segment_steps", 100)
+    goal_horizon_steps = args_cli.goal_horizon_steps or config_dict["dataset"]["goal_horizon_steps"]
+    waypoint_time_offsets_s = tuple(config_dict["dataset"]["waypoint_time_offsets_s"])
 
     policy = Solo12DiffusionPolicy(policy_cfg)
     policy.load_state_dict(checkpoint["ema_model_state_dict"])
@@ -357,15 +411,27 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     policy.to(device)
     policy.eval()
 
+    if args_cli.torchscript_denoiser:
+        print("[INFO] Tracing denoiser with TorchScript...")
+        trace_denoiser(policy, device)
+
     if args_cli.compile_policy:
-        try:
-            policy = torch.compile(policy, mode="reduce-overhead")
-            print("[INFO] torch.compile enabled.")
-        except Exception as exc:
-            print(f"[WARN] torch.compile failed: {exc}")
+        if args_cli.torchscript_denoiser:
+            raise ValueError("Choose --torchscript_denoiser or --compile_policy, not both.")
+        if importlib.util.find_spec("triton") is None:
+            print("[WARN] --compile_policy skipped because Triton is not installed; use --torchscript_denoiser.")
+        else:
+            try:
+                policy = torch.compile(policy, mode="reduce-overhead")
+                print("[INFO] torch.compile enabled.")
+            except Exception as exc:
+                print(f"[WARN] torch.compile failed: {exc}")
 
     history_len = policy_cfg.history
     v_req_clip = args_cli.v_req_clip or config_dict["dataset"].get("v_req_clip", 2.0)
+    future_horizon = policy_cfg.prediction_horizon - policy_cfg.execution_offset
+    if not 1 <= args_cli.exec_horizon <= future_horizon:
+        raise ValueError(f"exec_horizon must be in [1, {future_horizon}].")
 
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
@@ -392,16 +458,21 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         f"| guidance={args_cli.guidance_scale}"
     )
 
-    proprio_buffer = torch.zeros((num_envs, history_len, 30), device=device)
-    action_buffer = torch.zeros((num_envs, history_len, 12), device=device)
-    goal_buffer = torch.zeros((num_envs, history_len, 11), device=device)
+    proprio_buffer = torch.zeros((num_envs, history_len, policy_cfg.proprio_dim), device=device)
+    action_buffer = torch.zeros((num_envs, history_len, policy_cfg.action_hist_dim), device=device)
+    goal_buffer = torch.zeros((num_envs, history_len, policy_cfg.goal_dim), device=device)
 
     vec_env.reset()
     start_pos = raw_env._robot.data.root_pos_w.cpu().numpy()
     start_quat = raw_env._robot.data.root_quat_w.cpu().numpy()
     time.sleep(0.5)
 
-    path_plan = load_or_build_path(start_pos, start_quat, args_cli.path_file)
+    path_plan = load_or_build_path(
+        start_pos,
+        start_quat,
+        args_cli.path_file,
+        args_cli.default_path_mode,
+    )
     path_progress = np.zeros(num_envs, dtype=np.int32)
 
     run_warmup(
@@ -417,6 +488,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         path_progress,
         warmup_steps=max(args_cli.warmup_steps, history_len + 1),
         goal_horizon_steps=goal_horizon_steps,
+        waypoint_time_offsets_s=waypoint_time_offsets_s,
         dt=dt,
         speed=args_cli.desired_speed,
         v_req_clip=v_req_clip,
@@ -445,8 +517,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     print(f"[INFO] Inference latency - Avg: {avg_latency:.1f} ms | Max: {max_latency:.1f} ms (budget @50Hz = 20 ms)")
     if avg_latency > 20.0 * max(1, args_cli.exec_horizon):
         print(
-            f"[WARN] Inference is slow. Use --num_inference_steps 4 --exec_horizon 4 "
-            f"and --no_real_time_viewer so sim control is not wall-clock limited."
+            f"[WARN] Inference misses its amortized deadline. Profile --torchscript_denoiser "
+            f"and --exec_horizon 8 before reducing denoising steps."
         )
 
     camera_look_at = np.array([0.0, 0.0, 0.35])
@@ -459,6 +531,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     infer_ms = 0.0
     prev_applied_action = torch.zeros((num_envs, 12), device=device)
     current_goal = goal_buffer[:, -1].clone()
+    next_control_deadline = time.perf_counter()
 
     while simulation_app.is_running():
         with torch.inference_mode():
@@ -467,21 +540,24 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 latest_goal = goal_buffer[:, -1]
                 for env_idx in range(num_envs):
                     dx = latest_goal[env_idx, 6].item()
-                    dz = latest_goal[env_idx, 8].item()
+                    target_height = latest_goal[env_idx, 8].item()
                     v_req = latest_goal[env_idx, 10].item()
                     assert abs(dx) < 3.0, f"Env {env_idx}: dx={dx:.2f} está OOD (entrenamiento max ~3m)"
-                    assert abs(dz) < 0.25, f"Env {env_idx}: dz={dz:.2f} fuera de rango físico"
+                    assert 0.10 <= target_height <= 0.40, (
+                        f"Env {env_idx}: target_height={target_height:.2f} fuera de rango fisico"
+                    )
                     assert 0.0 <= v_req <= 2.0, f"Env {env_idx}: v_req={v_req:.2f} fuera de rango"
 
                 if device.type == "cuda":
                     torch.cuda.synchronize()
                 t0 = time.perf_counter()
-                actions_chunk = policy.predict_action_denormalized(
+                full_trajectory = policy.predict_action_denormalized(
                     proprio_buffer,
                     action_buffer,
                     goal_buffer,
                     guidance_scale=args_cli.guidance_scale,
                 )
+                actions_chunk = policy.executable_chunk(full_trajectory, args_cli.exec_horizon)
                 if device.type == "cuda":
                     torch.cuda.synchronize()
                 infer_ms = (time.perf_counter() - t0) * 1000.0
@@ -499,26 +575,30 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             if agent_cfg.clip_actions is not None:
                 action_step = torch.clamp(action_step, -agent_cfg.clip_actions, agent_cfg.clip_actions)
 
+            # Capture the same pre-action tuple used by the offline dataset.
+            proprio_before_action = get_proprio_30d(raw_env, joint_ids)
+            goal_before_action = compute_goals(
+                raw_env,
+                path_plan.path_w,
+                path_plan.yaws_w,
+                path_plan.cumulative_lengths,
+                path_progress,
+                goal_horizon_steps=goal_horizon_steps,
+                waypoint_time_offsets_s=waypoint_time_offsets_s,
+                dt=dt,
+                speed=args_cli.desired_speed,
+                v_req_clip=v_req_clip,
+                device=device,
+            )
             _, _, dones, _ = vec_env.step(action_step)
 
             update_delayed_buffers(
                 proprio_buffer,
                 action_buffer,
                 goal_buffer,
-                proprio_value=get_proprio_30d(raw_env, joint_ids),
+                proprio_value=proprio_before_action,
                 action_value=prev_applied_action,
-                goal_value=compute_goals(
-                    raw_env,
-                    path_plan.path_w,
-                    path_plan.yaws_w,
-                    path_plan.cumulative_lengths,
-                    path_progress,
-                    goal_horizon_steps=goal_horizon_steps,
-                    dt=dt,
-                    speed=args_cli.desired_speed,
-                    v_req_clip=v_req_clip,
-                    device=device,
-                ),
+                goal_value=goal_before_action,
             )
             prev_applied_action = action_step.clone()
             current_goal = goal_buffer[:, -1].clone()
@@ -545,6 +625,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                         path_plan.cumulative_lengths,
                         path_progress,
                         goal_horizon_steps=goal_horizon_steps,
+                        waypoint_time_offsets_s=waypoint_time_offsets_s,
                         dt=dt,
                         speed=args_cli.desired_speed,
                         v_req_clip=v_req_clip,
@@ -563,21 +644,26 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             goal_z = goal_zscore(current_goal[0], normalizer_stats)
             z_max = float(goal_z.abs().max().item())
             target_dx = current_goal[0, 6].item()
-            target_dz = current_goal[0, 8].item()
+            target_height = current_goal[0, 8].item()
             v_req_val = current_goal[0, 10].item()
             mode_str = "CROUCHING" if robot_z < 0.20 else "WALKING"
             dist_rem = float(np.linalg.norm(path_plan.path_w[-1, :2] - robot_pos[:2]))
             infer_per_step = infer_ms / max(1, args_cli.exec_horizon)
             print(
                 f"Step {step_count:04d} | {mode_str:^10s} | Z={robot_z:.3f}m | "
-                f"dx={target_dx:+.2f} dz={target_dz:+.2f} | v_req={v_req_val:.2f} | "
+                f"dx={target_dx:+.2f} target_z={target_height:+.2f} | v_req={v_req_val:.2f} | "
                 f"goal|z|max={z_max:.2f} | infer={infer_ms:.0f}ms (~{infer_per_step:.0f}/step) | "
                 f"prog={path_progress[0]} | dist_rem={dist_rem:.2f}m"
             )
 
         step_count += 1
         if args_cli.real_time_viewer:
-            time.sleep(dt)
+            next_control_deadline += dt
+            remaining = next_control_deadline - time.perf_counter()
+            if remaining > 0.0:
+                time.sleep(remaining)
+            elif remaining < -1.0:
+                next_control_deadline = time.perf_counter()
 
     print("[INFO] Evaluation finished.")
     vec_env.close()

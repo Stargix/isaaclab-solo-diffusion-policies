@@ -49,9 +49,15 @@ class NormalizerStats:
             proprio_mean = values["obs_mean"]
             proprio_std = values["obs_std"]
         return cls(
-            proprio=ZScoreStats(np.asarray(proprio_mean), np.asarray(proprio_std)),
-            goal=ZScoreStats(np.asarray(values["goal_mean"]), np.asarray(values["goal_std"])),
-            action=MinMaxStats(np.asarray(values["action_min"]), np.asarray(values["action_max"])),
+            proprio=ZScoreStats(np.asarray(proprio_mean, dtype=np.float32), _safe_std(np.asarray(proprio_std))),
+            goal=ZScoreStats(
+                np.asarray(values["goal_mean"], dtype=np.float32),
+                _safe_std(np.asarray(values["goal_std"])),
+            ),
+            action=MinMaxStats(
+                np.asarray(values["action_min"], dtype=np.float32),
+                np.asarray(values["action_max"], dtype=np.float32),
+            ),
         )
 
 
@@ -94,11 +100,27 @@ def build_stats(
     goal_values: np.ndarray,
     action_values: np.ndarray,
 ) -> NormalizerStats:
-    # Use 1st and 99th percentiles to avoid extreme outliers distorting the MinMax scale
-    q_low = np.percentile(action_values, 1, axis=0)
-    q_high = np.percentile(action_values, 99, axis=0)
-    clipped_actions = np.clip(action_values, q_low, q_high)
-    action_min, action_max = _safe_range(clipped_actions.min(axis=0), clipped_actions.max(axis=0))
+    # DDPM inference clips its normalized sample to [-1, 1].  Exact train-set
+    # extrema therefore define the only consistent invertible mapping.  The old
+    # percentile mapping produced training targets outside [-1, 1] that the
+    # sampler could never reproduce.
+    return build_stats_with_action_range(
+        proprio_values,
+        goal_values,
+        action_values.min(axis=0),
+        action_values.max(axis=0),
+    )
+
+
+def build_stats_with_action_range(
+    proprio_values: np.ndarray,
+    goal_values: np.ndarray,
+    action_min: np.ndarray,
+    action_max: np.ndarray,
+) -> NormalizerStats:
+    """Build bounded-memory z-scores with an exact action range."""
+
+    action_min, action_max = _safe_range(action_min, action_max)
     return NormalizerStats(
         proprio=ZScoreStats(proprio_values.mean(axis=0).astype(np.float32), _safe_std(proprio_values.std(axis=0))),
         goal=ZScoreStats(goal_values.mean(axis=0).astype(np.float32), _safe_std(goal_values.std(axis=0))),

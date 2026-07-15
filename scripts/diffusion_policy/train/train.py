@@ -24,7 +24,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -42,7 +42,10 @@ if __package__ in (None, ""):
         TrainConfig,
         load_training_config_overrides,
     )
-    from train.dataset import LocomotionHindsightDataset
+    from train.conditioning.goal_builder import GOAL_SCHEMA_NAME, REFERENCE_GOAL_SCHEMA_NAME
+    from train.data.dataset import SpatialHindsightDataset
+    from train.data.episode_split import split_episode_indices
+    from train.runtime.checkpoint import load_training_checkpoint
 else:  # pragma: no cover
     from ..model.ema_model import EMAModel
     from ..model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
@@ -58,7 +61,10 @@ else:  # pragma: no cover
         TrainConfig,
         load_training_config_overrides,
     )
-    from .dataset import LocomotionHindsightDataset
+    from .conditioning.goal_builder import GOAL_SCHEMA_NAME, REFERENCE_GOAL_SCHEMA_NAME
+    from .data.dataset import SpatialHindsightDataset
+    from .data.episode_split import split_episode_indices
+    from .runtime.checkpoint import load_training_checkpoint
 
 
 def _find_cli_value(argv: list[str], flag: str) -> str | None:
@@ -78,15 +84,42 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output_dir", required=True, help="Directory for checkpoints and config.")
     parser.add_argument("--run_name", default="solo12_diffusion_policy", help="Run name for logs.")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--resume", type=str, default=None, help="Resume model/EMA/optimizer/scheduler from a compatible checkpoint.")
 
     parser.add_argument("--history", type=int, default=DATASET_DEFAULTS.history)
-    parser.add_argument("--action_horizon", type=int, default=DATASET_DEFAULTS.action_horizon)
-    parser.add_argument("--min_segment_steps", type=int, default=DATASET_DEFAULTS.min_segment_steps)
-    parser.add_argument("--max_segment_steps", type=int, default=DATASET_DEFAULTS.max_segment_steps)
-    parser.add_argument("--segment_stride", type=int, default=DATASET_DEFAULTS.segment_stride)
+    parser.add_argument("--prediction_horizon", type=int, default=DATASET_DEFAULTS.prediction_horizon)
+    parser.add_argument("--execution_offset", type=int, default=DATASET_DEFAULTS.execution_offset)
+    parser.add_argument("--goal_horizon_steps", type=int, default=DATASET_DEFAULTS.goal_horizon_steps)
+    parser.add_argument(
+        "--waypoint_time_offsets_s",
+        type=float,
+        nargs=3,
+        default=DATASET_DEFAULTS.waypoint_time_offsets_s,
+        metavar=("T1", "T2", "T3"),
+        help="Temporal preview offsets in seconds; all must precede the terminal horizon.",
+    )
     parser.add_argument("--step_stride", type=int, default=DATASET_DEFAULTS.step_stride, help="Temporal stride to sub-sample step windows.")
     parser.add_argument("--v_req_clip", type=float, default=DATASET_DEFAULTS.v_req_clip)
+    parser.add_argument(
+        "--goal_source",
+        choices=["achieved", "reference"],
+        default=DATASET_DEFAULTS.goal_source,
+        help="achieved = legacy hindsight; reference = explicit route stored in the HDF5.",
+    )
+    parser.add_argument(
+        "--include_padded_starts",
+        action="store_true",
+        default=DATASET_DEFAULTS.include_padded_starts,
+        help="Include reset samples with left-padded state/action/goal histories.",
+    )
+    parser.add_argument(
+        "--startup_sample_multiplier",
+        type=int,
+        default=DATASET_DEFAULTS.startup_sample_multiplier,
+        help="Repeat reset/start anchors so they remain visible among 20-second episodes.",
+    )
     parser.add_argument("--symmetry_mode", choices=["none", "mirror", "quadruped"], default=DATASET_DEFAULTS.symmetry_mode)
+    parser.add_argument("--max_stats_samples", type=int, default=DATASET_DEFAULTS.max_stats_samples)
     parser.add_argument("--val_fraction", type=float, default=DATASET_DEFAULTS.val_fraction)
 
     parser.add_argument("--d_model", type=int, default=MODEL_DEFAULTS.d_model)
@@ -143,17 +176,22 @@ def set_seed(seed: int) -> None:
 
 
 def make_config(args: argparse.Namespace) -> TrainConfig:
+    is_reference = args.goal_source == "reference"
     return TrainConfig(
         dataset=DatasetConfig(
             hdf5_paths=args.datasets,
             history=args.history,
-            action_horizon=args.action_horizon,
-            min_segment_steps=args.min_segment_steps,
-            max_segment_steps=args.max_segment_steps,
-            segment_stride=args.segment_stride,
+            prediction_horizon=args.prediction_horizon,
+            execution_offset=args.execution_offset,
+            goal_horizon_steps=args.goal_horizon_steps,
+            waypoint_time_offsets_s=tuple(args.waypoint_time_offsets_s),
             step_stride=args.step_stride,
             v_req_clip=args.v_req_clip,
+            goal_source=args.goal_source,
+            include_padded_starts=args.include_padded_starts,
+            startup_sample_multiplier=args.startup_sample_multiplier,
             symmetry_mode=args.symmetry_mode,
+            max_stats_samples=args.max_stats_samples,
             val_fraction=args.val_fraction,
         ),
         model=ModelConfig(
@@ -188,6 +226,9 @@ def make_config(args: argparse.Namespace) -> TrainConfig:
         run_name=args.run_name,
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
+        schema_version=4 if is_reference else 3,
+        policy_kind="spatial_reference_path_ddpm" if is_reference else "spatial_time_preview_ddpm",
+        goal_schema=REFERENCE_GOAL_SCHEMA_NAME if is_reference else GOAL_SCHEMA_NAME,
     )
 
 
@@ -232,7 +273,8 @@ def build_policy(cfg: TrainConfig) -> Solo12DiffusionPolicy:
         action_hist_dim=cfg.model.action_hist_dim,
         goal_dim=cfg.model.goal_dim,
         history=cfg.dataset.history,
-        action_horizon=cfg.dataset.action_horizon,
+        prediction_horizon=cfg.dataset.prediction_horizon,
+        execution_offset=cfg.dataset.execution_offset,
         d_model=cfg.model.d_model,
         nhead=cfg.model.nhead,
         num_layers=cfg.model.num_layers,
@@ -273,24 +315,31 @@ def save_checkpoint(
     ema: EMAModel,
     optimizer: torch.optim.Optimizer,
     lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
+    scaler: torch.amp.GradScaler,
     epoch: int,
     global_step: int,
     normalizer_stats: dict,
     val_loss: float,
+    split_manifest: dict,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
+            "schema_version": cfg.schema_version,
+            "policy_kind": cfg.policy_kind,
             "config": cfg.to_dict(),
             "model_state_dict": policy.state_dict(),
             "ema_model_state_dict": ema.averaged_model.state_dict(),
             "noise_scheduler_config": dict(policy.noise_scheduler.config),
             "optimizer_state_dict": optimizer.state_dict(),
             "lr_scheduler_state_dict": lr_scheduler.state_dict(),
+            "scaler_state_dict": scaler.state_dict(),
+            "ema_optimization_step": ema.optimization_step,
             "epoch": epoch,
             "global_step": global_step,
             "normalizer_stats": normalizer_stats,
             "val_loss": val_loss,
+            "split_manifest": split_manifest,
         },
         path,
     )
@@ -309,39 +358,51 @@ def main() -> None:
     print(
         f"[INFO] d_model={cfg.model.d_model} layers={cfg.model.num_layers} "
         f"nhead={cfg.model.nhead} K_train={cfg.diffusion.num_train_timesteps} "
-        f"K_infer={cfg.diffusion.num_inference_steps}"
+        f"K_infer={cfg.diffusion.num_inference_steps} trajectory={cfg.dataset.prediction_horizon} "
+        f"execute_from={cfg.dataset.execution_offset}"
     )
 
     device = torch.device(args.device)
-    dataset = LocomotionHindsightDataset(
+    dataset = SpatialHindsightDataset(
         cfg.dataset.hdf5_paths,
         history=cfg.dataset.history,
-        action_horizon=cfg.dataset.action_horizon,
-        min_segment_steps=cfg.dataset.min_segment_steps,
-        max_segment_steps=cfg.dataset.max_segment_steps,
-        segment_stride=cfg.dataset.segment_stride,
+        prediction_horizon=cfg.dataset.prediction_horizon,
+        execution_offset=cfg.dataset.execution_offset,
+        goal_horizon_steps=cfg.dataset.goal_horizon_steps,
+        waypoint_time_offsets_s=cfg.dataset.waypoint_time_offsets_s,
         step_stride=cfg.dataset.step_stride,
         dt=cfg.dataset.dt,
         v_req_clip=cfg.dataset.v_req_clip,
+        goal_source=cfg.dataset.goal_source,
+        include_padded_starts=cfg.dataset.include_padded_starts,
+        startup_sample_multiplier=cfg.dataset.startup_sample_multiplier,
         symmetry_mode=cfg.dataset.symmetry_mode,
+    )
+    episode_split = split_episode_indices(len(dataset.demos), cfg.dataset.val_fraction, cfg.optim.seed)
+    train_indices = dataset.sample_indices_for_demos(episode_split.train_demo_indices)
+    val_indices = dataset.sample_indices_for_demos(episode_split.val_demo_indices)
+    normalizer_stats = dataset.build_normalizer_stats(
+        episode_split.train_demo_indices,
         max_stats_samples=cfg.dataset.max_stats_samples,
-    )
-    normalizer_stats = dataset.get_normalizer_stats().to_dict()
-
-    val_size = max(1, int(len(dataset) * cfg.dataset.val_fraction))
-    train_size = len(dataset) - val_size
-    train_dataset, val_dataset = random_split(
-        dataset,
-        [train_size, val_size],
-        generator=torch.Generator().manual_seed(cfg.optim.seed),
-    )
+        seed=cfg.optim.seed,
+    ).to_dict()
+    train_dataset = Subset(dataset, train_indices)
+    val_dataset = Subset(dataset, val_indices)
+    split_manifest = {
+        "seed": cfg.optim.seed,
+        "val_fraction": cfg.dataset.val_fraction,
+        "train": dataset.manifest_for_demos(episode_split.train_demo_indices),
+        "validation": dataset.manifest_for_demos(episode_split.val_demo_indices),
+    }
+    with (output_dir / "split_manifest.json").open("w", encoding="utf-8") as file:
+        json.dump(split_manifest, file, indent=2)
     train_loader = DataLoader(
         train_dataset,
         batch_size=cfg.optim.batch_size,
         shuffle=True,
         num_workers=cfg.optim.num_workers,
         pin_memory=device.type == "cuda",
-        drop_last=True,
+        drop_last=False,
     )
     val_loader = DataLoader(
         val_dataset,
@@ -371,14 +432,39 @@ def main() -> None:
     wandb = maybe_init_wandb(cfg)
 
     print(
-        f"[INFO] demos={len(dataset.demos)} samples={len(dataset)} train={train_size} val={val_size} "
+        f"[INFO] demos={len(dataset.demos)} samples={len(dataset)} "
+        f"train={len(train_dataset)} val={len(val_dataset)} "
+        f"goal_source={cfg.dataset.goal_source} padded_starts={cfg.dataset.include_padded_starts} "
         f"symmetry={cfg.dataset.symmetry_mode} steps/epoch={steps_per_epoch} total_steps={total_steps} "
         f"lr_warmup={cfg.optim.lr_warmup_steps} device={device}"
     )
 
     global_step = 0
     best_val = float("inf")
-    for epoch in range(1, cfg.optim.epochs + 1):
+    start_epoch = 1
+    if args.resume is not None:
+        resume = load_training_checkpoint(args.resume, device, expected_policy_kind=cfg.policy_kind)
+        previous_cfg = resume["config"]
+        for section in ("dataset", "model", "diffusion"):
+            if previous_cfg[section] != cfg.to_dict()[section]:
+                raise ValueError(f"Resume {section} config does not match the requested run.")
+        policy.load_state_dict(resume["model_state_dict"])
+        ema.averaged_model.load_state_dict(resume["ema_model_state_dict"])
+        optimizer.load_state_dict(resume["optimizer_state_dict"])
+        lr_scheduler.load_state_dict(resume["lr_scheduler_state_dict"])
+        if "scaler_state_dict" in resume:
+            scaler.load_state_dict(resume["scaler_state_dict"])
+        global_step = int(resume["global_step"])
+        start_epoch = int(resume["epoch"]) + 1
+        best_val = float(resume.get("val_loss", float("inf")))
+        ema.optimization_step = int(resume.get("ema_optimization_step", global_step))
+        if start_epoch > cfg.optim.epochs:
+            raise ValueError(
+                f"Checkpoint completed epoch {start_epoch - 1}, but requested epochs={cfg.optim.epochs}."
+            )
+        print(f"[INFO] Resuming at epoch={start_epoch} global_step={global_step} best_val={best_val:.6f}")
+
+    for epoch in range(start_epoch, cfg.optim.epochs + 1):
         policy.train()
         epoch_start = time.time()
         train_losses = []
@@ -421,10 +507,12 @@ def main() -> None:
                         ema=ema,
                         optimizer=optimizer,
                         lr_scheduler=lr_scheduler,
+                        scaler=scaler,
                         epoch=epoch,
                         global_step=global_step,
                         normalizer_stats=normalizer_stats,
                         val_loss=val_loss,
+                        split_manifest=split_manifest,
                     )
                     print(f"[INFO] New best val_loss={val_loss:.6f} saved to best.pt")
 
@@ -437,10 +525,12 @@ def main() -> None:
                         ema=ema,
                         optimizer=optimizer,
                         lr_scheduler=lr_scheduler,
+                        scaler=scaler,
                         epoch=epoch,
                         global_step=global_step,
                         normalizer_stats=normalizer_stats,
                         val_loss=val_loss,
+                        split_manifest=split_manifest,
                     )
 
         ema.averaged_model.set_normalizer_stats(normalizer_stats)
@@ -460,10 +550,12 @@ def main() -> None:
                 ema=ema,
                 optimizer=optimizer,
                 lr_scheduler=lr_scheduler,
+                scaler=scaler,
                 epoch=epoch,
                 global_step=global_step,
                 normalizer_stats=normalizer_stats,
                 val_loss=val_loss,
+                split_manifest=split_manifest,
             )
         if epoch % cfg.optim.save_every == 0 or epoch == cfg.optim.epochs:
             save_checkpoint(
@@ -473,10 +565,12 @@ def main() -> None:
                 ema=ema,
                 optimizer=optimizer,
                 lr_scheduler=lr_scheduler,
+                scaler=scaler,
                 epoch=epoch,
                 global_step=global_step,
                 normalizer_stats=normalizer_stats,
                 val_loss=val_loss,
+                split_manifest=split_manifest,
             )
 
 

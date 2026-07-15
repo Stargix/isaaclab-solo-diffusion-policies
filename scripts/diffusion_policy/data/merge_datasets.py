@@ -37,6 +37,7 @@ REQUIRED_OBS_KEYS = (
     "root_pos_w",
     "root_quat_w",
     "command_speed",
+    "desired_base_height",
 )
 
 EXPECTED_CONVENTION_PREFIX = "aligned: obs[t] is the proprioceptive state BEFORE executing actions[t]"
@@ -62,6 +63,12 @@ def _validate_source_file(path: str) -> None:
             raise KeyError(f"{path}: missing required 'data' group.")
 
         data = f["data"]
+        condition_schema = _decode_attr(data.attrs.get("condition_schema", ""))
+        if condition_schema != "velocity_xyyaw_plus_desired_base_height_v1":
+            raise ValueError(
+                f"{path}: expected velocity-plus-height condition schema, got {condition_schema!r}. "
+                "Regenerate it with the current collector."
+            )
         convention = data.attrs.get("convention", None)
         if convention is None:
             raise ValueError(
@@ -110,6 +117,7 @@ def _validate_source_file(path: str) -> None:
                 "root_pos_w": 3,
                 "root_quat_w": 4,
                 "command_speed": 3,
+                "desired_base_height": 1,
             }
             for key, dim in expected_dims.items():
                 if obs[key].ndim != 2 or obs[key].shape[1] != dim:
@@ -190,6 +198,7 @@ def merge_hdf5_files(
             "last_action[t] = actions[t-1] (last_action[0] = 0)."
         )
         out_data.attrs["control_rate_hz"] = 50.0
+        out_data.attrs["condition_schema"] = "velocity_xyyaw_plus_desired_base_height_v1"
         out_data.attrs["merged_from"] = np.array(
             [str(Path(p).name) for p in input_files], dtype="S64",
         )
