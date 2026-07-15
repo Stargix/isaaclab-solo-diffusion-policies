@@ -226,8 +226,8 @@ def configure_env_for_collection(env_cfg: Any, args: argparse.Namespace) -> None
     env_cfg.seed = args.seed
     env_cfg.sim.device = args.device if args.device is not None else env_cfg.sim.device
 
-    # 20s episodes = 1000 steps at 50Hz. Command resampling is handled manually below.
-    env_cfg.episode_length_s = 20.0
+    # 6s episodes = 300 steps at 50Hz to prevent cumulative tracking drift in Phase A.
+    env_cfg.episode_length_s = 6.0
     env_cfg.command_resampling_time_s = 1.0e9
     env_cfg.standing_env_prob = 0.0
 
@@ -903,6 +903,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                     is_fall=is_fall, sim_terminated=bool(reset_terminated_np[i]),
                     writer=writer, stats=stats, rng=rng, raw_env=raw_env, device=device,
                 )
+                if args_cli.route_profile == "phase_a":
+                    state_next["command"][i] = 0.0
                 # The cached state for a manually-reset env is now stale (pre-reset
                 # fallen state), but warmup prevents it from ever being recorded and
                 # the next state_next queries refresh it.
