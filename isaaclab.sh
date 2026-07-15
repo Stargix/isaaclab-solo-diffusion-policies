@@ -341,7 +341,7 @@ setup_conda_env() {
     fi
 
     # check if _isaac_sim symlink exists and isaacsim-rl is not installed via pip
-    if [ ! -L "${ISAACLAB_PATH}/_isaac_sim" ] && ! python -m pip list | grep -q 'isaacsim-rl'; then
+    if [ ! -L "${ISAACLAB_PATH}/_isaac_sim" ] && { ! command -v python &>/dev/null || ! python -m pip list | grep -q 'isaacsim-rl'; }; then
         echo -e "[WARNING] _isaac_sim symlink not found at ${ISAACLAB_PATH}/_isaac_sim"
         echo -e "\tThis warning can be ignored if you plan to install Isaac Sim via pip."
         echo -e "\tIf you are using a binary installation of Isaac Sim, please ensure the symlink is created before setting up the conda environment."
@@ -356,14 +356,14 @@ setup_conda_env() {
 
         # patch Python version if needed, but back up first
         cp "${ISAACLAB_PATH}/environment.yml"{,.bak}
-        if is_isaacsim_version_4_5; then
+        if [ -d "${ISAACLAB_PATH}/_isaac_sim" ] && is_isaacsim_version_4_5; then
             echo "[INFO] Detected Isaac Sim 4.5 → forcing python=3.10"
             sed -i 's/^  - python=3\.11/  - python=3.10/' "${ISAACLAB_PATH}/environment.yml"
         else
             echo "[INFO] Isaac Sim >= 5.0 detected, installing python=3.11"
         fi
 
-        conda env create -y --file ${ISAACLAB_PATH}/environment.yml -n ${env_name}
+        conda env create --file ${ISAACLAB_PATH}/environment.yml -n ${env_name}
         # (optional) restore original environment.yml:
         if [[ -f "${ISAACLAB_PATH}/environment.yml.bak" ]]; then
             mv "${ISAACLAB_PATH}/environment.yml.bak" "${ISAACLAB_PATH}/environment.yml"
@@ -377,7 +377,13 @@ setup_conda_env() {
     rm -f ${CONDA_PREFIX}/etc/conda/activate.d/setenv.sh
     rm -f ${CONDA_PREFIX}/etc/conda/deactivate.d/unsetenv.sh
     # activate the environment
-    source $(conda info --base)/etc/profile.d/conda.sh
+    if [ -f "$(conda info --base)/etc/profile.d/conda.sh" ]; then
+        source "$(conda info --base)/etc/profile.d/conda.sh"
+    elif [ -f "/etc/profile.d/conda.sh" ]; then
+        source "/etc/profile.d/conda.sh"
+    else
+        source "$(conda info --base)/etc/profile.d/conda.sh"
+    fi
     conda activate ${env_name}
     # setup directories to load Isaac Sim variables
     mkdir -p ${CONDA_PREFIX}/etc/conda/activate.d

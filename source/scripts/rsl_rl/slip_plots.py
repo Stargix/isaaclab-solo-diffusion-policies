@@ -18,8 +18,8 @@ interactively to zoom into the details:
     ./isaaclab.sh -p source/scripts/rsl_rl/slip_plots.py <slip_log.csv> --no-show
 
 The figure mirrors the manual ``tmp.py`` layout: a 2x2 grid (one subplot per foot) that
-concatenates every contact episode end-to-end and overlays the reaction-force angle against
-the dynamic/static friction-cone limits plus the tangential contact speed on a twin axis.
+concatenates every contact episode end-to-end and overlays the friction/normal cone angle
+against the dynamic/static friction-cone limits plus the friction-opposed contact speed on a twin axis.
 """
 
 from __future__ import annotations
@@ -200,6 +200,36 @@ def build_concatenated_contacts(df, foot, gap_s: float | None = DEFAULT_GAP_S, m
     return out, boundaries[:-1]
 
 
+def _numeric_column(df, column: str) -> np.ndarray:
+    import pandas as pd
+
+    return pd.to_numeric(df[column], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+
+
+def _friction_axis_speed_from_columns(df, speed_col: str = SPEED_COL) -> tuple[np.ndarray, str]:
+    friction_cols = {"friction_force_x", "friction_force_y", "friction_force_z"}
+    velocity_cols = {"vx", "vy", "vz"}
+    if friction_cols.issubset(df.columns) and velocity_cols.issubset(df.columns):
+        vel = np.column_stack([_numeric_column(df, col) for col in ("vx", "vy", "vz")])
+        friction = np.column_stack(
+            [_numeric_column(df, col) for col in ("friction_force_x", "friction_force_y", "friction_force_z")]
+        )
+        friction_norm = np.linalg.norm(friction, axis=1)
+        signed_speed = np.divide(
+            np.sum(vel * friction, axis=1),
+            friction_norm,
+            out=np.zeros_like(friction_norm),
+            where=friction_norm > 1.0e-9,
+        )
+        return np.maximum(0.0, -signed_speed), "friction-opposed slip speed"
+
+    if speed_col in df.columns:
+        return np.abs(_numeric_column(df, speed_col)), "contact-point slip speed"
+    if {"vx", "vy"}.issubset(df.columns):
+        return np.hypot(_numeric_column(df, "vx"), _numeric_column(df, "vy")), "contact-point XY speed"
+    return np.zeros(len(df), dtype=float), "contact-point slip speed"
+
+
 def build_slip_figure(
     csv_path: str,
     *,
@@ -209,6 +239,7 @@ def build_slip_figure(
     gap_s: float | None = DEFAULT_GAP_S,
     min_samples: int = DEFAULT_MIN_SAMPLES,
     eps_deg: float = DEFAULT_EPS_DEG,
+    title_extra: str | None = None,
 ):
     """Populate ``fig`` with the per-foot concatenated-contacts slip plot.
 
@@ -218,6 +249,18 @@ def build_slip_figure(
     import pandas as pd
 
     df = pd.read_csv(csv_path)
+    if {"normal_force", "friction_force"}.issubset(df.columns):
+        normal_force = pd.to_numeric(df["normal_force"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        friction_force = pd.to_numeric(df["friction_force"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        df = df.copy()
+        df["angle_deg"] = np.degrees(np.arctan2(friction_force, normal_force))
+        if "effective_mu" in df.columns:
+            df["effective_mu"] = np.divide(
+                friction_force,
+                normal_force,
+                out=np.zeros_like(friction_force),
+                where=normal_force > 1.0e-6,
+            )
     gap_s = _resolve_gap_s(df, gap_s)
     axes = fig.subplots(2, 2, sharex=False).flat
     shared_legend = None
@@ -244,14 +287,14 @@ def build_slip_figure(
         t = dff["t_concat"].to_numpy()
         t_seg = seg(dff["t_concat"].to_numpy())
 
-        # Left axis: reaction angle and friction-cone limits. A tiny dot marks every per-substep
+        # Left axis: friction/normal cone angle and friction-cone limits. A tiny dot marks every per-substep
         # angle sample: at full zoom they blend into the line, but zooming in separates them so it
         # is clear exactly where each measurement falls.
         ax.plot(
             t_seg,
             seg(dff["angle_deg"]),
             color="tab:blue",
-            label="angle",
+            label="cone angle",
             marker=".",
             markersize=5.6,
             markerfacecolor="tab:blue",
@@ -275,13 +318,21 @@ def build_slip_figure(
                 label="policy decision",
                 zorder=6,
             )
-        # Keep the measured reaction angle segmented at contact breaks, but join the cone-limit
+        # Keep the measured cone angle segmented at contact breaks, but join the cone-limit
         # samples across transitions so friction-limit changes are readable as one continuous trace.
-        ax.plot(t, dff["angle_dyn_deg"].to_numpy(dtype=float), color="tab:orange", label="angle_dyn")
+        ax.plot(
+            t,
+            dff["angle_dyn_deg"].to_numpy(dtype=float),
+            color="tab:orange",
+            linestyle="--",
+            linewidth=1.2,
+            alpha=0.9,
+            label="angle_dyn",
+        )
         ax.plot(t, dff["angle_static_deg"].to_numpy(dtype=float), color="tab:green", label="angle_static")
 
         ax.set_xlabel("concatenated contact time [s]")
-        ax.set_ylabel("angle [deg]")
+        ax.set_ylabel("cone angle [deg]")
         ax.set_title(f"{foot}: all contacts concatenated")
         # Only vertical (time) gridlines come from the left/angle axis. The horizontal gridlines
         # are drawn on the right/velocity axis below so they mark the tangential-speed ticks.
@@ -301,25 +352,37 @@ def build_slip_figure(
                 label="contact boundary" if i == 0 else "_nolegend_",
             )
 
-        # Right axis: tangential speed magnitude. Plot the Euclidean norm of the horizontal
-        # foot-velocity components (always >= 0) so the curve is an unambiguous slip speed and
-        # never a signed component. Fall back to the precomputed norm column if vx/vy are absent.
+        # Right axis: slip-speed magnitude. New logs include the PhysX friction-force vector, so
+        # project contact-point velocity directly onto the direction opposed by friction. This
+        # makes the speed curve use the same contact basis/sign convention as the dynamic limit.
+        # Older logs fall back to their stored speed column (historically ``||v_xy||``).
         ax2 = ax.twinx()
-        if {"vx", "vy"}.issubset(dff.columns):
-            tangential_speed = np.hypot(dff["vx"].to_numpy(), dff["vy"].to_numpy())
-        else:
-            tangential_speed = np.abs(dff[speed_col].to_numpy())
+        tangential_speed, speed_label = _friction_axis_speed_from_columns(dff, speed_col=speed_col)
         ax2.plot(
             t_seg,
             seg(tangential_speed),
             color="tab:red",
             linestyle="--",
             linewidth=1.2,
-            label="contact-point slip speed",
+            marker=".",
+            markersize=5.6,
+            markerfacecolor="tab:red",
+            markeredgecolor="none",
+            label=speed_label,
         )
+        if "tangential_speed_xy" in dff.columns:
+            ax2.plot(
+                t_seg,
+                seg(np.abs(_numeric_column(dff, "tangential_speed_xy"))),
+                color="tab:gray",
+                linestyle="-.",
+                linewidth=0.85,
+                alpha=0.5,
+                label="contact-point XY speed (old)",
+            )
         # Faint baseline: the raw foot-body-origin speed (pre-omega x r). Where this rides high
         # while the red contact-point curve sits near zero, the foot is rolling/pivoting over a
-        # planted contact, not sliding — that is why the reaction angle stays in the static band.
+        # planted contact, not sliding — that is why the cone angle stays in the static band.
         if "tangential_speed_origin" in dff.columns:
             ax2.plot(
                 t_seg,
@@ -330,7 +393,7 @@ def build_slip_figure(
                 alpha=0.6,
                 label="foot-origin speed (raw)",
             )
-        ax2.set_ylabel("norm tangent velocity [m/s]", color="tab:red")
+        ax2.set_ylabel("contact speed [m/s]", color="tab:red")
         ax2.tick_params(axis="y", labelcolor="tab:red")
         # Fixed 0.5 m/s spacing on the velocity axis (and matching y-gridlines) instead of auto ticks.
         from matplotlib.ticker import MultipleLocator  # noqa: PLC0415
@@ -349,9 +412,9 @@ def build_slip_figure(
         angle_dyn = dff["angle_dyn_deg"].to_numpy()
         angle_static = dff["angle_static_deg"].to_numpy()
         total = len(dff)
-        # a) reaction angle above the dynamic cone (by more than eps) but still within the static cone.
+        # a) cone angle above the dynamic cone (by more than eps) but still within the static cone.
         in_margin = (angle > angle_dyn + eps_deg) & (angle <= angle_static)
-        # b) reaction angle within +/- eps of the dynamic cone, i.e. riding the slip threshold.
+        # b) cone angle within +/- eps of the dynamic cone, i.e. riding the slip threshold.
         slipping = (angle > angle_dyn - eps_deg) & (angle <= angle_dyn + eps_deg)
         pct_margin = 100.0 * float(in_margin.sum()) / total
         pct_slipping = 100.0 * float(slipping.sum()) / total
@@ -378,13 +441,14 @@ def build_slip_figure(
         )
 
     stem = os.path.basename(csv_path).rsplit(".", 1)[0]
-    fig.suptitle(
-        f"Per-foot: all contact episodes concatenated — reaction angle vs cones + tangential speed - {stem}"
-    )
+    title = f"Per-foot: all contact episodes concatenated — contact reaction force angle - {stem}"
+    if title_extra:
+        title = f"{title}\n{title_extra}"
+    fig.suptitle(title)
     if shared_legend:
         handles, labels = zip(*shared_legend)
         fig.legend(handles, labels, loc="lower center", bbox_to_anchor=(0.5, 0.01), ncol=len(labels), fontsize=9)
-    fig.tight_layout(rect=(0.0, 0.07, 1.0, 0.94))
+    fig.tight_layout(rect=(0.0, 0.07, 1.0, 0.91 if title_extra else 0.94))
     return fig
 
 
@@ -395,6 +459,7 @@ def save_slip_figure(
     gap_s: float | None = DEFAULT_GAP_S,
     min_samples: int = DEFAULT_MIN_SAMPLES,
     eps_deg: float = DEFAULT_EPS_DEG,
+    title_extra: str | None = None,
     dpi: int = 150,
 ) -> str:
     """Render the slip figure with the Agg backend and write it to ``png_path``.
@@ -407,7 +472,14 @@ def save_slip_figure(
 
     fig = Figure(figsize=(16, 10))
     FigureCanvasAgg(fig)
-    build_slip_figure(csv_path, fig=fig, gap_s=gap_s, min_samples=min_samples, eps_deg=eps_deg)
+    build_slip_figure(
+        csv_path,
+        fig=fig,
+        gap_s=gap_s,
+        min_samples=min_samples,
+        eps_deg=eps_deg,
+        title_extra=title_extra,
+    )
 
     out_dir = os.path.dirname(os.path.abspath(png_path))
     if out_dir:
@@ -422,6 +494,7 @@ def open_slip_figures(
     gap_s: float | None = DEFAULT_GAP_S,
     min_samples: int = DEFAULT_MIN_SAMPLES,
     eps_deg: float = DEFAULT_EPS_DEG,
+    title_extra: str | None = None,
     save_path: str | None = None,
     show: bool = True,
 ) -> int:
@@ -435,7 +508,14 @@ def open_slip_figures(
         csv_path = os.path.expanduser(str(csv_path))
         fig = plt.figure(figsize=(16, 10))
         try:
-            build_slip_figure(csv_path, fig=fig, gap_s=gap_s, min_samples=min_samples, eps_deg=eps_deg)
+            build_slip_figure(
+                csv_path,
+                fig=fig,
+                gap_s=gap_s,
+                min_samples=min_samples,
+                eps_deg=eps_deg,
+                title_extra=title_extra,
+            )
         except Exception as exc:
             plt.close(fig)
             print(f"[WARN] Could not open slip plot for {csv_path}: {type(exc).__name__}: {exc}")
@@ -463,6 +543,7 @@ def launch_slip_plot_processes(
     gap_s: float | None = DEFAULT_GAP_S,
     min_samples: int = DEFAULT_MIN_SAMPLES,
     eps_deg: float = DEFAULT_EPS_DEG,
+    title_extra: str | None = None,
 ) -> int:
     """Launch one detached plotting process per selected CSV path."""
     launched = 0
@@ -480,6 +561,8 @@ def launch_slip_plot_processes(
         ]
         if gap_s is not None:
             cmd.extend(("--gap-s", str(gap_s)))
+        if title_extra:
+            cmd.extend(("--title-extra", title_extra))
         try:
             subprocess.Popen(cmd, start_new_session=True)
         except Exception as exc:
@@ -496,6 +579,7 @@ def run_picker_app(
     gap_s: float | None = DEFAULT_GAP_S,
     min_samples: int = DEFAULT_MIN_SAMPLES,
     eps_deg: float = DEFAULT_EPS_DEG,
+    title_extra: str | None = None,
 ) -> None:
     """Run a tiny app window with an Open plot(s) button."""
     if not _has_display():
@@ -524,6 +608,7 @@ def run_picker_app(
             gap_s=gap_s,
             min_samples=min_samples,
             eps_deg=eps_deg,
+            title_extra=title_extra,
         )
         if launched > 0:
             status.set(f"Opening {launched} plot window(s).")
@@ -600,6 +685,11 @@ def main(argv=None) -> None:
             " contact time with (dyn+eps < angle <= static) and with (dyn-eps < angle <= dyn+eps)."
         ),
     )
+    parser.add_argument(
+        "--title-extra",
+        default=None,
+        help="Optional extra line appended to the figure title, for example friction settings.",
+    )
     args = parser.parse_args(argv)
 
     if args.app:
@@ -613,6 +703,7 @@ def main(argv=None) -> None:
             gap_s=args.gap_s,
             min_samples=args.min_samples,
             eps_deg=args.eps_deg,
+            title_extra=args.title_extra,
         )
         return
 
@@ -631,7 +722,14 @@ def main(argv=None) -> None:
     if args.no_show:
         for csv_path in csv_paths:
             png_path = args.save or (os.path.splitext(csv_path)[0] + ".png")
-            save_slip_figure(csv_path, png_path, gap_s=args.gap_s, min_samples=args.min_samples, eps_deg=args.eps_deg)
+            save_slip_figure(
+                csv_path,
+                png_path,
+                gap_s=args.gap_s,
+                min_samples=args.min_samples,
+                eps_deg=args.eps_deg,
+                title_extra=args.title_extra,
+            )
             print(f"[INFO] Saved slip plot to {png_path}")
         return
 
@@ -641,6 +739,7 @@ def main(argv=None) -> None:
             gap_s=args.gap_s,
             min_samples=args.min_samples,
             eps_deg=args.eps_deg,
+            title_extra=args.title_extra,
         )
         print(f"[INFO] Opening {launched} slip plot window(s).")
         return
@@ -650,6 +749,7 @@ def main(argv=None) -> None:
         gap_s=args.gap_s,
         min_samples=args.min_samples,
         eps_deg=args.eps_deg,
+        title_extra=args.title_extra,
         save_path=args.save,
     )
 

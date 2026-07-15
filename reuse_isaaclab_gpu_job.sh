@@ -21,7 +21,7 @@ EOF
 }
 
 JOBID=""
-WORKDIR="${HOME}/IsaacLab"
+WORKDIR="${HOME}/i2r/isaaclab-solo-diffusion-policies"
 CONDA_ENV="isaaclab"
 
 while [[ $# -gt 0 ]]; do
@@ -72,7 +72,13 @@ CMD_Q="${CMD_Q% }"
 srun --jobid="$JOBID" --overlap bash -lc "
 set -eo pipefail
 set +u
-source ~/miniconda3/etc/profile.d/conda.sh
+if [[ -f ~/miniconda3/etc/profile.d/conda.sh ]]; then
+  source ~/miniconda3/etc/profile.d/conda.sh
+elif [[ -f /etc/profile.d/conda.sh ]]; then
+  source /etc/profile.d/conda.sh
+else
+  source \"\$(conda info --base)/etc/profile.d/conda.sh\"
+fi
 if [[ \"\${CONDA_DEFAULT_ENV:-}\" != \"${CONDA_ENV}\" ]]; then
   conda activate ${CONDA_ENV}
 fi

@@ -14,15 +14,16 @@ from isaaclab_tasks.direct.solo12.agents.rsl_rl_ppo_cfg import Solo12PPORunnerCf
 @configclass
 class Solo12CrouchEnvCfg(Solo12EnvCfg):
     # --- Velocity command ranges ---
-    command_lin_vel_x_range = (-0.5, 0.5)
-    command_lin_vel_y_range = (-0.2, 0.2)
-    command_ang_vel_z_range = (-0.5, 0.5)
+    command_lin_vel_x_range = (-1.0, 1.0)
+    command_lin_vel_y_range = (-0.5, 0.5)
+    command_ang_vel_z_range = (-1.0, 1.0)
+    opposite_direction_cmd_prob = 0.0
 
     # --- CaT-inspired height termination ---
     # Max allowed height. If exceeded, episode is terminated (after warmup).
-    crouch_height_limit = 0.21
+    crouch_height_limit = 0.20
     # Target height for a gentle centering guide reward.
-    target_base_height = 0.18
+    target_base_height = 0.16
     base_height_reward_scale = -20.0  # Softer guide penalty
 
     # --- Sharper tracking to reward movement ---
@@ -44,11 +45,34 @@ class Solo12CrouchEnvCfg(Solo12EnvCfg):
     # Train on flat terrain for simplicity
     tricky_terrain = False
 
+    # --- Clean training (Jordi's settings) ---
+    enable_observation_corruption = False
+    base_push_force_xy_range = (0.0, 0.0)
+    base_push_force_z_range = (0.0, 0.0)
+    forces_applied_to_base_curriculum = [0.0]
+    actuation_delay_range = (0, 0)
+
+    # --- Actuator gains (KP/KD) ---
+    # Nominal stiffness and damping matching Jordi's successful run
+    kp = 9.0
+    kd = 0.2
+
+    def __post_init__(self):
+        super().__post_init__()
+        # Sync actuator gains from config into the robot articulation actuators
+        # (Fixes the static instantiation bug in base class)
+        if "legs" in self.robot.actuators:
+            self.robot.actuators["legs"].stiffness = self.kp
+            self.robot.actuators["legs"].damping = self.kd
+
+
+
+
 
 @configclass
 class Solo12CrouchPPORunnerCfg(Solo12PPORunnerCfg):
     experiment_name = "solo12_rsl_rl_crouch_runs"
-    run_name = "solo12_crouch_v4_symmetry"
+    run_name = "solo12_crouch_v5_symmetry_clean"
 
 
 class Solo12CrouchEnv(Solo12Env):

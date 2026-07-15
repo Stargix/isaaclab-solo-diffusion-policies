@@ -3,6 +3,7 @@
 .openclaw/
 .worktrees/
 .env
+**/context/
 
 # C++
 **/cmake-build*/
@@ -114,3 +115,11 @@ tests/
 # TacSL sensor
 **/tactile_record/*
 **/gelsight_r15_data/*
+
+# Datasets and large binary files
+**/*.hdf5
+scripts/diffusion_policy/data/datasets/
+# Generated closed-loop evaluation and dataset-coverage artifacts.
+scripts/baseline_diffuseloco/evaluations/
+scripts/diffusion_policy/data/coverage/
+scripts/diffusion_policy/data/audits/
