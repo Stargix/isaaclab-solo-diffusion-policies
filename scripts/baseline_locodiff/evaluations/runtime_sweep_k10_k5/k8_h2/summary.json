@@ -1,0 +1,98 @@
+{
+  "checkpoint": "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\scripts\\baseline_diffuseloco\\runs\\walk_crouch_posture_conditioned\\best.pt",
+  "checkpoint_sha256": "6B76D014C46E527182579DF1596625629A5063BC8F249CF6994699F9DE016471",
+  "config": {
+    "dataset": {
+      "execution_offset": 8,
+      "hdf5_paths": [
+        "scripts/diffusion_policy/data/datasets/walk_crouch_v3.hdf5"
+      ],
+      "history": 8,
+      "max_stats_samples": 20000,
+      "prediction_horizon": 16,
+      "step_stride": 1,
+      "symmetry_mode": "quadruped",
+      "val_fraction": 0.05
+    },
+    "diffusion": {
+      "beta_end": 0.02,
+      "beta_schedule": "squaredcos_cap_v2",
+      "beta_start": 0.0001,
+      "cfg_dropout_prob": 0.0,
+      "clip_sample": true,
+      "num_inference_steps": 10,
+      "num_train_timesteps": 10,
+      "prediction_type": "epsilon",
+      "variance_type": "fixed_small"
+    },
+    "model": {
+      "action_dim": 12,
+      "action_hist_dim": 12,
+      "d_model": 128,
+      "dim_feedforward": 512,
+      "goal_dim": 4,
+      "nhead": 4,
+      "num_layers": 4,
+      "p_drop_attn": 0.3,
+      "p_drop_emb": 0.0,
+      "proprio_dim": 30,
+      "separate_goal_conditioning": true
+    },
+    "optim": {
+      "batch_size": 1024,
+      "ema_decay": 0.9999,
+      "epochs": 200,
+      "grad_clip_norm": 1.0,
+      "learning_rate": 0.0001,
+      "log_every": 50,
+      "lr_warmup_steps": 10000,
+      "mixed_precision": true,
+      "num_workers": 0,
+      "save_every": 10,
+      "seed": 42,
+      "weight_decay": 0.001
+    },
+    "output_dir": "scripts/baseline_diffuseloco/runs/walk_crouch_posture_conditioned",
+    "policy_kind": "diffuseloco_velocity_height_ddpm",
+    "run_name": "walk_crouch_compact_k10",
+    "schema_version": 3,
+    "wandb_entity": null,
+    "wandb_project": "solo12-diffusion-policy"
+  },
+  "control_dt_s": 0.02,
+  "dataset_sha256": {
+    "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\scripts\\diffusion_policy\\data\\datasets\\walk_crouch_v3.hdf5": "5E356993BB2ECF6848B1300F92EB85B52EFE8DEB430D60F41E1D19C3B0DCE35C"
+  },
+  "duration_s": 8.0,
+  "effective_vectorized_steps_hz": 11.202760898006929,
+  "exec_horizon": 2,
+  "git_commit": "03359d00e57318363676cdfbf651fc8cbc1b78eb",
+  "nominal_control_hz": 50.0,
+  "num_inference_steps": 8,
+  "num_scenarios": 15,
+  "seed": 42,
+  "settling_s": 2.0,
+  "single_env_latency": {
+    "deadline_miss_rate": 1.0,
+    "deadline_misses": 50,
+    "deadline_ms": 40.0,
+    "max_ms": 76.63909997791052,
+    "mean_ms": 63.108335996512324,
+    "p50_ms": 63.53420001687482,
+    "p95_ms": 73.9391400187742,
+    "p99_ms": 75.57584898197092,
+    "samples": 50
+  },
+  "survival_rate": 0.8666666666666667,
+  "task": "solo12-v0",
+  "timestamp": "2026-07-14T14:23:50",
+  "torchscript_denoiser": true,
+  "vectorized_batch_latency": {
+    "max_ms": 1012.3230000026524,
+    "mean_ms": 69.28534257815838,
+    "p50_ms": 62.48700001742691,
+    "p95_ms": 89.44587493897413,
+    "p99_ms": 107.68422603257935,
+    "samples": 202
+  }
+}

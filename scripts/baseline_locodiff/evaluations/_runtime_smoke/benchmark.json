@@ -1,0 +1,15 @@
+{
+  "checkpoint": "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\scripts\\baseline_diffuseloco\\runs\\walk_crouch_posture_conditioned\\best.pt",
+  "exec_horizons": [
+    4
+  ],
+  "inference_steps": [
+    5
+  ],
+  "repeats": 1,
+  "duration_s": 2.0,
+  "settling_s": 0.5,
+  "include_dynamic": false,
+  "torchscript_denoiser": true,
+  "points": 1
+}

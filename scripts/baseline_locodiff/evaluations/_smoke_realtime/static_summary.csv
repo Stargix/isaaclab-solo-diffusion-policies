@@ -1,0 +1,2 @@
+scenario_id,repeat,requested_vx,requested_vy,requested_wz,requested_height,samples,survived,time_to_failure_s,achieved_vx_mean,achieved_vy_mean,achieved_wz_mean,achieved_height_mean,achieved_height_std,vx_rmse,vy_rmse,wz_rmse,height_rmse,tilt_rms_deg,tilt_max_deg,action_delta_rms
+0,0,0.4,0.0,0.0,0.2,75,True,nan,0.34231439232826233,0.0057839639484882355,-0.06570024788379669,0.22104766964912415,0.011758791282773018,0.09769666939973831,0.05796714127063751,0.4968370497226715,0.02410961501300335,2.1180307865142822,3.651935338973999,0.13766877353191376
