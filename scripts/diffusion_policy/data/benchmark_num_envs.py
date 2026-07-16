@@ -146,7 +146,7 @@ def load_policy(vec_env: RslRlVecEnvWrapper, agent_cfg: Any, checkpoint: str | N
         return None
     resume_path = os.path.abspath(checkpoint)
     runner = OnPolicyRunner(vec_env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    runner.load(resume_path)
+    runner.load(resume_path, load_optimizer=False)
     return runner.get_inference_policy(device=device)
 
 

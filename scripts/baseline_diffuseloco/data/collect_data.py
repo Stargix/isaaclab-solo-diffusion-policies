@@ -147,11 +147,13 @@ from isaaclab_tasks.utils.hydra import hydra_task_config  # noqa: E402
 # goals within the stability envelope of the source policy).
 # --------------------------------------------------------------------------- #
 SKILL_COMMAND_RANGES: Dict[str, Dict[str, Tuple[float, float]]] = {
-    "walk":   {"vx": (-1.5, 1.5), "vy": (-1, 1), "wz": (-1, 1)},
+    # walk/sprint policy trained with vx up to ±3.0, vy ±1.0, wz ±1.0.
+    # Using ~80% of training envelope for stable collection.
+    "walk":   {"vx": (-1.5, 1.5), "vy": (-0.8, 0.8), "wz": (-0.8, 0.8)},
     # crouch policy's stable envelope (trained up to +-1.0 / +-0.5 / +-1.0).
-    "crouch": {"vx": (-0.75, 0.75), "vy": (-0.5, 0.5), "wz": (-0.5, 0.5)},
+    "crouch": {"vx": (-1.5, 1.5), "vy": (-0.8, 0.8), "wz": (-0.8, 0.8)},
     "jump":   {"vx": (-1.2, 1.2),  "vy": (-0.6, 0.6),  "wz": (-0.6, 0.6)},
-    "sprint": {"vx": (0.3, 2.0), "vy": (-0.2, 0.2), "wz": (-0.2, 0.2)},
+    "sprint": {"vx": (0.3, 2.5), "vy": (-0.3, 0.3), "wz": (-0.3, 0.3)},
 }
 SHARED_HEIGHT_COMMAND_RANGE = {"vx": (-0.75, 0.75), "vy": (-0.5, 0.5), "wz": (-0.5, 0.5)}
 
@@ -396,7 +398,8 @@ class PolicyManager:
     def _load(self, name: str, path: str, agent_cfg, vec_env) -> None:
         runner = OnPolicyRunner(vec_env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
         print(f"[INFO] Loading policy '{name}' from: {path}")
-        runner.load(path)
+        # Inference only: skip optimizer (older checkpoints often have mismatched param groups).
+        runner.load(path, load_optimizer=False)
         policy_fn = runner.get_inference_policy(device=self.device)
         try:
             policy_nn = runner.alg.policy          # rsl_rl >= 2.3

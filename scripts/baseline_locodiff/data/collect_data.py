@@ -396,7 +396,8 @@ class PolicyManager:
     def _load(self, name: str, path: str, agent_cfg, vec_env) -> None:
         runner = OnPolicyRunner(vec_env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
         print(f"[INFO] Loading policy '{name}' from: {path}")
-        runner.load(path)
+        # Inference only: skip optimizer (older checkpoints often have mismatched param groups).
+        runner.load(path, load_optimizer=False)
         policy_fn = runner.get_inference_policy(device=self.device)
         try:
             policy_nn = runner.alg.policy          # rsl_rl >= 2.3

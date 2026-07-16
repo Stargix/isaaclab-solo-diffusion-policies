@@ -1,0 +1,26 @@
+{
+  "timestamp": "2026-07-16T13:22:23.859849",
+  "task": "solo12-v0",
+  "checkpoint": "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\checkpoints_iri\\best_phase_A_walk.pt",
+  "policy_kind": "spatial_reference_path_ddpm",
+  "seed": 42,
+  "duration_s": 15.0,
+  "speeds_evaluated": [
+    0.2,
+    0.4,
+    0.6,
+    0.8,
+    1.0
+  ],
+  "overall_survival_rate": 0.6444444444444445,
+  "survival_by_path": {
+    "straight": 0.6666666666666666,
+    "circle": 0.5333333333333333,
+    "s_curve": 0.7333333333333333
+  },
+  "mean_xy_rmse_by_path": {
+    "straight": 0.06301864831471474,
+    "circle": 3.55810591413882,
+    "s_curve": 0.07549070843497241
+  }
+}
