@@ -147,11 +147,9 @@ from isaaclab_tasks.utils.hydra import hydra_task_config  # noqa: E402
 # goals within the stability envelope of the source policy).
 # --------------------------------------------------------------------------- #
 SKILL_COMMAND_RANGES: Dict[str, Dict[str, Tuple[float, float]]] = {
-    # walk/sprint policy trained with vx up to ±3.0, vy ±1.0, wz ±1.0.
-    # Using ~80% of training envelope for stable collection.
-    "walk":   {"vx": (-1.5, 1.5), "vy": (-0.8, 0.8), "wz": (-0.8, 0.8)},
-    # crouch policy's stable envelope (trained up to +-1.0 / +-0.5 / +-1.0).
-    "crouch": {"vx": (-1.5, 1.5), "vy": (-0.8, 0.8), "wz": (-0.8, 0.8)},
+    # walk & crouch centered inside the smooth stability sweet-spot
+    "walk":   {"vx": (-1.0, 1.0), "vy": (-0.5, 0.5), "wz": (-0.5, 0.5)},
+    "crouch": {"vx": (-1.0, 1.0), "vy": (-0.5, 0.5), "wz": (-0.5, 0.5)},
     "jump":   {"vx": (-1.2, 1.2),  "vy": (-0.6, 0.6),  "wz": (-0.6, 0.6)},
     "sprint": {"vx": (0.3, 2.5), "vy": (-0.3, 0.3), "wz": (-0.3, 0.3)},
 }
@@ -178,19 +176,19 @@ def configure_light_physics_dr(events_cfg: Any) -> None:
     the expert policy's demonstrated stability envelope.
     """
     if hasattr(events_cfg, "physics_material") and events_cfg.physics_material is not None:
-        events_cfg.physics_material.params["static_friction_range"] = (0.85, 1.35)
-        events_cfg.physics_material.params["dynamic_friction_range"] = (0.80, 1.30)
+        events_cfg.physics_material.params["static_friction_range"] = (0.90, 1.25)
+        events_cfg.physics_material.params["dynamic_friction_range"] = (0.85, 1.20)
     if hasattr(events_cfg, "add_base_mass") and events_cfg.add_base_mass is not None:
-        events_cfg.add_base_mass.params["mass_distribution_params"] = (0.95, 1.10)
+        events_cfg.add_base_mass.params["mass_distribution_params"] = (0.97, 1.05)
     if hasattr(events_cfg, "joint_friction") and events_cfg.joint_friction is not None:
-        events_cfg.joint_friction.params["friction_distribution_params"] = (0.01, 0.20)
+        events_cfg.joint_friction.params["friction_distribution_params"] = (0.01, 0.10)
     if hasattr(events_cfg, "inertia_scale") and events_cfg.inertia_scale is not None:
-        events_cfg.inertia_scale.params["inertia_distribution_params"] = (0.90, 1.10)
+        events_cfg.inertia_scale.params["inertia_distribution_params"] = (0.95, 1.05)
     if hasattr(events_cfg, "base_com") and events_cfg.base_com is not None:
         events_cfg.base_com.params["com_range"] = {
-            "x": (-0.008, 0.008),
-            "y": (-0.006, 0.006),
-            "z": (-0.010, 0.010),
+            "x": (-0.005, 0.005),
+            "y": (-0.004, 0.004),
+            "z": (-0.006, 0.006),
         }
 
 

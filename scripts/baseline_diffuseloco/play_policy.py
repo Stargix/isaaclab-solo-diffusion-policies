@@ -353,6 +353,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     if args_cli.command_ui and args_cli.headless:
         raise ValueError("--command_ui requires a graphical Isaac session; remove --headless.")
     if args_cli.command_ui:
+        for _ in range(3):
+            simulation_app.update()
         live_ui = LiveCommandState(tuple(args_cli.command), args_cli.desired_height)
         command_window, command_window_keepalive = build_command_window(live_ui)
     if args_cli.interactive_commands:
