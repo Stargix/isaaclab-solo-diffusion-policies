@@ -19,6 +19,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import h5py
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _RSL_RL_DIR = _PROJECT_ROOT / "scripts" / "reinforcement_learning" / "rsl_rl"
@@ -39,6 +40,13 @@ parser.add_argument("--num_inference_steps", type=int, default=None)
 parser.add_argument("--exec_horizon", type=int, default=8)
 parser.add_argument("--guidance_scale", type=float, default=1.0)
 parser.add_argument("--seed", type=int, default=42)
+parser.add_argument(
+    "--reference_replay_dataset",
+    type=str,
+    default=None,
+    help="Evaluate time-indexed reference_pos_w/reference_yaw_w fragments instead of analytic paths.",
+)
+parser.add_argument("--reference_replay_demos", type=int, default=12)
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
@@ -54,7 +62,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from train.data.normalization import NormalizerStats
 from train.conditioning.geometry import cumulative_xy_lengths, quat_wxyz_to_rotmat, yaw_from_rotmat
-from train.conditioning.goal_builder import build_goal_from_path, advance_path_progress
+from train.conditioning.goal_builder import build_goal_from_path, build_goal_vector, advance_path_progress
 from model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
 from train.config import resolve_inference_steps
 from train.data.obs_utils import proprio_from_env_tensors
@@ -67,6 +75,8 @@ class PathPlan:
     yaws_w: np.ndarray
     cumulative_lengths: np.ndarray
     shape_name: str
+    time_indexed: bool = False
+    demo_name: str | None = None
 
 
 @dataclass
@@ -75,10 +85,55 @@ class Scenario:
     repeat: int
     path_shape: str
     speed: float
+    demo_name: str | None = None
+
+
+def load_reference_fragments(path: str, count: int, min_steps: int) -> list[tuple[str, np.ndarray, np.ndarray, float]]:
+    fragments = []
+    with h5py.File(path, "r") as file:
+        for demo_name in sorted(file["data"]):
+            obs = file["data"][demo_name]["obs"]
+            if "reference_pos_w" not in obs or "reference_yaw_w" not in obs:
+                continue
+            position = obs["reference_pos_w"][:].astype(np.float32)
+            yaw = obs["reference_yaw_w"][:].reshape(-1).astype(np.float32)
+            if len(position) < min_steps:
+                continue
+            command = obs["reference_command"][:] if "reference_command" in obs else obs["command_speed"][:]
+            speed = float(np.mean(np.linalg.norm(command[:min_steps, :2], axis=1)))
+            fragments.append((demo_name, position, yaw, speed))
+            if len(fragments) >= count:
+                break
+    if not fragments:
+        raise ValueError(f"No reference fragments of at least {min_steps} steps found in {path}.")
+    return fragments
+
+
+def align_reference_fragment(
+    position: np.ndarray, yaw: np.ndarray, spawn_pos: np.ndarray, spawn_quat: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    source_yaw = float(yaw[0])
+    target_yaw = robot_yaw_w(spawn_quat)
+    angle = target_yaw - source_yaw
+    rotation = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]], dtype=np.float32)
+    aligned = position.copy()
+    aligned[:, :2] = (position[:, :2] - position[0, :2]) @ rotation.T + spawn_pos[:2]
+    aligned[:, 2] = position[:, 2]
+    aligned_yaw = np.unwrap(yaw.astype(np.float64) - source_yaw + target_yaw).astype(np.float32)
+    return aligned, aligned_yaw
 
 
 def robot_yaw_w(quat_wxyz: np.ndarray) -> float:
     return yaw_from_rotmat(quat_wxyz_to_rotmat(quat_wxyz))
+
+
+def mean_abs_path_curvature(path_w: np.ndarray) -> float:
+    xy = path_w[:, :2].astype(np.float64)
+    if len(xy) < 3:
+        return 0.0
+    heading = np.unwrap(np.arctan2(np.gradient(xy[:, 1]), np.gradient(xy[:, 0])))
+    distance = np.maximum(np.linalg.norm(np.gradient(xy, axis=0), axis=1), 1.0e-6)
+    return float(np.mean(np.abs(np.gradient(heading) / distance)))
 
 
 def sha256_file(path: Path) -> str:
@@ -168,6 +223,7 @@ def compute_vectorized_goals(
     dt: float,
     v_req_clip: float,
     device: torch.device,
+    reference_step: int | None = None,
 ) -> torch.Tensor:
     robot = raw_env._robot
     pos_w = robot.data.root_pos_w.cpu().numpy()
@@ -175,6 +231,23 @@ def compute_vectorized_goals(
     goals = []
     for i in range(len(path_plans)):
         plan = path_plans[i]
+        if plan.time_indexed:
+            state_step = min(int(reference_step or 0), len(plan.path_w) - 1)
+            goals.append(
+                build_goal_vector(
+                    plan.path_w,
+                    plan.cumulative_lengths,
+                    state_step,
+                    goal_horizon_steps,
+                    pos_w[i],
+                    quat_w[i],
+                    yaws_w=plan.yaws_w,
+                    dt=dt,
+                    waypoint_time_offsets_s=waypoint_time_offsets_s,
+                    v_req_clip=v_req_clip,
+                )
+            )
+            continue
         start_idx = advance_path_progress(plan.path_w, pos_w[i], int(path_progress[i]))
         path_progress[i] = start_idx
         goals.append(
@@ -250,6 +323,15 @@ def _model_cfg_from_checkpoint(config_dict: dict) -> Solo12DiffusionPolicyConfig
 
 
 def make_scenarios() -> list[Scenario]:
+    if args_cli.reference_replay_dataset:
+        minimum = max(2, int(round(args_cli.duration_s * 50.0)) + 1)
+        fragments = load_reference_fragments(
+            args_cli.reference_replay_dataset, args_cli.reference_replay_demos, minimum
+        )
+        return [
+            Scenario(index, 0, "reference_replay", speed, demo_name)
+            for index, (demo_name, _, _, speed) in enumerate(fragments)
+        ]
     scenarios = []
     shapes = ["straight", "circle", "s_curve"]
     for shape in shapes:
@@ -318,13 +400,22 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     start_pos = raw_env._robot.data.root_pos_w.cpu().numpy()
     start_quat = raw_env._robot.data.root_quat_w.cpu().numpy()
 
-    # Generate custom paths per environment scenario
+    # Generate analytic paths or align stored collection references to each spawn.
     path_plans: list[PathPlan] = []
     speeds = np.array([s.speed for s in scenarios], dtype=np.float32)
     path_progress = np.zeros(num_envs, dtype=np.int32)
 
+    replay_fragments = None
+    if args_cli.reference_replay_dataset:
+        minimum = max(2, int(round(args_cli.duration_s / dt)) + goal_horizon_steps + 1)
+        replay_fragments = load_reference_fragments(
+            args_cli.reference_replay_dataset, args_cli.reference_replay_demos, minimum
+        )
     for i, s in enumerate(scenarios):
-        if s.path_shape == "straight":
+        if replay_fragments is not None:
+            demo_name, stored_pos, stored_yaw, _ = replay_fragments[i]
+            pts, yaws = align_reference_fragment(stored_pos, stored_yaw, start_pos[i], start_quat[i])
+        elif s.path_shape == "straight":
             pts, yaws = build_straight_path(start_pos[i], start_quat[i])
         elif s.path_shape == "s_curve":
             pts, yaws = build_s_curve_path(start_pos[i], start_quat[i])
@@ -338,7 +429,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 path_w=pts,
                 yaws_w=yaws,
                 cumulative_lengths=cumulative_xy_lengths(pts),
-                shape_name=s.path_shape
+                shape_name=s.path_shape,
+                time_indexed=replay_fragments is not None,
+                demo_name=s.demo_name,
             )
         )
 
@@ -354,7 +447,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     for _ in range(max(args_cli.warmup_steps, policy_cfg.history + 1)):
         proprio = get_proprio_30d(raw_env, joint_ids)
         goals = compute_vectorized_goals(
-            raw_env, path_plans, speeds, path_progress, goal_horizon_steps, waypoint_time_offsets_s, dt, v_req_clip, device
+            raw_env, path_plans, speeds, path_progress, goal_horizon_steps, waypoint_time_offsets_s, dt, v_req_clip, device,
+            reference_step=0,
         )
         update_history(proprio_buffer, action_buffer, goal_buffer, proprio, previous_action, goals)
         vec_env.step(stand_action)
@@ -393,7 +487,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             
             proprio = get_proprio_30d(raw_env, joint_ids)
             goals = compute_vectorized_goals(
-                raw_env, path_plans, speeds, path_progress, goal_horizon_steps, waypoint_time_offsets_s, dt, v_req_clip, device
+                raw_env, path_plans, speeds, path_progress, goal_horizon_steps, waypoint_time_offsets_s, dt, v_req_clip, device,
+                reference_step=step,
             )
             _, _, dones, _ = vec_env.step(action)
             update_history(proprio_buffer, action_buffer, goal_buffer, proprio, previous_action, goals)
@@ -412,7 +507,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         step_errors = []
         for i in range(num_envs):
             plan = path_plans[i]
-            closest_idx = advance_path_progress(plan.path_w, pos_w[i], int(path_progress[i]))
+            closest_idx = (
+                min(step, len(plan.path_w) - 1)
+                if plan.time_indexed
+                else advance_path_progress(plan.path_w, pos_w[i], int(path_progress[i]))
+            )
             err = float(np.linalg.norm(pos_w[i, :2] - plan.path_w[closest_idx, :2]))
             step_errors.append(err)
 
@@ -462,12 +561,17 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             "scenario_id": s.scenario_id,
             "repeat": s.repeat,
             "path_shape": s.path_shape,
+            "reference_demo": s.demo_name or "",
             "requested_speed": s.speed,
+            "reference_curvature_abs_mean": mean_abs_path_curvature(path_plans[i].path_w),
             "survived": survived,
             "time_to_failure_s": float(failure_step[i] * dt) if failures[i] else args_cli.duration_s,
             "xy_rmse": xy_rmse,
             "height_rmse": h_rmse,
             "achieved_speed_mean": float(np.mean(speeds_ach)) if speeds_ach.size else math.nan,
+            "achieved_speed_ratio": (
+                float(np.mean(speeds_ach) / s.speed) if speeds_ach.size and s.speed > 1.0e-6 else math.nan
+            ),
             "achieved_height_mean": float(np.mean(hgts)) if hgts.size else math.nan,
             "tilt_rms_deg": float(np.sqrt(np.mean(np.square(tls)))) if tls.size else math.nan,
             "action_delta_rms": float(np.sqrt(np.mean(np.square(adeltas)))) if adeltas.size else math.nan
@@ -488,8 +592,10 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
     # 1. Trajectory comparison plot
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-    shapes = ["straight", "circle", "s_curve"]
-    titles = ["Straight Path", "Circle Path", "S-Curve Path"]
+    shapes = sorted({scenario.path_shape for scenario in scenarios})
+    titles = [shape.replace("_", " ").title() for shape in shapes]
+    if len(shapes) == 1:
+        axes = [axes[0]]
     for ax, shape, title in zip(axes, shapes, titles):
         # Plot reference path relative to start pos
         plan = None
@@ -501,7 +607,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 break
         
         # Plot actual paths for different speeds
-        for speed in args_cli.speeds:
+        for speed in sorted({scenario.speed for scenario in scenarios}):
             for i, s in enumerate(scenarios):
                 if s.path_shape == shape and s.speed == speed and s.repeat == 0:
                     act_traj = np.array(trajectories[i]["actual"])
@@ -519,7 +625,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
     # 2. Tracking error and speed plot
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    colors = {"straight": "tab:blue", "circle": "tab:orange", "s_curve": "tab:green"}
+    palette = ("tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple")
+    colors = {shape: palette[index % len(palette)] for index, shape in enumerate(shapes)}
     
     # Speed Tracking Accuracy
     axes[0].plot([0.0, 1.2], [0.0, 1.2], "k--", label="Ideal")
@@ -615,6 +722,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         "goal_horizon_steps": goal_horizon_steps,
         "waypoint_time_offsets_s": waypoint_time_offsets_s,
         "speeds_evaluated": list(args_cli.speeds),
+        "reference_replay_dataset": (
+            str(Path(args_cli.reference_replay_dataset).resolve()) if args_cli.reference_replay_dataset else None
+        ),
         "overall_survival_rate": global_survival,
         "survival_by_path": {
             shape: sum([r["survived"] for r in summary_rows if r["path_shape"] == shape]) / sum([1 for r in summary_rows if r["path_shape"] == shape])
