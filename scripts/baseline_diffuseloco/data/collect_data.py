@@ -152,8 +152,11 @@ SKILL_COMMAND_RANGES: Dict[str, Dict[str, Tuple[float, float]]] = {
     "crouch": {"vx": (-1.0, 1.0), "vy": (-0.5, 0.5), "wz": (-0.5, 0.5)},
     "jump":   {"vx": (-1.2, 1.2),  "vy": (-0.6, 0.6),  "wz": (-0.6, 0.6)},
     "sprint": {"vx": (0.3, 2.5), "vy": (-0.3, 0.3), "wz": (-0.3, 0.3)},
+    # two_feet was trained for a narrower, conservative command envelope.
+    "two_feet": {"vx": (-0.5, 0.5), "vy": (-0.3, 0.3), "wz": (-0.5, 0.5)},
 }
-SHARED_HEIGHT_COMMAND_RANGE = {"vx": (-0.75, 0.75), "vy": (-0.5, 0.5), "wz": (-0.5, 0.5)}
+# Common walk/crouch envelope for the multi-posture dataset.
+SHARED_HEIGHT_COMMAND_RANGE = {"vx": (-1.0, 1.0), "vy": (-0.5, 0.5), "wz": (-0.5, 0.5)}
 
 # HDF5 convention string stored as an attribute for downstream consumers.
 HDF5_CONVENTION = (
@@ -277,7 +280,7 @@ def resample_command(env_idx: int, skill: str,
 def infer_skill_name(checkpoint_path: str) -> str:
     """Map a checkpoint filename to one of the known skill names."""
     name = Path(checkpoint_path).stem.lower()
-    for skill in ("walk", "crouch", "jump", "crab", "sprint"):
+    for skill in ("walk", "crouch", "jump", "crab", "sprint", "two_feet"):
         if skill in name:
             return skill
     return name

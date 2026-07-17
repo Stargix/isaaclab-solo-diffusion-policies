@@ -42,6 +42,16 @@ Repeat with `--task solo12-crouch-v0`, the crouch checkpoint,
 `scripts/diffusion_policy/data/merge_datasets.py`. Do not use a chained file:
 it has no explicit per-skill height schedule in schema v3.
 
+In this run `shared_height` uses the common walk/crouch envelope
+`vx=+-1.0`, `vy=+-0.5`, `wz=+-0.5`. This is deliberately below the most
+aggressive individual RL envelopes and keeps both postures comparable.
+
+For an additional `two_feet.pt` expert, use `--skill_name two_feet` and the
+command envelope used to train that expert (`vx=+-0.5`, `vy=+-0.3`,
+`wz=+-0.5`). Set `--desired_base_height` to the nominal height of that policy;
+do not invent it from a measured rollout. If the checkpoint was trained on a
+different Isaac task, pass that exact task instead of `solo12-v0`.
+
 The spatial fields `root_pos_w` and `root_quat_w` remain in the raw schema so a
 single collection can also be audited or reused later, but the command baseline
 does not consume them. Instantiating `DiffuseLocoCommandDataset` performs the
