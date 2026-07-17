@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import os
 import sys
 import time
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -77,6 +79,34 @@ class Scenario:
 
 def robot_yaw_w(quat_wxyz: np.ndarray) -> float:
     return yaw_from_rotmat(quat_wxyz_to_rotmat(quat_wxyz))
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest().upper()
+
+
+def current_git_commit() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=_PROJECT_ROOT, text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
+def dataset_hashes(config: dict[str, Any]) -> dict[str, str]:
+    output: dict[str, str] = {}
+    for raw_path in config.get("dataset", {}).get("hdf5_paths", []):
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = _PROJECT_ROOT / path
+        if path.is_file():
+            output[str(path.resolve())] = sha256_file(path)
+    return output
 
 
 def build_straight_path(start_pos: np.ndarray, start_quat: np.ndarray, length_m: float = 10.0, num_points: int = 250) -> tuple[np.ndarray, np.ndarray]:
@@ -572,9 +602,18 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         "timestamp": datetime.now().isoformat(),
         "task": args_cli.task,
         "checkpoint": str(checkpoint_path),
+        "checkpoint_sha256": sha256_file(checkpoint_path),
+        "git_commit": current_git_commit(),
+        "config": config,
+        "dataset_sha256": dataset_hashes(config),
         "policy_kind": checkpoint.get("policy_kind", "unknown"),
         "seed": args_cli.seed,
         "duration_s": args_cli.duration_s,
+        "num_scenarios": len(scenarios),
+        "num_inference_steps": inference_steps,
+        "exec_horizon": args_cli.exec_horizon,
+        "goal_horizon_steps": goal_horizon_steps,
+        "waypoint_time_offsets_s": waypoint_time_offsets_s,
         "speeds_evaluated": list(args_cli.speeds),
         "overall_survival_rate": global_survival,
         "survival_by_path": {
