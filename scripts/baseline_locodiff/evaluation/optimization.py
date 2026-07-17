@@ -19,7 +19,7 @@ def trace_denoiser(policy: torch.nn.Module, device: torch.device) -> None:
         torch.zeros((1, cfg.history, cfg.proprio_dim), device=device),
         torch.zeros((1, cfg.history, cfg.action_hist_dim), device=device),
         torch.zeros((1, cfg.history, cfg.goal_dim), device=device),
-        torch.tensor(0.25 * math.log(cfg.sigma_max), device=device),
+        torch.tensor([0.25 * math.log(cfg.sigma_max)], device=device),
     )
     traced = torch.jit.trace(policy.model, example, strict=False, check_trace=False)
     policy.model = torch.jit.optimize_for_inference(traced)

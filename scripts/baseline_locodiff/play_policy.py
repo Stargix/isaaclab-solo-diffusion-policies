@@ -100,6 +100,15 @@ from evaluation.optimization import trace_denoiser
 from navigation.path_tracker import PathCommandTracker, PathTrackerConfig
 from train.runtime.checkpoint import load_training_checkpoint
 from train.config import resolve_inference_steps
+from train.data.conditioning import (
+    CONDITION_MODE_COMMAND_SKILL,
+    CROUCH_HEIGHT,
+    WALK_HEIGHT,
+    goal_dim_for,
+    goal_from_velocity_and_height,
+    policy_kind_for,
+    validate_condition_mode,
+)
 from train.data.obs_utils import proprio_from_env_tensors
 
 
@@ -115,8 +124,11 @@ def get_proprio(raw_env: Any, joint_ids: slice) -> torch.Tensor:
 
 
 def slide_buffer(buffer: torch.Tensor, value: torch.Tensor) -> None:
+    if buffer.shape[-1] == 0:
+        return
     buffer[:, :-1] = buffer[:, 1:].clone()
     buffer[:, -1] = value
+
 
 
 class LiveGoal:
@@ -283,29 +295,36 @@ def model_config(config: dict, inference_steps: int) -> Solo12DiffusionPolicyCon
     )
 
 
-def skill_condition(velocity: torch.Tensor, height: torch.Tensor | None = None) -> torch.Tensor:
+def skill_condition(
+    velocity: torch.Tensor, height: torch.Tensor | None, condition_mode: str
+) -> torch.Tensor:
     if height is None:
-        mix = torch.full(
-            (velocity.shape[0], 1), 0.0 if args_cli.skill == "walk" else 1.0,
-            device=velocity.device, dtype=velocity.dtype,
+        height = torch.full(
+            (velocity.shape[0], 1), WALK_HEIGHT if args_cli.skill == "walk" else CROUCH_HEIGHT,
+            device=velocity.device,
+            dtype=velocity.dtype,
         )
-    else:
-        mix = ((0.2932 - height) / (0.2932 - 0.1705)).clamp(0.0, 1.0)
-    return torch.cat([velocity, 1.0 - mix, mix], dim=-1)
+    return goal_from_velocity_and_height(velocity, height, condition_mode)
 
 
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
 def main(env_cfg: Any, agent_cfg: Any) -> None:
     checkpoint_path = os.path.abspath(args_cli.checkpoint)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    checkpoint = load_training_checkpoint(
-        checkpoint_path, device, expected_policy_kind="locodiff_sde_command_skill_v1"
-    )
+    checkpoint = load_training_checkpoint(checkpoint_path, device)
     config = checkpoint["config"]
+    condition_mode = validate_condition_mode(
+        config.get("dataset", {}).get("condition_mode", CONDITION_MODE_COMMAND_SKILL)
+    )
+    expected_kind = policy_kind_for(condition_mode)
+    if checkpoint.get("policy_kind") != expected_kind:
+        raise ValueError(
+            f"Checkpoint policy_kind={checkpoint.get('policy_kind')!r}; expected {expected_kind!r}."
+        )
     inference_steps = resolve_inference_steps(args_cli.num_inference_steps, config["diffusion"])
     policy_cfg = model_config(config, inference_steps)
-    if policy_cfg.goal_dim != 5:
-        raise ValueError(f"Command-and-skill baseline requires goal_dim=5, got {policy_cfg.goal_dim}.")
+    if policy_cfg.goal_dim != goal_dim_for(condition_mode):
+        raise ValueError(f"Goal dimension does not match condition_mode={condition_mode!r}.")
     future_horizon = policy_cfg.prediction_horizon - policy_cfg.execution_offset
     if not 1 <= args_cli.exec_horizon <= future_horizon:
         raise ValueError(f"exec_horizon must be in [1, {future_horizon}].")
@@ -367,13 +386,13 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     if args_cli.command_ui:
         for _ in range(3):
             simulation_app.update()
-        initial_height = args_cli.desired_height or (0.2932 if args_cli.skill == "walk" else 0.1705)
+        initial_height = args_cli.desired_height or (WALK_HEIGHT if args_cli.skill == "walk" else CROUCH_HEIGHT)
         live_ui = LiveCommandState(tuple(args_cli.command), initial_height)
         command_window, command_window_keepalive = build_command_window(live_ui)
     if args_cli.interactive_commands:
         if live_ui is not None:
             raise ValueError("Choose one command interface: --command_ui or --interactive_commands.")
-        initial_height = args_cli.desired_height or (0.2932 if args_cli.skill == "walk" else 0.1705)
+        initial_height = args_cli.desired_height or (WALK_HEIGHT if args_cli.skill == "walk" else CROUCH_HEIGHT)
         live_keyboard, live_goal = setup_keyboard(initial_height, args_cli.height_step)
 
     def refresh_command() -> torch.Tensor:
@@ -402,7 +421,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             height_values = None if args_cli.desired_height is None else torch.full(
                 (args_cli.num_envs, 1), args_cli.desired_height, device=device
             )
-        command_value = skill_condition(velocity_command, height_values)
+        command_value = skill_condition(velocity_command, height_values, condition_mode)
         if hasattr(raw_env, "_commands"):
             raw_env._commands[:, :3] = velocity_command
         return command_value

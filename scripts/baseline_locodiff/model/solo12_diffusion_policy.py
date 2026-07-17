@@ -53,8 +53,11 @@ class Solo12DiffusionPolicyConfig:
     def __post_init__(self) -> None:
         if self.action_hist_dim != 0:
             raise ValueError("The paper conditions on state history, not action history.")
-        if self.goal_dim != 5:
-            raise ValueError("Expected [vx, vy, wz, skill_walk, skill_crouch].")
+        if self.goal_dim not in (4, 5):
+            raise ValueError(
+                "Expected a 4D [vx, vy, wz, desired_base_height] or 5D "
+                "[vx, vy, wz, skill_walk, skill_crouch] condition."
+            )
         if self.execution_offset != 0:
             raise ValueError("LocoDiff executes the first predicted future action.")
         if self.noise_distribution != "log_logistic":

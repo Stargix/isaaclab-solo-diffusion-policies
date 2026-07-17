@@ -78,6 +78,13 @@ from evaluation.reporting import (
 from evaluation.optimization import trace_denoiser
 from model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
 from train.config import resolve_inference_steps
+from train.data.conditioning import (
+    CONDITION_MODE_COMMAND_SKILL,
+    goal_dim_for,
+    goal_from_velocity_and_height,
+    policy_kind_for,
+    validate_condition_mode,
+)
 from train.data.obs_utils import proprio_from_env_tensors
 from train.runtime.checkpoint import load_training_checkpoint
 
@@ -141,15 +148,10 @@ def model_config(config: dict[str, Any], inference_steps: int) -> Solo12Diffusio
     )
 
 
-def command_skill_condition(velocity: torch.Tensor, height: torch.Tensor) -> torch.Tensor:
-    """Map the old height sweep onto the walk/crouch skill simplex.
-
-    Endpoints are the exact one-hot conditions used in training. Intermediate
-    values are explicitly an interpolation test, not an extra training label.
-    """
-
-    crouch = ((0.2932 - height) / (0.2932 - 0.1705)).clamp(0.0, 1.0)
-    return torch.cat([velocity, 1.0 - crouch, crouch], dim=-1)
+def command_skill_condition(
+    velocity: torch.Tensor, height: torch.Tensor, condition_mode: str
+) -> torch.Tensor:
+    return goal_from_velocity_and_height(velocity, height, condition_mode)
 
 
 def get_proprio(raw_env: Any, joint_ids: slice) -> torch.Tensor:
@@ -164,8 +166,11 @@ def get_proprio(raw_env: Any, joint_ids: slice) -> torch.Tensor:
 
 
 def slide_buffer(buffer: torch.Tensor, value: torch.Tensor) -> None:
+    if buffer.shape[-1] == 0:
+        return
     buffer[:, :-1] = buffer[:, 1:].clone()
     buffer[:, -1] = value
+
 
 
 def update_history(
@@ -332,14 +337,20 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    checkpoint = load_training_checkpoint(
-        checkpoint_path, device, expected_policy_kind="locodiff_sde_command_skill_v1"
-    )
+    checkpoint = load_training_checkpoint(checkpoint_path, device)
     config = checkpoint["config"]
+    condition_mode = validate_condition_mode(
+        config.get("dataset", {}).get("condition_mode", CONDITION_MODE_COMMAND_SKILL)
+    )
+    expected_kind = policy_kind_for(condition_mode)
+    if checkpoint.get("policy_kind") != expected_kind:
+        raise ValueError(
+            f"Checkpoint policy_kind={checkpoint.get('policy_kind')!r}; expected {expected_kind!r}."
+        )
     inference_steps = resolve_inference_steps(args_cli.num_inference_steps, config["diffusion"])
     policy_cfg = model_config(config, inference_steps)
-    if policy_cfg.goal_dim != 5:
-        raise ValueError(f"Expected goal_dim=5, got {policy_cfg.goal_dim}.")
+    if policy_cfg.goal_dim != goal_dim_for(condition_mode):
+        raise ValueError(f"Goal dimension does not match condition_mode={condition_mode!r}.")
     future_horizon = policy_cfg.prediction_horizon - policy_cfg.execution_offset
     if not 1 <= args_cli.exec_horizon <= future_horizon:
         raise ValueError(f"exec_horizon must be in [1, {future_horizon}].")
@@ -373,7 +384,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
     velocity = torch.tensor([scenario.command for scenario in scenarios], dtype=torch.float32, device=device)
     heights = torch.tensor([[scenario.height] for scenario in scenarios], dtype=torch.float32, device=device)
-    command = command_skill_condition(velocity, heights)
+    command = command_skill_condition(velocity, heights, condition_mode)
     set_env_commands(raw_env, velocity)
 
     proprio_buffer = torch.zeros((num_envs, policy_cfg.history, policy_cfg.proprio_dim), device=device)
@@ -476,7 +487,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             vec_env.reset()
         dynamic_velocity = torch.tensor((0.4, 0.0, 0.0), device=device).repeat(num_envs, 1)
         dynamic_command = command_skill_condition(
-            dynamic_velocity, torch.full((num_envs, 1), DYNAMIC_HEIGHTS[0], device=device)
+            dynamic_velocity, torch.full((num_envs, 1), DYNAMIC_HEIGHTS[0], device=device), condition_mode
         )
         set_env_commands(raw_env, dynamic_velocity)
         previous_action = reset_buffers(
@@ -496,7 +507,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         dynamic_step = 0
         for requested_height in DYNAMIC_HEIGHTS:
             requested = torch.full((num_envs, 1), requested_height, device=device)
-            dynamic_command[:] = command_skill_condition(dynamic_velocity, requested)
+            dynamic_command[:] = command_skill_condition(dynamic_velocity, requested, condition_mode)
             for _ in range(segment_steps):
                 with torch.inference_mode():
                     if current_chunk is None or chunk_index == 0:

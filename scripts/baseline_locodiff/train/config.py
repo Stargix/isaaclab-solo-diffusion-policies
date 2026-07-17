@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .data.obs_utils import ACTION_HIST_DIM, GOAL_DIM, PROPRIO_DIM
+from .data.conditioning import CONDITION_MODE_COMMAND_SKILL
 
 
 @dataclass
@@ -20,6 +21,7 @@ class DatasetConfig:
     symmetry_mode: str = "quadruped"
     max_stats_samples: int = 20_000
     val_fraction: float = 0.05
+    condition_mode: str = CONDITION_MODE_COMMAND_SKILL
 
 
 @dataclass
@@ -97,6 +99,7 @@ TRAINING_CONFIG_KEYS = frozenset(
         "symmetry_mode",
         "max_stats_samples",
         "val_fraction",
+        "condition_mode",
         "d_model",
         "nhead",
         "num_layers",

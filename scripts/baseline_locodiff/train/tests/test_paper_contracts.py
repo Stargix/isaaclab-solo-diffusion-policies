@@ -41,7 +41,8 @@ def write_dataset(path: Path) -> None:
             obs.create_dataset("projected_gravity", data=np.zeros((length, 3), np.float32))
             obs.create_dataset("last_action", data=previous)
             obs.create_dataset("command_speed", data=np.full((length, 3), 0.1 + demo_index, np.float32))
-            obs.create_dataset("desired_base_height", data=np.full((length, 1), 0.2, np.float32))
+            height = 0.2932 if skill == "walk" else 0.1705
+            obs.create_dataset("desired_base_height", data=np.full((length, 1), height, np.float32))
             demo.create_dataset("actions", data=actions)
             dones = np.zeros(length, dtype=np.bool_)
             dones[-1] = True
@@ -77,6 +78,20 @@ class PaperContractTest(unittest.TestCase):
             self.assertEqual(tuple(sample["action_hist"].shape), (4, 0))
             self.assertEqual(tuple(sample["actions"].shape), (6, 12))
 
+    def test_continuous_height_condition_reuses_the_same_hdf5(self) -> None:
+        dataset = LocoDiffCommandSkillDataset(
+            [str(self.path)],
+            history=4,
+            prediction_horizon=6,
+            symmetry_mode="none",
+            condition_mode="velocity_height",
+        )
+        walk = dataset[0]["goal_hist"]
+        crouch = dataset[dataset.sample_indices_for_demos((1,))[0]]["goal_hist"]
+        self.assertEqual(tuple(walk.shape), (4, 4))
+        np.testing.assert_allclose(walk[:, -1].numpy(), 0.2932)
+        np.testing.assert_allclose(crouch[:, -1].numpy(), 0.1705)
+
     def test_log_logistic_loss_backward_and_three_step_sample(self) -> None:
         dataset = LocoDiffCommandSkillDataset(
             [str(self.path)], history=4, prediction_horizon=6, symmetry_mode="none"
@@ -109,6 +124,20 @@ class PaperContractTest(unittest.TestCase):
         self.assertEqual(tuple(output.shape), (2, 6, 12))
         self.assertTrue(torch.isfinite(output).all())
         self.assertIsNone(policy.model.model.memory_mask)
+
+        continuous_policy = Solo12DiffusionPolicy(
+            Solo12DiffusionPolicyConfig(
+                goal_dim=4,
+                history=4,
+                prediction_horizon=6,
+                d_model=32,
+                nhead=4,
+                num_layers=2,
+                p_drop_attn=0.0,
+                num_inference_steps=3,
+            )
+        )
+        self.assertEqual(continuous_policy.cfg.goal_dim, 4)
 
 
 if __name__ == "__main__":

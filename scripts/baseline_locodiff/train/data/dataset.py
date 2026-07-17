@@ -13,6 +13,12 @@ import torch
 from torch.utils.data import Dataset
 
 from .normalization import NormalizerStats, build_stats_with_action_range
+from .conditioning import (
+    CONDITION_MODE_COMMAND_SKILL,
+    CONDITION_MODE_VELOCITY_HEIGHT,
+    goal_dim_for,
+    validate_condition_mode,
+)
 from .obs_utils import PROPRIO_DIM, delayed_io_windows, read_proprio_vector
 from .symmetry import apply_symmetry, symmetry_count
 
@@ -126,12 +132,12 @@ def _validate_file(path: str) -> None:
 
 
 class LocoDiffCommandSkillDataset(Dataset):
-    """Return state history, expert command/skill and a future action trajectory.
+    """Return state history, a versioned goal and a future action trajectory.
 
     At anchor ``t`` the target is ``a[t:t+P]``.  The conditioning is the state
-    history and ``[vx, vy, wz, walk, crouch]`` at each history step.  The desired
-    base height is deliberately not used: skill is represented as the one-hot
-    label described in the paper.  There is no reward, return or hindsight term.
+    history and either the paper-faithful ``[vx, vy, wz, walk, crouch]`` goal or
+    the continuous-height ablation ``[vx, vy, wz, desired_base_height]``. There
+    is no reward, return or hindsight term.
     """
 
     def __init__(
@@ -143,6 +149,7 @@ class LocoDiffCommandSkillDataset(Dataset):
         execution_offset: int = 0,
         step_stride: int = 1,
         symmetry_mode: str = "none",
+        condition_mode: str = CONDITION_MODE_COMMAND_SKILL,
     ) -> None:
         if history < 1:
             raise ValueError("history must be >= 1.")
@@ -159,6 +166,7 @@ class LocoDiffCommandSkillDataset(Dataset):
         self.future_horizon = prediction_horizon
         self.step_stride = step_stride
         self.symmetry_mode = symmetry_mode
+        self.condition_mode = validate_condition_mode(condition_mode)
         self._symmetry_count = symmetry_count(symmetry_mode)
         self.source_files = [str(Path(path).resolve()) for path in hdf5_paths]
         self.demos: list[DemoSequence] = []
@@ -176,9 +184,17 @@ class LocoDiffCommandSkillDataset(Dataset):
             for demo_name in sorted(file["data"].keys(), key=_sort_key):
                 demo = file["data"][demo_name]
                 obs = demo["obs"]
-                skill_name = _decode(demo.attrs["skills_sequence"][0])
-                skill_one_hot = np.zeros((len(demo["actions"]), len(SKILL_NAMES)), dtype=np.float32)
-                skill_one_hot[:, SKILL_NAMES.index(skill_name)] = 1.0
+                if self.condition_mode == CONDITION_MODE_COMMAND_SKILL:
+                    skill_name = _decode(demo.attrs["skills_sequence"][0])
+                    skill_one_hot = np.zeros((len(demo["actions"]), len(SKILL_NAMES)), dtype=np.float32)
+                    skill_one_hot[:, SKILL_NAMES.index(skill_name)] = 1.0
+                    conditions = np.concatenate(
+                        [obs["command_speed"][:].astype(np.float32), skill_one_hot], axis=-1,
+                    )
+                else:
+                    conditions = np.concatenate(
+                        [obs["command_speed"][:].astype(np.float32), obs["desired_base_height"][:]], axis=-1,
+                    ).astype(np.float32)
                 demo_idx = len(self.demos)
                 self.demos.append(
                     DemoSequence(
@@ -186,9 +202,7 @@ class LocoDiffCommandSkillDataset(Dataset):
                         demo_name=demo_name,
                         proprio=read_proprio_vector(obs),
                         actions=demo["actions"][:].astype(np.float32),
-                        conditions=np.concatenate(
-                            [obs["command_speed"][:].astype(np.float32), skill_one_hot], axis=-1,
-                        ),
+                        conditions=conditions,
                     )
                 )
                 first_anchor = self.history
@@ -266,7 +280,7 @@ class LocoDiffCommandSkillDataset(Dataset):
         for demo in demos:
             actions = torch.from_numpy(demo.actions)
             proprio = torch.zeros((len(actions), PROPRIO_DIM), dtype=actions.dtype)
-            conditions = torch.zeros((len(actions), 5), dtype=actions.dtype)
+            conditions = torch.zeros((len(actions), goal_dim_for(self.condition_mode)), dtype=actions.dtype)
             for index in range(self._symmetry_count):
                 _, _, _, transformed = apply_symmetry(
                     proprio,

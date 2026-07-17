@@ -60,3 +60,22 @@ El paper no publica anchura, número de capas ni parámetros de la log-logístic
 Los valores del JSON son por tanto explícitos y versionados, pero no pueden
 presentarse como hiperparámetros oficiales. La otra diferencia deliberada es
 Solo12 a 50 Hz frente a ANYmal a 25 Hz.
+
+## Ablación: altura continua
+
+`configs/velocity_height_sde.json` conserva el mismo SDE/EDM, estado de 33D,
+horizonte, arquitectura y datos, pero reemplaza el one-hot por
+`[vx, vy, wz, desired_base_height]`. Los HDF5 ya guardan esa columna: no hay
+que recolectar de nuevo. El checkpoint se etiqueta
+`locodiff_sde_velocity_height_v1` y queda separado de la reproducción fiel al
+paper.
+
+```powershell
+conda run --no-capture-output -n env_isaaclab python scripts/baseline_locodiff/train/train.py `
+  --config scripts/baseline_locodiff/train/configs/velocity_height_sde.json `
+  --datasets scripts/diffusion_policy/data/datasets/locodiff_walk_crouch_v1.hdf5 `
+  --output_dir scripts/baseline_locodiff/runs/locodiff_velocity_height_sde_v1 `
+  --run_name locodiff_velocity_height_sde_v1 `
+  --wandb_project solo12-diffusion `
+  --symmetry_mode quadruped
+```

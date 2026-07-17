@@ -1,0 +1,20 @@
+{
+  "condition_mode": "velocity_height",
+  "d_model": 256,
+  "nhead": 8,
+  "num_layers": 6,
+  "prediction_horizon": 16,
+  "execution_offset": 0,
+  "num_inference_steps": 3,
+  "sigma_data": 0.5,
+  "sigma_min": 0.002,
+  "sigma_max": 80.0,
+  "rho": 7.0,
+  "log_sigma_loc": -1.2,
+  "log_sigma_scale": 1.2,
+  "noise_distribution": "log_logistic",
+  "sampler": "euler",
+  "p_drop_attn": 0.3,
+  "weight_decay": 0.001,
+  "batch_size": 256
+}

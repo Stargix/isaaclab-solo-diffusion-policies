@@ -30,6 +30,7 @@ if __package__ in (None, ""):
         load_training_config_overrides,
     )
     from train.data.dataset import LocoDiffCommandSkillDataset
+    from train.data.conditioning import CONDITION_MODES, goal_dim_for, policy_kind_for
     from train.data.episode_split import split_episode_indices
 
 
@@ -61,6 +62,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--symmetry_mode", choices=["none", "mirror", "quadruped"], default=DATASET_DEFAULTS.symmetry_mode)
     parser.add_argument("--max_stats_samples", type=int, default=DATASET_DEFAULTS.max_stats_samples)
     parser.add_argument("--val_fraction", type=float, default=DATASET_DEFAULTS.val_fraction)
+    parser.add_argument(
+        "--condition_mode", choices=CONDITION_MODES, default=DATASET_DEFAULTS.condition_mode,
+        help="command_skill reproduces the paper; velocity_height is the continuous-height ablation.",
+    )
 
     parser.add_argument("--d_model", type=int, default=MODEL_DEFAULTS.d_model)
     parser.add_argument("--nhead", type=int, default=MODEL_DEFAULTS.nhead)
@@ -129,8 +134,10 @@ def make_config(args: argparse.Namespace) -> TrainConfig:
             symmetry_mode=args.symmetry_mode,
             max_stats_samples=args.max_stats_samples,
             val_fraction=args.val_fraction,
+            condition_mode=args.condition_mode,
         ),
         model=ModelConfig(
+            goal_dim=goal_dim_for(args.condition_mode),
             d_model=args.d_model,
             nhead=args.nhead,
             num_layers=args.num_layers,
@@ -167,6 +174,7 @@ def make_config(args: argparse.Namespace) -> TrainConfig:
         run_name=args.run_name,
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
+        policy_kind=policy_kind_for(args.condition_mode),
     )
 
 
@@ -298,7 +306,7 @@ def main() -> None:
         f"[INFO] d_model={cfg.model.d_model} layers={cfg.model.num_layers} "
         f"nhead={cfg.model.nhead} trajectory={cfg.dataset.prediction_horizon} "
         f"execute_from={cfg.dataset.execution_offset} solver={cfg.diffusion.sampler} "
-        f"solver_steps={cfg.diffusion.num_inference_steps}"
+        f"solver_steps={cfg.diffusion.num_inference_steps} condition={cfg.dataset.condition_mode}"
     )
 
     device = torch.device(args.device)
@@ -309,6 +317,7 @@ def main() -> None:
         execution_offset=cfg.dataset.execution_offset,
         step_stride=cfg.dataset.step_stride,
         symmetry_mode=cfg.dataset.symmetry_mode,
+        condition_mode=cfg.dataset.condition_mode,
     )
     episode_split = split_episode_indices(len(dataset.demos), cfg.dataset.val_fraction, cfg.optim.seed)
     train_indices = dataset.sample_indices_for_demos(episode_split.train_demo_indices)
