@@ -1,7 +1,8 @@
-"""Inference-only optimizations that preserve trained weights and DDPM math."""
+"""Inference-only optimizations that preserve trained weights and SDE math."""
 
 from __future__ import annotations
 
+import math
 import torch
 
 
@@ -9,7 +10,7 @@ def trace_denoiser(policy: torch.nn.Module, device: torch.device) -> None:
     """Replace the Python denoiser with a dynamic-batch TorchScript graph.
 
     This removes part of the per-denoising-step Python/module overhead on Windows.
-    The scheduler and stochastic DDPM sampling remain unchanged.
+    The probability-flow ODE sampler remains unchanged.
     """
 
     cfg = policy.cfg
@@ -18,8 +19,7 @@ def trace_denoiser(policy: torch.nn.Module, device: torch.device) -> None:
         torch.zeros((1, cfg.history, cfg.proprio_dim), device=device),
         torch.zeros((1, cfg.history, cfg.action_hist_dim), device=device),
         torch.zeros((1, cfg.history, cfg.goal_dim), device=device),
-        torch.tensor(cfg.num_train_timesteps - 1, device=device, dtype=torch.long),
+        torch.tensor(0.25 * math.log(cfg.sigma_max), device=device),
     )
     traced = torch.jit.trace(policy.model, example, strict=False, check_trace=False)
     policy.model = torch.jit.optimize_for_inference(traced)
-

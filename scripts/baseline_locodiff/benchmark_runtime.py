@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sweep execution horizons and DDPM inference steps for the frozen baseline.
+"""Sweep execution horizons and SDE solver steps for the frozen baseline.
 
 This is an orchestration benchmark, intentionally separate from the Isaac
 evaluator.  Each point is evaluated by the same closed-loop evaluator and the
@@ -36,7 +36,7 @@ QUALITY_FIELDS = (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Benchmark execution-horizon and DDPM-step trade-offs."
+        description="Benchmark execution-horizon and SDE-step trade-offs."
     )
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--output_dir", required=True)

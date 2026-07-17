@@ -35,20 +35,20 @@ parser.add_argument(
 parser.add_argument(
     "--desired_height",
     type=float,
-    required=True,
-    help="Desired base height in metres; must be in the collection/training support.",
+    default=None,
+    help="Optional walk/crouch interpolation probe. Omit for the paper-faithful one-hot skill.",
 )
+parser.add_argument("--skill", choices=("walk", "crouch"), default="walk")
 parser.add_argument("--num_envs", type=int, default=1)
 parser.add_argument("--num_inference_steps", type=int, default=None)
 parser.add_argument(
     "--exec_horizon",
     type=int,
-    default=8,
-    help="Actions executed per DDPM sample. Eight is the validated real-time deployment; one is the RHC reference.",
+    default=1,
+    help="Actions executed per SDE sample. The paper replans after the first action.",
 )
 parser.add_argument("--warmup_steps", type=int, default=25)
 parser.add_argument("--max_steps", type=int, default=None, help="Optional finite rollout length for smoke tests.")
-parser.add_argument("--guidance_scale", type=float, default=1.0)
 parser.add_argument("--path_file", type=str, default=None, help="Optional [N,3/4] .npy route for the hierarchical baseline.")
 parser.add_argument("--path_world_frame", action="store_true", help="Interpret path XY/yaw as world coordinates instead of robot-relative.")
 parser.add_argument("--desired_speed", type=float, default=0.4, help="Path-tracker cruise speed in m/s.")
@@ -108,6 +108,7 @@ def get_proprio(raw_env: Any, joint_ids: slice) -> torch.Tensor:
     return proprio_from_env_tensors(
         robot.data.joint_pos[:, joint_ids],
         robot.data.joint_vel[:, joint_ids],
+        robot.data.root_lin_vel_b,
         robot.data.root_ang_vel_b,
         robot.data.projected_gravity_b,
     )
@@ -271,8 +272,26 @@ def model_config(config: dict, inference_steps: int) -> Solo12DiffusionPolicyCon
         p_drop_attn=model["p_drop_attn"],
         separate_goal_conditioning=model["separate_goal_conditioning"],
         num_inference_steps=inference_steps,
-        cfg_dropout_prob=diffusion["cfg_dropout_prob"],
+        sigma_data=diffusion["sigma_data"],
+        sigma_min=diffusion["sigma_min"],
+        sigma_max=diffusion["sigma_max"],
+        rho=diffusion["rho"],
+        log_sigma_loc=diffusion["log_sigma_loc"],
+        log_sigma_scale=diffusion["log_sigma_scale"],
+        noise_distribution=diffusion["noise_distribution"],
+        sampler=diffusion["sampler"],
     )
+
+
+def skill_condition(velocity: torch.Tensor, height: torch.Tensor | None = None) -> torch.Tensor:
+    if height is None:
+        mix = torch.full(
+            (velocity.shape[0], 1), 0.0 if args_cli.skill == "walk" else 1.0,
+            device=velocity.device, dtype=velocity.dtype,
+        )
+    else:
+        mix = ((0.2932 - height) / (0.2932 - 0.1705)).clamp(0.0, 1.0)
+    return torch.cat([velocity, 1.0 - mix, mix], dim=-1)
 
 
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
@@ -280,13 +299,13 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     checkpoint_path = os.path.abspath(args_cli.checkpoint)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint = load_training_checkpoint(
-        checkpoint_path, device, expected_policy_kind="locodiff_edm_transformer"
+        checkpoint_path, device, expected_policy_kind="locodiff_sde_command_skill_v1"
     )
     config = checkpoint["config"]
     inference_steps = resolve_inference_steps(args_cli.num_inference_steps, config["diffusion"])
     policy_cfg = model_config(config, inference_steps)
-    if policy_cfg.goal_dim != 4:
-        raise ValueError(f"Velocity-height baseline requires goal_dim=4, got {policy_cfg.goal_dim}.")
+    if policy_cfg.goal_dim != 5:
+        raise ValueError(f"Command-and-skill baseline requires goal_dim=5, got {policy_cfg.goal_dim}.")
     future_horizon = policy_cfg.prediction_horizon - policy_cfg.execution_offset
     if not 1 <= args_cli.exec_horizon <= future_horizon:
         raise ValueError(f"exec_horizon must be in [1, {future_horizon}].")
@@ -348,12 +367,14 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     if args_cli.command_ui:
         for _ in range(3):
             simulation_app.update()
-        live_ui = LiveCommandState(tuple(args_cli.command), args_cli.desired_height)
+        initial_height = args_cli.desired_height or (0.2932 if args_cli.skill == "walk" else 0.1705)
+        live_ui = LiveCommandState(tuple(args_cli.command), initial_height)
         command_window, command_window_keepalive = build_command_window(live_ui)
     if args_cli.interactive_commands:
         if live_ui is not None:
             raise ValueError("Choose one command interface: --command_ui or --interactive_commands.")
-        live_keyboard, live_goal = setup_keyboard(args_cli.desired_height, args_cli.height_step)
+        initial_height = args_cli.desired_height or (0.2932 if args_cli.skill == "walk" else 0.1705)
+        live_keyboard, live_goal = setup_keyboard(initial_height, args_cli.height_step)
 
     def refresh_command() -> torch.Tensor:
         nonlocal velocity_command
@@ -378,8 +399,10 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             height = live_goal.height()
             height_values = torch.full((args_cli.num_envs, 1), height, device=device)
         else:
-            height_values = torch.full((args_cli.num_envs, 1), args_cli.desired_height, device=device)
-        command_value = torch.cat([velocity_command, height_values], dim=-1)
+            height_values = None if args_cli.desired_height is None else torch.full(
+                (args_cli.num_envs, 1), args_cli.desired_height, device=device
+            )
+        command_value = skill_condition(velocity_command, height_values)
         if hasattr(raw_env, "_commands"):
             raw_env._commands[:, :3] = velocity_command
         return command_value
@@ -417,7 +440,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         previous_action = stand_action.clone()
 
     print(
-        f"[INFO] baseline command={tuple(args_cli.command)}, h={args_cli.desired_height:.3f}m control={1 / dt:.0f}Hz "
+        f"[INFO] baseline command={tuple(args_cli.command)}, skill={args_cli.skill} control={1 / dt:.0f}Hz "
         f"K={inference_steps} trajectory={policy_cfg.prediction_horizon} "
         f"execute_from={policy_cfg.execution_offset} exec_horizon={args_cli.exec_horizon}"
     )
@@ -435,7 +458,6 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                     proprio_buffer,
                     action_buffer,
                     command_buffer,
-                    guidance_scale=args_cli.guidance_scale,
                 )
                 current_chunk = policy.executable_chunk(trajectory, args_cli.exec_horizon)
 

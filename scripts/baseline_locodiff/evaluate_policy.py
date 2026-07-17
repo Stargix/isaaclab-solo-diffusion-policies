@@ -38,7 +38,7 @@ parser.add_argument(
     metavar=("VX", "VY", "WZ"),
     help="Repeat to override the default three-command grid.",
 )
-parser.add_argument("--repeats", type=int, default=3, help="Stochastic DDPM repeats per grid condition.")
+parser.add_argument("--repeats", type=int, default=3, help="SDE rollout repeats per grid condition.")
 parser.add_argument("--duration_s", type=float, default=8.0)
 parser.add_argument("--settling_s", type=float, default=2.0)
 parser.add_argument("--warmup_steps", type=int, default=25)
@@ -46,7 +46,6 @@ parser.add_argument("--dynamic_segment_s", type=float, default=2.0)
 parser.add_argument("--skip_dynamic", action="store_true")
 parser.add_argument("--num_inference_steps", type=int, default=None)
 parser.add_argument("--exec_horizon", type=int, default=1)
-parser.add_argument("--guidance_scale", type=float, default=1.0)
 parser.add_argument("--latency_samples", type=int, default=100)
 parser.add_argument(
     "--torchscript_denoiser",
@@ -131,8 +130,26 @@ def model_config(config: dict[str, Any], inference_steps: int) -> Solo12Diffusio
         p_drop_attn=model["p_drop_attn"],
         separate_goal_conditioning=model["separate_goal_conditioning"],
         num_inference_steps=inference_steps,
-        cfg_dropout_prob=diffusion["cfg_dropout_prob"],
+        sigma_data=diffusion["sigma_data"],
+        sigma_min=diffusion["sigma_min"],
+        sigma_max=diffusion["sigma_max"],
+        rho=diffusion["rho"],
+        log_sigma_loc=diffusion["log_sigma_loc"],
+        log_sigma_scale=diffusion["log_sigma_scale"],
+        noise_distribution=diffusion["noise_distribution"],
+        sampler=diffusion["sampler"],
     )
+
+
+def command_skill_condition(velocity: torch.Tensor, height: torch.Tensor) -> torch.Tensor:
+    """Map the old height sweep onto the walk/crouch skill simplex.
+
+    Endpoints are the exact one-hot conditions used in training. Intermediate
+    values are explicitly an interpolation test, not an extra training label.
+    """
+
+    crouch = ((0.2932 - height) / (0.2932 - 0.1705)).clamp(0.0, 1.0)
+    return torch.cat([velocity, 1.0 - crouch, crouch], dim=-1)
 
 
 def get_proprio(raw_env: Any, joint_ids: slice) -> torch.Tensor:
@@ -140,6 +157,7 @@ def get_proprio(raw_env: Any, joint_ids: slice) -> torch.Tensor:
     return proprio_from_env_tensors(
         robot.data.joint_pos[:, joint_ids],
         robot.data.joint_vel[:, joint_ids],
+        robot.data.root_lin_vel_b,
         robot.data.root_ang_vel_b,
         robot.data.projected_gravity_b,
     )
@@ -208,7 +226,6 @@ def benchmark_single_env_latency(
     action_buffer: torch.Tensor,
     command_buffer: torch.Tensor,
     samples: int,
-    guidance_scale: float,
 ) -> list[float]:
     if samples <= 0:
         return []
@@ -217,12 +234,12 @@ def benchmark_single_env_latency(
     a = action_buffer[:1]
     g = command_buffer[:1]
     for _ in range(5):
-        policy.predict_action_denormalized(p, a, g, guidance_scale=guidance_scale)
+        policy.predict_action_denormalized(p, a, g)
     synchronize(device)
     latencies = []
     for _ in range(samples):
         start = time.perf_counter()
-        policy.predict_action_denormalized(p, a, g, guidance_scale=guidance_scale)
+        policy.predict_action_denormalized(p, a, g)
         synchronize(device)
         latencies.append((time.perf_counter() - start) * 1000.0)
     return latencies
@@ -316,13 +333,13 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint = load_training_checkpoint(
-        checkpoint_path, device, expected_policy_kind="locodiff_edm_transformer"
+        checkpoint_path, device, expected_policy_kind="locodiff_sde_command_skill_v1"
     )
     config = checkpoint["config"]
     inference_steps = resolve_inference_steps(args_cli.num_inference_steps, config["diffusion"])
     policy_cfg = model_config(config, inference_steps)
-    if policy_cfg.goal_dim != 4:
-        raise ValueError(f"Expected goal_dim=4, got {policy_cfg.goal_dim}.")
+    if policy_cfg.goal_dim != 5:
+        raise ValueError(f"Expected goal_dim=5, got {policy_cfg.goal_dim}.")
     future_horizon = policy_cfg.prediction_horizon - policy_cfg.execution_offset
     if not 1 <= args_cli.exec_horizon <= future_horizon:
         raise ValueError(f"exec_horizon must be in [1, {future_horizon}].")
@@ -356,7 +373,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
     velocity = torch.tensor([scenario.command for scenario in scenarios], dtype=torch.float32, device=device)
     heights = torch.tensor([[scenario.height] for scenario in scenarios], dtype=torch.float32, device=device)
-    command = torch.cat([velocity, heights], dim=-1)
+    command = command_skill_condition(velocity, heights)
     set_env_commands(raw_env, velocity)
 
     proprio_buffer = torch.zeros((num_envs, policy_cfg.history, policy_cfg.proprio_dim), device=device)
@@ -379,7 +396,6 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         action_buffer,
         command_buffer,
         args_cli.latency_samples,
-        args_cli.guidance_scale,
     )
 
     traces = {name: [] for name in ("vx", "vy", "wz", "height", "tilt_deg", "action_delta")}
@@ -401,7 +417,6 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                     proprio_buffer,
                     action_buffer,
                     command_buffer,
-                    guidance_scale=args_cli.guidance_scale,
                 )
                 synchronize(device)
                 batch_latencies.append((time.perf_counter() - infer_start) * 1000.0)
@@ -460,8 +475,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         with torch.inference_mode():
             vec_env.reset()
         dynamic_velocity = torch.tensor((0.4, 0.0, 0.0), device=device).repeat(num_envs, 1)
-        dynamic_command = torch.cat(
-            [dynamic_velocity, torch.full((num_envs, 1), DYNAMIC_HEIGHTS[0], device=device)], dim=-1
+        dynamic_command = command_skill_condition(
+            dynamic_velocity, torch.full((num_envs, 1), DYNAMIC_HEIGHTS[0], device=device)
         )
         set_env_commands(raw_env, dynamic_velocity)
         previous_action = reset_buffers(
@@ -480,7 +495,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         chunk_index = 0
         dynamic_step = 0
         for requested_height in DYNAMIC_HEIGHTS:
-            dynamic_command[:, 3] = requested_height
+            requested = torch.full((num_envs, 1), requested_height, device=device)
+            dynamic_command[:] = command_skill_condition(dynamic_velocity, requested)
             for _ in range(segment_steps):
                 with torch.inference_mode():
                     if current_chunk is None or chunk_index == 0:
@@ -488,7 +504,6 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                             proprio_buffer,
                             action_buffer,
                             command_buffer,
-                            guidance_scale=args_cli.guidance_scale,
                         )
                         current_chunk = policy.executable_chunk(trajectory, args_cli.exec_horizon)
                     action = current_chunk[:, chunk_index]
