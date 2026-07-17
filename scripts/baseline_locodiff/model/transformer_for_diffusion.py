@@ -143,22 +143,11 @@ class TransformerForDiffusion(nn.Module):
             mask = mask.float().masked_fill(mask == 0, float("-inf")).masked_fill(mask == 1, float(0.0))
             self.register_buffer("mask", mask)
 
-            if time_as_cond and obs_as_cond:
-                # [diffusion_time, io_0..io_H-1, command_0..command_H-1].
-                # Past trajectory token j sees history through j; future tokens
-                # see the full delayed history.  Keeping IO and command blocks
-                # symmetric is required by the DiffuseLoco conditioning layout.
-                memory_mask = torch.full((tokens, cond_tokens), float("-inf"))
-                memory_mask[:, 0] = 0.0
-                for target_idx in range(tokens):
-                    visible_history = min(target_idx + 1, n_obs_steps)
-                    memory_mask[target_idx, 1 : 1 + visible_history] = 0.0
-                    if self.separate_goal_conditioning:
-                        goal_start = 1 + n_obs_steps
-                        memory_mask[target_idx, goal_start : goal_start + visible_history] = 0.0
-                self.register_buffer("memory_mask", memory_mask)
-            else:
-                self.memory_mask = None
+            # LocoDiff applies causal self-attention to the noisy future action
+            # tokens. Cross-attention is allowed to see the complete *past*
+            # state/command history; masking it by target index discards useful
+            # context and is not part of the published architecture.
+            self.memory_mask = None
         else:
             self.mask = None
             self.memory_mask = None

@@ -1,4 +1,4 @@
-"""Solo12 wrapper around the tested Diffusion Policy transformer."""
+"""Solo12 wrapper around the LocoDiff denoising transformer."""
 
 from __future__ import annotations
 
@@ -9,14 +9,14 @@ from .transformer_for_diffusion import TransformerForDiffusion
 
 
 class TransformerDiffusionPolicy(nn.Module):
-    """Predict DDPM epsilon for a future action chunk."""
+    """Predict the EDM-preconditioned residual for a future action chunk."""
 
     def __init__(
         self,
         *,
-        proprio_dim: int = 30,
-        action_hist_dim: int = 12,
-        goal_dim: int = 4,
+        proprio_dim: int = 33,
+        action_hist_dim: int = 0,
+        goal_dim: int = 5,
         action_dim: int = 12,
         history: int = 8,
         prediction_horizon: int = 16,

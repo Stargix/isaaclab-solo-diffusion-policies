@@ -14,6 +14,7 @@ HDF5 schema (per demo, under ``data/demo_<k>``)::
         obs/
             joint_pos          (T, 12)   float32   -- measured joint positions
             joint_vel          (T, 12)   float32   -- measured joint velocities
+            base_lin_vel       (T, 3)    float32   -- base linear velocity (body frame)
             base_ang_vel       (T, 3)    float32   -- base angular velocity (body frame)
             projected_gravity  (T, 3)    float32   -- gravity in body frame (IMU orientation)
             last_action        (T, 12)   float32   -- action executed at t-1 (zeros at t0)
@@ -95,7 +96,7 @@ parser.add_argument("--command_resample_time_s", type=float, default=2.0,
 parser.add_argument("--command_profile", choices=["native", "shared_height"], default="native",
                     help="native: each expert's envelope; shared_height: common walk/crouch envelope for a fair posture-height ablation.")
 parser.add_argument("--desired_base_height", type=float, required=True,
-                    help="Expert's commanded base height in metres; stored as the fourth conditioning value.")
+                    help="Expert posture metadata; skill one-hot is the model condition.")
 parser.add_argument("--min_demo_len", type=int, default=100,
                     help="Minimum recorded step length to keep an episode.")
 parser.add_argument("--warmup_steps", type=int, default=25,
@@ -302,6 +303,7 @@ def query_raw_state(raw_env: Any, joint_ids: slice,
     return {
         "joint_pos":         robot.data.joint_pos[sel, joint_ids].cpu().numpy(),
         "joint_vel":         robot.data.joint_vel[sel, joint_ids].cpu().numpy(),
+        "base_lin_vel":      robot.data.root_lin_vel_b[sel].cpu().numpy(),
         "base_ang_vel":      robot.data.root_ang_vel_b[sel].cpu().numpy(),
         "projected_gravity": robot.data.projected_gravity_b[sel].cpu().numpy(),
         "root_pos_w":        robot.data.root_pos_w[sel].cpu().numpy(),
@@ -487,6 +489,7 @@ class HDF5Writer:
         self._data.attrs["control_rate_hz"] = 50.0
         self._data.attrs["collection_seed"] = int(seed)
         self._data.attrs["condition_schema"] = "velocity_xyyaw_plus_desired_base_height_v1"
+        self._data.attrs["observation_schema"] = "locodiff_full_twist_v1"
         self._data.attrs["desired_base_height_m"] = float(desired_base_height)
         self._demo_counter = 0
         self._total_steps = 0
@@ -503,7 +506,7 @@ class HDF5Writer:
         if self._total_steps >= target_steps:
             return False
 
-        keys = ("joint_pos", "joint_vel", "base_ang_vel", "projected_gravity",
+        keys = ("joint_pos", "joint_vel", "base_lin_vel", "base_ang_vel", "projected_gravity",
                 "last_action", "root_pos_w", "root_quat_w", "command", "desired_base_height", "actions", "skill_idx")
         stacked = {k: np.stack([fr[k] for fr in frames], axis=0) for k in keys}
 
@@ -512,6 +515,7 @@ class HDF5Writer:
         obs_grp = grp.create_group("obs")
         obs_grp.create_dataset("joint_pos", data=stacked["joint_pos"].astype(np.float32))
         obs_grp.create_dataset("joint_vel", data=stacked["joint_vel"].astype(np.float32))
+        obs_grp.create_dataset("base_lin_vel", data=stacked["base_lin_vel"].astype(np.float32))
         obs_grp.create_dataset("base_ang_vel", data=stacked["base_ang_vel"].astype(np.float32))
         obs_grp.create_dataset("projected_gravity", data=stacked["projected_gravity"].astype(np.float32))
         obs_grp.create_dataset("last_action", data=stacked["last_action"].astype(np.float32))
@@ -748,6 +752,7 @@ def _make_frame(state: Dict[str, np.ndarray], env_idx: int,
     return {
         "joint_pos":         state["joint_pos"][env_idx],
         "joint_vel":         state["joint_vel"][env_idx],
+        "base_lin_vel":      state["base_lin_vel"][env_idx],
         "base_ang_vel":      state["base_ang_vel"][env_idx],
         "projected_gravity": state["projected_gravity"][env_idx],
         "last_action":       action,  # overwritten with the previous action in the buffer

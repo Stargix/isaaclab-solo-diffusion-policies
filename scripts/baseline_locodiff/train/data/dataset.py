@@ -1,4 +1,4 @@
-"""Command-conditioned, episode-aware dataset for the DiffuseLoco baseline."""
+"""Episode-aware command-and-skill dataset for the LocoDiff baseline."""
 
 from __future__ import annotations
 
@@ -18,11 +18,13 @@ from .symmetry import apply_symmetry, symmetry_count
 
 os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+SKILL_NAMES = ("walk", "crouch")
 EXPECTED_CONVENTION_PREFIX = "aligned: obs[t] is the proprioceptive state BEFORE executing actions[t]"
 REQUIRED_OBS = (
     "joint_pos",
     "joint_vel",
+    "base_lin_vel",
     "base_ang_vel",
     "projected_gravity",
     "last_action",
@@ -37,7 +39,7 @@ class DemoSequence:
     demo_name: str
     proprio: np.ndarray
     actions: np.ndarray
-    commands: np.ndarray
+    conditions: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -73,6 +75,9 @@ def _validate_file(path: str) -> None:
             raise ValueError(f"{path}: unsupported alignment convention {convention!r}.")
         if not np.isclose(float(data.attrs.get("control_rate_hz", 0.0)), 50.0):
             raise ValueError(f"{path}: baseline requires control_rate_hz=50.")
+        dataset_skills = tuple(_decode(value) for value in data.attrs.get("skill_names", ()))
+        if not set(SKILL_NAMES).issubset(dataset_skills):
+            raise ValueError(f"{path}: expected walk and crouch demonstrations; got {dataset_skills}.")
         for demo_name in data:
             demo = data[demo_name]
             if "obs" not in demo or "actions" not in demo or "dones" not in demo:
@@ -90,6 +95,12 @@ def _validate_file(path: str) -> None:
                 raise ValueError(f"{path}/{demo_name}: command_speed must have shape (T, 3).")
             if obs["desired_base_height"].ndim != 2 or obs["desired_base_height"].shape[1] != 1:
                 raise ValueError(f"{path}/{demo_name}: desired_base_height must have shape (T, 1).")
+            skills = tuple(_decode(value) for value in demo.attrs.get("skills_sequence", ()))
+            if len(skills) != 1 or skills[0] not in SKILL_NAMES:
+                raise ValueError(
+                    f"{path}/{demo_name}: each LocoDiff expert episode must have exactly one "
+                    f"known skill, got {skills}."
+                )
             dones = demo["dones"][:]
             if len(dones) != length or (length and not bool(dones[-1])) or np.any(dones[:-1]):
                 raise ValueError(f"{path}/{demo_name}: invalid dones convention.")
@@ -114,12 +125,13 @@ def _validate_file(path: str) -> None:
                     raise ValueError(f"{path}/{demo_name}: last_action is not actions[t-1].")
 
 
-class DiffuseLocoCommandDataset(Dataset):
-    """Return the exact delayed conditioning and 16-token action trajectory.
+class LocoDiffCommandSkillDataset(Dataset):
+    """Return state history, expert command/skill and a future action trajectory.
 
-    At anchor ``t`` the target is ``a[t-H:t+F]`` and token ``H`` is the action
-    executed at deployment.  Commands are read from the expert data; no path,
-    terminal pose, height relabeling or hindsight is present in this baseline.
+    At anchor ``t`` the target is ``a[t:t+P]``.  The conditioning is the state
+    history and ``[vx, vy, wz, walk, crouch]`` at each history step.  The desired
+    base height is deliberately not used: skill is represented as the one-hot
+    label described in the paper.  There is no reward, return or hindsight term.
     """
 
     def __init__(
@@ -128,23 +140,23 @@ class DiffuseLocoCommandDataset(Dataset):
         *,
         history: int = 8,
         prediction_horizon: int = 16,
-        execution_offset: int = 8,
+        execution_offset: int = 0,
         step_stride: int = 1,
         symmetry_mode: str = "none",
     ) -> None:
         if history < 1:
             raise ValueError("history must be >= 1.")
-        if execution_offset != history:
-            raise ValueError("DiffuseLoco schema v2 requires execution_offset == history.")
-        if prediction_horizon <= execution_offset:
-            raise ValueError("prediction_horizon must include future actions.")
+        if execution_offset != 0:
+            raise ValueError("LocoDiff predicts a purely future trajectory; execution_offset must be 0.")
+        if prediction_horizon < 1:
+            raise ValueError("prediction_horizon must be >= 1.")
         if step_stride < 1:
             raise ValueError("step_stride must be >= 1.")
 
         self.history = history
         self.prediction_horizon = prediction_horizon
         self.execution_offset = execution_offset
-        self.future_horizon = prediction_horizon - execution_offset
+        self.future_horizon = prediction_horizon
         self.step_stride = step_stride
         self.symmetry_mode = symmetry_mode
         self._symmetry_count = symmetry_count(symmetry_mode)
@@ -164,6 +176,9 @@ class DiffuseLocoCommandDataset(Dataset):
             for demo_name in sorted(file["data"].keys(), key=_sort_key):
                 demo = file["data"][demo_name]
                 obs = demo["obs"]
+                skill_name = _decode(demo.attrs["skills_sequence"][0])
+                skill_one_hot = np.zeros((len(demo["actions"]), len(SKILL_NAMES)), dtype=np.float32)
+                skill_one_hot[:, SKILL_NAMES.index(skill_name)] = 1.0
                 demo_idx = len(self.demos)
                 self.demos.append(
                     DemoSequence(
@@ -171,12 +186,12 @@ class DiffuseLocoCommandDataset(Dataset):
                         demo_name=demo_name,
                         proprio=read_proprio_vector(obs),
                         actions=demo["actions"][:].astype(np.float32),
-                        commands=np.concatenate(
-                            [obs["command_speed"][:], obs["desired_base_height"][:]], axis=-1,
-                        ).astype(np.float32),
+                        conditions=np.concatenate(
+                            [obs["command_speed"][:].astype(np.float32), skill_one_hot], axis=-1,
+                        ),
                     )
                 )
-                first_anchor = self.history + 1
+                first_anchor = self.history
                 last_anchor_exclusive = len(demo["actions"]) - self.future_horizon + 1
                 for anchor in range(first_anchor, last_anchor_exclusive, self.step_stride):
                     self.samples.append(CommandSample(demo_idx, anchor))
@@ -186,13 +201,13 @@ class DiffuseLocoCommandDataset(Dataset):
         proprio, action_hist = delayed_io_windows(
             demo.proprio, demo.actions, sample.anchor_step, self.history
         )
-        command_hist = demo.commands[sample.anchor_step - self.history : sample.anchor_step]
-        target_start = sample.anchor_step - self.execution_offset
+        condition_hist = demo.conditions[sample.anchor_step - self.history : sample.anchor_step]
+        target_start = sample.anchor_step
         target_end = target_start + self.prediction_horizon
         return (
             torch.from_numpy(proprio.copy()),
             torch.from_numpy(action_hist.copy()),
-            torch.from_numpy(command_hist.copy()),
+            torch.from_numpy(condition_hist.copy()),
             torch.from_numpy(demo.actions[target_start:target_end].copy()),
         )
 
@@ -218,11 +233,11 @@ class DiffuseLocoCommandDataset(Dataset):
         demos = [demo for index, demo in enumerate(self.demos) if index in selected]
         if not demos:
             raise ValueError("Cannot fit normalizer without training episodes.")
-        proprio, actions, commands = self._sample_rows(demos, max_stats_samples, seed)
+        proprio, actions, conditions = self._sample_rows(demos, max_stats_samples, seed)
         if self._symmetry_count > 1:
-            proprio, actions, commands = self._augment_stats(proprio, actions, commands)
+            proprio, actions, conditions = self._augment_stats(proprio, actions, conditions)
         action_min, action_max = self._exact_action_range(demos)
-        return build_stats_with_action_range(proprio, commands, action_min, action_max)
+        return build_stats_with_action_range(proprio, conditions, action_min, action_max)
 
     @staticmethod
     def _sample_rows(
@@ -236,14 +251,14 @@ class DiffuseLocoCommandDataset(Dataset):
         chosen = np.sort(np.random.default_rng(seed).choice(boundaries[-1], count, replace=False))
         demo_ids = np.searchsorted(boundaries, chosen, side="right")
         starts = np.concatenate(([0], boundaries[:-1]))
-        proprio, actions, commands = [], [], []
+        proprio, actions, conditions = [], [], []
         for demo_idx in np.unique(demo_ids):
             local = chosen[demo_ids == demo_idx] - starts[demo_idx]
             demo = demos[int(demo_idx)]
             proprio.append(demo.proprio[local])
             actions.append(demo.actions[local])
-            commands.append(demo.commands[local])
-        return np.concatenate(proprio), np.concatenate(actions), np.concatenate(commands)
+            conditions.append(demo.conditions[local])
+        return np.concatenate(proprio), np.concatenate(actions), np.concatenate(conditions)
 
     def _exact_action_range(self, demos: list[DemoSequence]) -> tuple[np.ndarray, np.ndarray]:
         action_min = np.full(12, np.inf, dtype=np.float32)
@@ -251,12 +266,12 @@ class DiffuseLocoCommandDataset(Dataset):
         for demo in demos:
             actions = torch.from_numpy(demo.actions)
             proprio = torch.zeros((len(actions), PROPRIO_DIM), dtype=actions.dtype)
-            commands = torch.zeros((len(actions), 3), dtype=actions.dtype)
+            conditions = torch.zeros((len(actions), 5), dtype=actions.dtype)
             for index in range(self._symmetry_count):
                 _, _, _, transformed = apply_symmetry(
                     proprio,
                     actions,
-                    commands,
+                    conditions,
                     actions,
                     index=index,
                     mode=self.symmetry_mode,
@@ -267,9 +282,9 @@ class DiffuseLocoCommandDataset(Dataset):
         return action_min, action_max
 
     def _augment_stats(
-        self, proprio: np.ndarray, actions: np.ndarray, commands: np.ndarray
+        self, proprio: np.ndarray, actions: np.ndarray, conditions: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        p_t, a_t, c_t = torch.from_numpy(proprio), torch.from_numpy(actions), torch.from_numpy(commands)
+        p_t, a_t, c_t = torch.from_numpy(proprio), torch.from_numpy(actions), torch.from_numpy(conditions)
         p_all, a_all, c_all = [], [], []
         for index in range(self._symmetry_count):
             p, ah, c, target = apply_symmetry(
@@ -297,11 +312,11 @@ class DiffuseLocoCommandDataset(Dataset):
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         sample_index = index // self._symmetry_count
         symmetry_index = index % self._symmetry_count
-        proprio, action_hist, commands, actions = self._raw_sample(self.samples[sample_index])
-        proprio, action_hist, commands, actions = apply_symmetry(
+        proprio, action_hist, conditions, actions = self._raw_sample(self.samples[sample_index])
+        proprio, action_hist, conditions, actions = apply_symmetry(
             proprio,
             action_hist,
-            commands,
+            conditions,
             actions,
             index=symmetry_index,
             mode=self.symmetry_mode,
@@ -309,6 +324,11 @@ class DiffuseLocoCommandDataset(Dataset):
         return {
             "proprio_hist": proprio,
             "action_hist": action_hist,
-            "goal_hist": commands,
+            "goal_hist": conditions,
             "actions": actions,
         }
+
+
+# Kept as an import alias for small downstream scripts. New checkpoints use the
+# schema-v4 name and are not compatible with the old height-conditioned model.
+DiffuseLocoCommandDataset = LocoDiffCommandSkillDataset

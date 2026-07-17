@@ -100,8 +100,8 @@ def build_stats(
     goal_values: np.ndarray,
     action_values: np.ndarray,
 ) -> NormalizerStats:
-    # DDPMScheduler clips normalized samples to [-1, 1], so training targets
-    # must use the exact train-set support rather than percentile bounds.
+    # Keep the action support exact so normalization is reproducible and the
+    # SDE target has the same scale in training and deployment.
     return build_stats_with_action_range(
         proprio_values,
         goal_values,

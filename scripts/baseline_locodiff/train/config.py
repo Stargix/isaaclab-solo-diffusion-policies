@@ -15,7 +15,7 @@ class DatasetConfig:
     hdf5_paths: list[str]
     history: int = 8
     prediction_horizon: int = 16
-    execution_offset: int = 8
+    execution_offset: int = 0
     step_stride: int = 1
     symmetry_mode: str = "quadruped"
     max_stats_samples: int = 20_000
@@ -39,15 +39,15 @@ class ModelConfig:
 
 @dataclass
 class DiffusionConfig:
-    num_train_timesteps: int = 10
-    num_inference_steps: int | None = None
-    beta_start: float = 1.0e-4
-    beta_end: float = 2.0e-2
-    beta_schedule: str = "squaredcos_cap_v2"
-    prediction_type: str = "epsilon"
-    variance_type: str = "fixed_small"
-    clip_sample: bool = True
-    cfg_dropout_prob: float = 0.0
+    num_inference_steps: int = 3
+    sigma_data: float = 0.5
+    sigma_min: float = 0.002
+    sigma_max: float = 80.0
+    rho: float = 7.0
+    log_sigma_loc: float = -1.2
+    log_sigma_scale: float = 1.2
+    noise_distribution: str = "log_logistic"
+    sampler: str = "euler"
 
 
 @dataclass
@@ -76,8 +76,8 @@ class TrainConfig:
     run_name: str = "solo12_diffusion_policy"
     wandb_project: str | None = None
     wandb_entity: str | None = None
-    schema_version: int = 3
-    policy_kind: str = "locodiff_edm_transformer"
+    schema_version: int = 4
+    policy_kind: str = "locodiff_sde_command_skill_v1"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -102,10 +102,15 @@ TRAINING_CONFIG_KEYS = frozenset(
         "num_layers",
         "p_drop_emb",
         "p_drop_attn",
-        "diffusion_steps",
         "num_inference_steps",
-        "beta_schedule",
-        "cfg_dropout_prob",
+        "sigma_data",
+        "sigma_min",
+        "sigma_max",
+        "rho",
+        "log_sigma_loc",
+        "log_sigma_scale",
+        "noise_distribution",
+        "sampler",
         "batch_size",
         "epochs",
         "lr",
@@ -136,18 +141,13 @@ def load_training_config_overrides(path: str | Path) -> dict[str, Any]:
 
 
 def resolve_inference_steps(cli_override: int | None, diffusion: DiffusionConfig | dict[str, Any]) -> int:
-    """Resolve denoising steps for deployment: CLI > checkpoint > train timesteps."""
+    """Resolve SDE/ODE solver steps for deployment: CLI > checkpoint."""
 
     if cli_override is not None:
         return cli_override
 
     if isinstance(diffusion, dict):
-        infer_steps = diffusion.get("num_inference_steps")
-        train_steps = int(diffusion["num_train_timesteps"])
+        infer_steps = diffusion["num_inference_steps"]
     else:
         infer_steps = diffusion.num_inference_steps
-        train_steps = diffusion.num_train_timesteps
-
-    if infer_steps is not None:
-        return int(infer_steps)
-    return train_steps
+    return int(infer_steps)

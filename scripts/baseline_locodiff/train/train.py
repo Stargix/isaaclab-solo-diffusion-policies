@@ -29,7 +29,7 @@ if __package__ in (None, ""):
         TrainConfig,
         load_training_config_overrides,
     )
-    from train.data.dataset import DiffuseLocoCommandDataset
+    from train.data.dataset import LocoDiffCommandSkillDataset
     from train.data.episode_split import split_episode_indices
 
 
@@ -68,15 +68,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--p_drop_emb", type=float, default=MODEL_DEFAULTS.p_drop_emb)
     parser.add_argument("--p_drop_attn", type=float, default=MODEL_DEFAULTS.p_drop_attn)
 
-    parser.add_argument("--diffusion_steps", type=int, default=DIFFUSION_DEFAULTS.num_train_timesteps)
-    parser.add_argument(
-        "--num_inference_steps",
-        type=int,
-        default=5,
-        help="Denoising steps at deploy time; defaults to 5.",
-    )
-    parser.add_argument("--beta_schedule", default=DIFFUSION_DEFAULTS.beta_schedule)
-    parser.add_argument("--cfg_dropout_prob", type=float, default=DIFFUSION_DEFAULTS.cfg_dropout_prob)
+    parser.add_argument("--num_inference_steps", type=int, default=DIFFUSION_DEFAULTS.num_inference_steps)
+    parser.add_argument("--sigma_data", type=float, default=DIFFUSION_DEFAULTS.sigma_data)
+    parser.add_argument("--sigma_min", type=float, default=DIFFUSION_DEFAULTS.sigma_min)
+    parser.add_argument("--sigma_max", type=float, default=DIFFUSION_DEFAULTS.sigma_max)
+    parser.add_argument("--rho", type=float, default=DIFFUSION_DEFAULTS.rho)
+    parser.add_argument("--log_sigma_loc", type=float, default=DIFFUSION_DEFAULTS.log_sigma_loc)
+    parser.add_argument("--log_sigma_scale", type=float, default=DIFFUSION_DEFAULTS.log_sigma_scale)
+    parser.add_argument("--noise_distribution", choices=["log_logistic"], default=DIFFUSION_DEFAULTS.noise_distribution)
+    parser.add_argument("--sampler", choices=["euler", "heun"], default=DIFFUSION_DEFAULTS.sampler)
     parser.add_argument("--batch_size", type=int, default=OPTIM_DEFAULTS.batch_size)
     parser.add_argument("--epochs", type=int, default=OPTIM_DEFAULTS.epochs)
     parser.add_argument("--lr", type=float, default=OPTIM_DEFAULTS.learning_rate)
@@ -94,6 +94,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save_every", type=int, default=OPTIM_DEFAULTS.save_every)
     parser.add_argument("--log_every", type=int, default=OPTIM_DEFAULTS.log_every)
     parser.add_argument("--no_amp", action="store_true", help="Disable CUDA mixed precision.")
+    parser.add_argument(
+        "--preflight_only",
+        action="store_true",
+        help="Validate data, one forward/backward pass and three-step sampling, then exit.",
+    )
 
     parser.add_argument("--wandb_project", default=None)
     parser.add_argument("--wandb_entity", default=None)
@@ -134,10 +139,15 @@ def make_config(args: argparse.Namespace) -> TrainConfig:
             p_drop_attn=args.p_drop_attn,
         ),
         diffusion=DiffusionConfig(
-            num_train_timesteps=args.diffusion_steps,
             num_inference_steps=args.num_inference_steps,
-            beta_schedule=args.beta_schedule,
-            cfg_dropout_prob=args.cfg_dropout_prob,
+            sigma_data=args.sigma_data,
+            sigma_min=args.sigma_min,
+            sigma_max=args.sigma_max,
+            rho=args.rho,
+            log_sigma_loc=args.log_sigma_loc,
+            log_sigma_scale=args.log_sigma_scale,
+            noise_distribution=args.noise_distribution,
+            sampler=args.sampler,
         ),
         optim=OptimConfig(
             batch_size=args.batch_size,
@@ -208,8 +218,15 @@ def build_policy(cfg: TrainConfig) -> Solo12DiffusionPolicy:
         p_drop_emb=cfg.model.p_drop_emb,
         p_drop_attn=cfg.model.p_drop_attn,
         separate_goal_conditioning=cfg.model.separate_goal_conditioning,
-        cfg_dropout_prob=cfg.diffusion.cfg_dropout_prob,
-        num_inference_steps=cfg.diffusion.num_inference_steps or 5,
+        sigma_data=cfg.diffusion.sigma_data,
+        sigma_min=cfg.diffusion.sigma_min,
+        sigma_max=cfg.diffusion.sigma_max,
+        rho=cfg.diffusion.rho,
+        log_sigma_loc=cfg.diffusion.log_sigma_loc,
+        log_sigma_scale=cfg.diffusion.log_sigma_scale,
+        noise_distribution=cfg.diffusion.noise_distribution,
+        sampler=cfg.diffusion.sampler,
+        num_inference_steps=cfg.diffusion.num_inference_steps,
     )
     return Solo12DiffusionPolicy(policy_cfg)
 
@@ -254,13 +271,7 @@ def save_checkpoint(
             "config": cfg.to_dict(),
             "model_state_dict": policy.state_dict(),
             "ema_model_state_dict": ema.averaged_model.state_dict(),
-            "noise_scheduler_config": {},  # Keep empty for backward compatibility
-            "edm_config": {
-                "sigma_data": policy.cfg.sigma_data,
-                "sigma_min": policy.cfg.sigma_min,
-                "sigma_max": policy.cfg.sigma_max,
-                "rho": policy.cfg.rho,
-            },
+            "sde_config": cfg.to_dict()["diffusion"],
             "optimizer_state_dict": optimizer.state_dict(),
             "lr_scheduler_state_dict": lr_scheduler.state_dict(),
             "epoch": epoch,
@@ -286,11 +297,12 @@ def main() -> None:
     print(
         f"[INFO] d_model={cfg.model.d_model} layers={cfg.model.num_layers} "
         f"nhead={cfg.model.nhead} trajectory={cfg.dataset.prediction_horizon} "
-        f"execute_from={cfg.dataset.execution_offset}"
+        f"execute_from={cfg.dataset.execution_offset} solver={cfg.diffusion.sampler} "
+        f"solver_steps={cfg.diffusion.num_inference_steps}"
     )
 
     device = torch.device(args.device)
-    dataset = DiffuseLocoCommandDataset(
+    dataset = LocoDiffCommandSkillDataset(
         cfg.dataset.hdf5_paths,
         history=cfg.dataset.history,
         prediction_horizon=cfg.dataset.prediction_horizon,
@@ -350,6 +362,31 @@ def main() -> None:
     )
     scaler = torch.amp.GradScaler("cuda", enabled=cfg.optim.mixed_precision and device.type == "cuda")
     wandb = maybe_init_wandb(cfg)
+
+    preflight_batch = next(iter(train_loader))
+    preflight_batch = {key: value.to(device) for key, value in preflight_batch.items()}
+    optimizer.zero_grad(set_to_none=True)
+    preflight_loss = policy.compute_loss(preflight_batch)
+    if not torch.isfinite(preflight_loss):
+        raise RuntimeError(f"Non-finite preflight loss: {preflight_loss.item()}")
+    preflight_loss.backward()
+    if not all(parameter.grad is None or torch.isfinite(parameter.grad).all() for parameter in policy.parameters()):
+        raise RuntimeError("Non-finite gradient detected during preflight.")
+    optimizer.zero_grad(set_to_none=True)
+    with torch.no_grad():
+        sampled = policy.predict_action_denormalized(
+            preflight_batch["proprio_hist"][:2],
+            preflight_batch["action_hist"][:2],
+            preflight_batch["goal_hist"][:2],
+        )
+    if sampled.shape != (2, cfg.dataset.prediction_horizon, cfg.model.action_dim):
+        raise RuntimeError(f"Unexpected sampled action shape: {tuple(sampled.shape)}")
+    if not torch.isfinite(sampled).all():
+        raise RuntimeError("Non-finite action detected during preflight sampling.")
+    print(f"[PREFLIGHT] loss={preflight_loss.item():.6f} shapes and gradients OK")
+    if args.preflight_only:
+        print("[PREFLIGHT] complete; training was not started.")
+        return
 
     print(
         f"[INFO] demos={len(dataset.demos)} samples={len(dataset)} "

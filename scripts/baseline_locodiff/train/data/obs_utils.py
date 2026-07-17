@@ -6,10 +6,10 @@ import h5py
 import numpy as np
 import torch
 
-PROPRIO_KEYS = ("joint_pos", "joint_vel", "base_ang_vel", "projected_gravity")
-PROPRIO_DIM = 30
-ACTION_HIST_DIM = 12
-GOAL_DIM = 4  # [vx, vy, wz, desired_base_height]
+PROPRIO_KEYS = ("joint_pos", "joint_vel", "base_lin_vel", "base_ang_vel", "projected_gravity")
+PROPRIO_DIM = 33
+ACTION_HIST_DIM = 0
+GOAL_DIM = 5  # [vx, vy, wz, skill_walk, skill_crouch]
 IO_DIM = PROPRIO_DIM + ACTION_HIST_DIM
 
 
@@ -28,10 +28,11 @@ def read_proprio_vector(obs_group: h5py.Group | dict) -> np.ndarray:
 def proprio_from_env_tensors(
     joint_pos: torch.Tensor,
     joint_vel: torch.Tensor,
+    base_lin_vel: torch.Tensor,
     base_ang_vel: torch.Tensor,
     projected_gravity: torch.Tensor,
 ) -> torch.Tensor:
-    return torch.cat([joint_pos, joint_vel, base_ang_vel, projected_gravity], dim=-1)
+    return torch.cat([joint_pos, joint_vel, base_lin_vel, base_ang_vel, projected_gravity], dim=-1)
 
 
 def delayed_io_windows(
@@ -40,17 +41,13 @@ def delayed_io_windows(
     step: int,
     history: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Build delayed proprio/action histories for anchor ``step``.
+    """Build the state history used by the paper-aligned SDE policy.
 
-    Matches DiffuseLoco notation at prediction time ``step``:
-    - proprio: ``s_{step-history:step}`` (ends at ``step-1``)
-    - actions: ``a_{step-history-1:step-1}`` (ends at ``step-2``)
+    The paper conditions on orientation, twist, joint position and joint
+    velocity histories.  It does not condition on past actions, so the second
+    tensor deliberately has a zero-width feature dimension.
     """
 
     proprio_hist = proprio[step - history : step].astype(np.float32)
     action_hist = np.zeros((history, ACTION_HIST_DIM), dtype=np.float32)
-    for k in range(history):
-        action_idx = step - history + k - 1
-        if action_idx >= 0:
-            action_hist[k] = actions[action_idx]
     return proprio_hist, action_hist

@@ -41,6 +41,8 @@ def _device_tensor(values: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
 
 
 def _transform_joint_data(data: torch.Tensor, perm: torch.Tensor, sign: torch.Tensor) -> torch.Tensor:
+    if data.shape[-1] == 0:
+        return data
     perm = perm.to(device=data.device)
     sign = _device_tensor(sign, data)
     return data[..., perm] * sign
@@ -50,8 +52,9 @@ def _reflect_proprio_x(proprio_hist: torch.Tensor) -> torch.Tensor:
     proprio = proprio_hist.clone()
     proprio[..., 0:12] = _transform_joint_data(proprio[..., 0:12], LEFT_RIGHT_PERM, LEFT_RIGHT_SIGN)
     proprio[..., 12:24] = _transform_joint_data(proprio[..., 12:24], LEFT_RIGHT_PERM, LEFT_RIGHT_SIGN)
-    proprio[..., 24:27] *= _device_tensor(PSEUDOVECTOR_REFLECT_X, proprio)
-    proprio[..., 27:30] *= _device_tensor(VECTOR_REFLECT_X, proprio)
+    proprio[..., 24:27] *= _device_tensor(VECTOR_REFLECT_X, proprio)
+    proprio[..., 27:30] *= _device_tensor(PSEUDOVECTOR_REFLECT_X, proprio)
+    proprio[..., 30:33] *= _device_tensor(VECTOR_REFLECT_X, proprio)
     return proprio
 
 
@@ -59,8 +62,9 @@ def _reflect_proprio_y(proprio_hist: torch.Tensor) -> torch.Tensor:
     proprio = proprio_hist.clone()
     proprio[..., 0:12] = _transform_joint_data(proprio[..., 0:12], FRONT_BACK_PERM, FRONT_BACK_SIGN)
     proprio[..., 12:24] = _transform_joint_data(proprio[..., 12:24], FRONT_BACK_PERM, FRONT_BACK_SIGN)
-    proprio[..., 24:27] *= _device_tensor(PSEUDOVECTOR_REFLECT_Y, proprio)
-    proprio[..., 27:30] *= _device_tensor(VECTOR_REFLECT_Y, proprio)
+    proprio[..., 24:27] *= _device_tensor(VECTOR_REFLECT_Y, proprio)
+    proprio[..., 27:30] *= _device_tensor(PSEUDOVECTOR_REFLECT_Y, proprio)
+    proprio[..., 30:33] *= _device_tensor(VECTOR_REFLECT_Y, proprio)
     return proprio
 
 
@@ -71,6 +75,9 @@ def _reflect_goal_x(goal_hist: torch.Tensor) -> torch.Tensor:
         return goal
     if goal.shape[-1] == 4:
         goal *= _device_tensor(torch.tensor([1.0, -1.0, -1.0, 1.0]), goal)
+        return goal
+    if goal.shape[-1] == 5:
+        goal[..., :3] *= _device_tensor(torch.tensor([1.0, -1.0, -1.0]), goal)
         return goal
     xy_sign = _device_tensor(GOAL_XY_REFLECT_X, goal)
     xyz_sign = _device_tensor(VECTOR_REFLECT_X, goal)
@@ -89,6 +96,9 @@ def _reflect_goal_y(goal_hist: torch.Tensor) -> torch.Tensor:
         return goal
     if goal.shape[-1] == 4:
         goal *= _device_tensor(torch.tensor([-1.0, 1.0, -1.0, 1.0]), goal)
+        return goal
+    if goal.shape[-1] == 5:
+        goal[..., :3] *= _device_tensor(torch.tensor([-1.0, 1.0, -1.0]), goal)
         return goal
     xy_sign = _device_tensor(GOAL_XY_REFLECT_Y, goal)
     xyz_sign = _device_tensor(VECTOR_REFLECT_Y, goal)
