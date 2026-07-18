@@ -1,0 +1,98 @@
+{
+  "checkpoint": "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\checkpoints_iri\\locodiff_sde.pt",
+  "checkpoint_sha256": "01721334F9EB04CB6E17534A39C50747F4FDD335F83A1C63483E6C39504B827A",
+  "config": {
+    "dataset": {
+      "execution_offset": 0,
+      "hdf5_paths": [
+        "scripts/diffusion_policy/data/datasets/locodiff_walk_crouch_v1.hdf5"
+      ],
+      "history": 8,
+      "max_stats_samples": 20000,
+      "prediction_horizon": 16,
+      "step_stride": 1,
+      "symmetry_mode": "quadruped",
+      "val_fraction": 0.05
+    },
+    "diffusion": {
+      "log_sigma_loc": -1.2,
+      "log_sigma_scale": 1.2,
+      "noise_distribution": "log_logistic",
+      "num_inference_steps": 3,
+      "rho": 7.0,
+      "sampler": "euler",
+      "sigma_data": 0.5,
+      "sigma_max": 80.0,
+      "sigma_min": 0.002
+    },
+    "model": {
+      "action_dim": 12,
+      "action_hist_dim": 0,
+      "d_model": 256,
+      "dim_feedforward": 1024,
+      "goal_dim": 5,
+      "nhead": 8,
+      "num_layers": 6,
+      "p_drop_attn": 0.3,
+      "p_drop_emb": 0.0,
+      "proprio_dim": 33,
+      "separate_goal_conditioning": true
+    },
+    "optim": {
+      "batch_size": 8192,
+      "ema_decay": 0.9999,
+      "epochs": 200,
+      "grad_clip_norm": 1.0,
+      "learning_rate": 0.0001,
+      "log_every": 50,
+      "lr_warmup_steps": 10000,
+      "mixed_precision": true,
+      "num_workers": 4,
+      "save_every": 10,
+      "seed": 42,
+      "weight_decay": 0.001
+    },
+    "output_dir": "scripts/baseline_locodiff/runs/locodiff_command_skill_sde_b8192",
+    "policy_kind": "locodiff_sde_command_skill_v1",
+    "run_name": "locodiff_command_skill_sde_b8192",
+    "schema_version": 4,
+    "wandb_entity": null,
+    "wandb_project": "solo12-diffusion"
+  },
+  "control_dt_s": 0.02,
+  "dataset_sha256": {
+    "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\scripts\\diffusion_policy\\data\\datasets\\locodiff_walk_crouch_v1.hdf5": "4D4106F9D613D08E9877A8ED23B240EDBB041364CD959BC1F7784099A3B4CFF6"
+  },
+  "duration_s": 15.0,
+  "effective_vectorized_steps_hz": 12.782481267873372,
+  "exec_horizon": 1,
+  "git_commit": "60905cd4232ccc0dd96a54ccba65a034f7e54ca6",
+  "nominal_control_hz": 50.0,
+  "num_inference_steps": 3,
+  "num_scenarios": 45,
+  "seed": 42,
+  "settling_s": 2.0,
+  "single_env_latency": {
+    "deadline_miss_rate": 0.97,
+    "deadline_misses": 97,
+    "deadline_ms": 20.0,
+    "max_ms": 39.66680000303313,
+    "mean_ms": 25.756086001056246,
+    "p50_ms": 24.404650001088157,
+    "p95_ms": 35.64094999310328,
+    "p99_ms": 39.25793000147678,
+    "samples": 100
+  },
+  "survival_rate": 0.8,
+  "task": "solo12-v0",
+  "timestamp": "2026-07-18T00:10:41",
+  "torchscript_denoiser": true,
+  "vectorized_batch_latency": {
+    "max_ms": 1221.2644999963231,
+    "mean_ms": 26.306059599543612,
+    "p50_ms": 23.87609999277629,
+    "p95_ms": 31.678390000888612,
+    "p99_ms": 37.830821005627506,
+    "samples": 750
+  }
+}
