@@ -39,8 +39,25 @@ def _load_demo(data: h5py.Group, name: str) -> dict[str, np.ndarray | str]:
         "reference": obs["reference_pos_w"][:].astype(np.float32),
         "command": obs["command_speed"][:].astype(np.float32),
         "reference_command": obs["reference_command"][:].astype(np.float32),
-        "error": obs["tracking_error_frenet"][:].astype(np.float32),
+        "root_quat": obs["root_quat_w"][:].astype(np.float32),
+        "reference_yaw": obs["reference_yaw_w"][:].reshape(-1).astype(np.float32),
     }
+
+
+def _route_tracking_error(demo: dict[str, np.ndarray | str]) -> np.ndarray:
+    root = np.asarray(demo["root"])
+    quat = np.asarray(demo["root_quat"])
+    reference = np.asarray(demo["reference"])
+    reference_yaw = np.asarray(demo["reference_yaw"])
+    w, x, y, z = (quat[:, index] for index in range(4))
+    robot_yaw = np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    delta = reference[:, :2] - root[:, :2]
+    cos_yaw, sin_yaw = np.cos(robot_yaw), np.sin(robot_yaw)
+    return np.stack((
+        cos_yaw * delta[:, 0] + sin_yaw * delta[:, 1],
+        -sin_yaw * delta[:, 0] + cos_yaw * delta[:, 1],
+        np.arctan2(np.sin(reference_yaw - robot_yaw), np.cos(reference_yaw - robot_yaw)),
+    ), axis=-1)
 
 
 def main() -> None:
@@ -111,13 +128,13 @@ def main() -> None:
     axes[0, 1].axis("equal")
     axes[0, 1].legend()
 
-    time = np.arange(len(np.asarray(example["error"])), dtype=np.float32) * 0.02
-    error = np.asarray(example["error"])
+    error = _route_tracking_error(example)
+    time = np.arange(len(error), dtype=np.float32) * 0.02
     command = np.asarray(example["command"])
     axes[1, 0].plot(time, error[:, 0], label="longitudinal", color="C0")
     axes[1, 0].plot(time, error[:, 1], label="lateral", color="C1")
     axes[1, 0].plot(time, error[:, 2], label="heading", color="C2")
-    axes[1, 0].set_title("Teacher tracking error (example)")
+    axes[1, 0].set_title("Current route tracking error (example)")
     axes[1, 0].set_xlabel("time [s]")
     axes[1, 0].set_ylabel("error [m / rad]")
     axes[1, 0].grid(alpha=0.25)

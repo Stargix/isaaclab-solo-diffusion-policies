@@ -1,8 +1,11 @@
 {
   "goal_source": "reference",
   "goal_representation": "holonomic_se2_32",
-  "include_padded_starts": true,
-  "startup_sample_multiplier": 16,
+  "include_padded_starts": false,
+  "startup_sample_multiplier": 1,
+  "symmetry_mode": "mirror",
+  "step_stride": 1,
+  "val_fraction": 0.05,
   "d_model": 128,
   "nhead": 4,
   "num_layers": 4,

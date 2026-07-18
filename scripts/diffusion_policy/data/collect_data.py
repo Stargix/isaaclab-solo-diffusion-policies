@@ -1170,10 +1170,16 @@ def _make_frame(
         "desired_base_height": np.asarray([desired_base_height], dtype=np.float32),
         "reference_pos_w":  np.array(reference_pos_w, dtype=np.float32),
         "reference_yaw_w":  np.asarray([reference_yaw_w], dtype=np.float32),
-        "reference_command": state["command"][env_idx] if reference_command is None else reference_command,
+        "reference_command": np.array(
+            state["command"][env_idx] if reference_command is None else reference_command,
+            dtype=np.float32,
+            copy=True,
+        ),
         "reference_progress": np.asarray([reference_progress], dtype=np.int32),
         "tracking_error_frenet": (
-            np.zeros(3, dtype=np.float32) if tracking_error is None else np.asarray(tracking_error, dtype=np.float32)
+            np.zeros(3, dtype=np.float32)
+            if tracking_error is None
+            else np.array(tracking_error, dtype=np.float32, copy=True)
         ),
         "route_family_idx": np.asarray([ROUTE_FAMILIES_TO_IDX.get(route_family, -1)], dtype=np.int8),
         "route_family": route_family or "legacy",

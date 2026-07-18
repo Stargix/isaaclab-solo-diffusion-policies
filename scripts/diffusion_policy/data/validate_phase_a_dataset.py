@@ -22,6 +22,30 @@ def yaw_wrap(angle: np.ndarray) -> np.ndarray:
     return np.arctan2(np.sin(angle), np.cos(angle))
 
 
+def yaw_from_quat_wxyz(quat: np.ndarray) -> np.ndarray:
+    """Extract yaw from an array of WXYZ quaternions."""
+
+    w, x, y, z = (quat[:, index] for index in range(4))
+    return np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def route_tracking_error(
+    root_pos: np.ndarray,
+    root_quat: np.ndarray,
+    reference_pos: np.ndarray,
+    reference_yaw: np.ndarray,
+) -> np.ndarray:
+    """Current reference minus current robot pose in the robot yaw frame."""
+
+    robot_yaw = yaw_from_quat_wxyz(root_quat)
+    delta = reference_pos[:, :2] - root_pos[:, :2]
+    cos_yaw, sin_yaw = np.cos(robot_yaw), np.sin(robot_yaw)
+    longitudinal = cos_yaw * delta[:, 0] + sin_yaw * delta[:, 1]
+    lateral = -sin_yaw * delta[:, 0] + cos_yaw * delta[:, 1]
+    heading = yaw_wrap(reference_yaw - robot_yaw)
+    return np.stack((longitudinal, lateral, heading), axis=-1).astype(np.float32)
+
+
 def expected_reference_delta(command: np.ndarray, yaw: np.ndarray, dt: float) -> np.ndarray:
     vx, vy = command[:, 0], command[:, 1]
     cos_yaw, sin_yaw = np.cos(yaw), np.sin(yaw)
@@ -38,12 +62,19 @@ def main() -> None:
         help="Minimum accepted/finished rollout fraction for phase_a_holonomic. "
              "This audits the fixed proposal distribution; it is not a training filter.",
     )
+    parser.add_argument("--max_tracking_position_p95_m", type=float, default=0.10)
+    parser.add_argument("--max_tracking_heading_p95_rad", type=float, default=0.25)
+    parser.add_argument("--max_teacher_saturation_fraction", type=float, default=0.20)
     args = parser.parse_args()
 
     if args.startup_hold_steps < 0:
         raise ValueError("--startup_hold_steps must be non-negative.")
     if not 0.0 <= args.min_survival_rate <= 1.0:
         raise ValueError("--min_survival_rate must be in [0, 1].")
+    if min(args.max_tracking_position_p95_m, args.max_tracking_heading_p95_rad) <= 0.0:
+        raise ValueError("Tracking-error gates must be positive.")
+    if not 0.0 <= args.max_teacher_saturation_fraction <= 1.0:
+        raise ValueError("--max_teacher_saturation_fraction must be in [0, 1].")
     path = Path(args.dataset)
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -102,17 +133,28 @@ def main() -> None:
             demo_lengths.append(len(command))
 
             if is_closed_loop:
-                extra = ("reference_progress", "tracking_error_frenet", "route_family_idx")
+                extra = (
+                    "reference_progress", "tracking_error_frenet", "route_family_idx",
+                    "root_pos_w", "root_quat_w",
+                )
                 missing_extra = [key for key in extra if key not in obs]
                 if missing_extra:
                     raise KeyError(f"{demo_name}: closed-loop Phase A is missing {missing_extra}.")
                 progress = obs["reference_progress"][:].reshape(-1)
                 if not np.array_equal(progress, np.arange(len(progress), dtype=progress.dtype)):
                     raise ValueError(f"{demo_name}: reference_progress must be the fixed route time index.")
-                errors = obs["tracking_error_frenet"][:]
-                if not np.isfinite(errors).all():
+                stored_teacher_errors = obs["tracking_error_frenet"][:]
+                if not np.isfinite(stored_teacher_errors).all():
                     raise ValueError(f"{demo_name}: non-finite tracking errors.")
-                all_tracking_errors.append(errors)
+                # Recompute the geometric route deviation from immutable raw
+                # state. Older collectors kept a mutable view of the teacher's
+                # lookahead error, so that diagnostic field cannot be trusted.
+                all_tracking_errors.append(route_tracking_error(
+                    obs["root_pos_w"][:].astype(np.float32),
+                    obs["root_quat_w"][:].astype(np.float32),
+                    reference_pos,
+                    reference_yaw,
+                ))
 
     if not all_commands:
         raise ValueError("Dataset has no usable demonstrations.")
@@ -162,8 +204,15 @@ def main() -> None:
         if summary["teacher_lateral_fraction_abs_vy_gt_0p02"] <= 0.0:
             raise ValueError("Closed-loop teacher never issued a lateral correction.")
         tracking_errors = np.concatenate(all_tracking_errors)
-        summary["tracking_error_lateral_abs_p95_m"] = float(np.percentile(np.abs(tracking_errors[:, 1]), 95))
-        summary["tracking_error_heading_abs_p95_rad"] = float(np.percentile(np.abs(tracking_errors[:, 2]), 95))
+        summary["route_tracking_longitudinal_abs_p95_m"] = float(
+            np.percentile(np.abs(tracking_errors[:, 0]), 95)
+        )
+        summary["route_tracking_lateral_abs_p95_m"] = float(
+            np.percentile(np.abs(tracking_errors[:, 1]), 95)
+        )
+        summary["route_tracking_heading_abs_p95_rad"] = float(
+            np.percentile(np.abs(tracking_errors[:, 2]), 95)
+        )
     if route_profile == "phase_a_holonomic":
         if reference_schema != "fixed_holonomic_se2_route_with_closed_loop_teacher_v3":
             raise ValueError("Holonomic Phase A has an incompatible reference schema.")
@@ -177,6 +226,28 @@ def main() -> None:
                 f"--min_survival_rate={args.min_survival_rate:.3f}; reduce the declared envelope "
                 "or diagnose the expert before training."
             )
+        limits = route_generation_config.get("limits", {})
+        saturation_limits = np.asarray(
+            [limits.get("vx_abs_max", np.nan), limits.get("vy_abs_max", np.nan), limits.get("wz_abs_max", np.nan)],
+            dtype=np.float32,
+        )
+        if not np.isfinite(saturation_limits).all() or np.any(saturation_limits <= 0.0):
+            raise ValueError("Holonomic route manifest has invalid SE(2) command limits.")
+        summary["teacher_saturation_fraction"] = float(np.mean(
+            np.any(np.abs(teacher_commands) >= 0.995 * saturation_limits[None, :], axis=1)
+        ))
+        if summary["teacher_saturation_fraction"] > args.max_teacher_saturation_fraction:
+            raise ValueError(
+                f"Teacher saturation fraction={summary['teacher_saturation_fraction']:.3f} exceeds "
+                f"{args.max_teacher_saturation_fraction:.3f}; the proposal envelope is not conservative."
+            )
+        if max(
+            summary["route_tracking_longitudinal_abs_p95_m"],
+            summary["route_tracking_lateral_abs_p95_m"],
+        ) > args.max_tracking_position_p95_m:
+            raise ValueError("Holonomic route position tracking p95 exceeds the declared preflight gate.")
+        if summary["route_tracking_heading_abs_p95_rad"] > args.max_tracking_heading_p95_rad:
+            raise ValueError("Holonomic route heading tracking p95 exceeds the declared preflight gate.")
         holonomic_support = (
             summary["nominal_lateral_fraction_abs_vy_gt_0p02"],
             summary["nominal_reverse_fraction_vx_lt_minus_0p02"],

@@ -17,7 +17,7 @@ sys.path.insert(0, str(_PACKAGE_ROOT))
 
 from train.conditioning.goal_builder import (
     GOAL_SCHEMA_NAME, REFERENCE_GOAL_SCHEMA_NAME, HOLONOMIC_REFERENCE_GOAL_SCHEMA_NAME,
-    REFERENCE_GOAL_REPRESENTATIONS, WAYPOINT_TIME_OFFSETS_S,
+    HOLONOMIC_TOKEN_TIMES_S, REFERENCE_GOAL_REPRESENTATIONS, WAYPOINT_TIME_OFFSETS_S,
 )
 from train.data.dataset import SpatialHindsightDataset
 
@@ -137,7 +137,7 @@ def make_plots(values: np.ndarray, output: Path) -> None:
 
 def holonomic_feature_names() -> tuple[str, ...]:
     names = []
-    for time_s in (0.5, 1.0, 1.5, 2.0):
+    for time_s in HOLONOMIC_TOKEN_TIMES_S:
         prefix = f"t{time_s:.1f}".replace(".", "p")
         names.extend((
             f"{prefix}_x", f"{prefix}_y", f"{prefix}_sin_dyaw", f"{prefix}_cos_dyaw",
@@ -182,7 +182,12 @@ def make_holonomic_plots(values: np.ndarray, output: Path) -> None:
     heading = np.arctan2(tokens[:, :, 2], tokens[:, :, 3]).reshape(-1)
     axes[1, 0].hist(heading, bins=60)
     axes[1, 0].set(title="Preview heading support", xlabel="delta yaw [rad]", ylabel="count")
-    axes[1, 1].boxplot(np.linalg.norm(tokens[:, :, 4:6], axis=-1), tick_labels=("0.5s", "1.0s", "1.5s", "2.0s"), showfliers=False)
+    time_labels = tuple(f"{time_s:.1f}s" for time_s in HOLONOMIC_TOKEN_TIMES_S)
+    axes[1, 1].boxplot(
+        np.linalg.norm(tokens[:, :, 4:6], axis=-1),
+        tick_labels=time_labels,
+        showfliers=False,
+    )
     axes[1, 1].set(title="Reference speed by preview", ylabel="speed [m/s]")
     for axis in axes.flat:
         axis.grid(True, alpha=0.2)
@@ -237,6 +242,7 @@ def main() -> None:
     summary = {
         "goal_schema": HOLONOMIC_REFERENCE_GOAL_SCHEMA_NAME if holonomic else REFERENCE_GOAL_SCHEMA_NAME if args.goal_source == "reference" else GOAL_SCHEMA_NAME,
         "waypoint_time_offsets_s": WAYPOINT_TIME_OFFSETS_S,
+        "holonomic_token_times_s": HOLONOMIC_TOKEN_TIMES_S if holonomic else None,
         "goal_horizon_steps": args.goal_horizon_steps,
         "goal_source": args.goal_source,
         "goal_representation": args.goal_representation,
