@@ -7,7 +7,7 @@ from typing import Any, Iterable
 
 import torch
 
-from ..conditioning.goal_builder import GOAL_SCHEMA_NAME, REFERENCE_GOAL_SCHEMA_NAME
+from ..conditioning.goal_builder import GOAL_SCHEMA_NAME, REFERENCE_GOAL_SCHEMA_NAME, HOLONOMIC_REFERENCE_GOAL_SCHEMA_NAME
 
 
 def load_training_checkpoint(
@@ -29,7 +29,7 @@ def load_training_checkpoint(
     schema_version = checkpoint.get("schema_version", config.get("schema_version"))
     policy_kind = checkpoint.get("policy_kind", config.get("policy_kind"))
     goal_schema = config.get("goal_schema")
-    if schema_version not in {3, 4}:
+    if schema_version not in {3, 4, 5}:
         raise ValueError(
             f"Checkpoint {path} uses unsupported schema_version={schema_version!r}. "
             "Retrain with a supported temporal-preview conditioning contract."
@@ -41,7 +41,11 @@ def load_training_checkpoint(
         raise ValueError(
             f"Checkpoint {path} has policy_kind={policy_kind!r}; expected one of {sorted(expected_kinds)!r}."
         )
-    expected_goal_schema = REFERENCE_GOAL_SCHEMA_NAME if schema_version == 4 else GOAL_SCHEMA_NAME
+    expected_goal_schema = (
+        HOLONOMIC_REFERENCE_GOAL_SCHEMA_NAME if schema_version == 5
+        else REFERENCE_GOAL_SCHEMA_NAME if schema_version == 4
+        else GOAL_SCHEMA_NAME
+    )
     if goal_schema != expected_goal_schema:
         raise ValueError(
             f"Checkpoint {path} has goal_schema={goal_schema!r}; expected {expected_goal_schema!r}."

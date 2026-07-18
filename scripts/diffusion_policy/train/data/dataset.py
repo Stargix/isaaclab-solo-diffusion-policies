@@ -13,9 +13,9 @@ import torch
 from torch.utils.data import Dataset
 
 from ..conditioning.geometry import cumulative_xy_lengths
-from ..conditioning.goal_builder import WAYPOINT_TIME_OFFSETS_S, build_goal_vector
+from ..conditioning.goal_builder import WAYPOINT_TIME_OFFSETS_S, build_goal_vector, goal_dimension
 from .normalization import NormalizerStats, build_stats_with_action_range
-from .obs_utils import GOAL_DIM, PROPRIO_DIM, delayed_io_windows, read_proprio_vector
+from .obs_utils import PROPRIO_DIM, delayed_io_windows, read_proprio_vector
 from .symmetry import apply_symmetry, symmetry_count
 
 os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
@@ -51,6 +51,7 @@ class DemoSequence:
     skill_idx: np.ndarray | None
     reference_pos_w: np.ndarray | None = None
     reference_yaw_w: np.ndarray | None = None
+    reference_command_b: np.ndarray | None = None
     reference_cumulative_xy: np.ndarray | None = None
 
 
@@ -71,11 +72,19 @@ def _demo_sort_key(name: str) -> tuple[int, str]:
         return 0, name
 
 
-def _validate_hdf5(path: str, *, require_reference_path: bool) -> None:
+def _validate_hdf5(path: str, *, require_reference_path: bool, require_holonomic_reference: bool = False) -> None:
     with h5py.File(path, "r") as file:
         if "data" not in file:
             raise KeyError(f"{path}: missing 'data' group.")
         data = file["data"]
+        if require_holonomic_reference:
+            route_profile = _decode_attr(data.attrs.get("route_profile", ""))
+            reference_schema = _decode_attr(data.attrs.get("reference_schema", ""))
+            if route_profile != "phase_a_holonomic" or reference_schema != "fixed_holonomic_se2_route_with_closed_loop_teacher_v3":
+                raise ValueError(
+                    f"{path}: holonomic_se2_32 requires phase_a_holonomic/v3 reference data, got "
+                    f"route_profile={route_profile!r}, reference_schema={reference_schema!r}."
+                )
         convention = data.attrs.get("convention")
         if convention is None or not _decode_attr(convention).startswith(EXPECTED_CONVENTION_PREFIX):
             raise ValueError(f"{path}: unsupported or missing alignment convention {convention!r}.")
@@ -174,6 +183,7 @@ class SpatialHindsightDataset(Dataset):
         waypoint_time_offsets_s: tuple[float, float, float] = WAYPOINT_TIME_OFFSETS_S,
         v_req_clip: float = 2.0,
         goal_source: str = "achieved",
+        goal_representation: str = "path11",
         include_padded_starts: bool = False,
         startup_sample_multiplier: int = 1,
         symmetry_mode: str = "none",
@@ -190,6 +200,8 @@ class SpatialHindsightDataset(Dataset):
             raise ValueError("step_stride must be >= 1.")
         if goal_source not in {"achieved", "reference"}:
             raise ValueError("goal_source must be 'achieved' or 'reference'.")
+        if goal_source != "reference" and goal_representation != "path11":
+            raise ValueError("The holonomic representation requires goal_source='reference'.")
         if startup_sample_multiplier < 1:
             raise ValueError("startup_sample_multiplier must be >= 1.")
         if not np.isclose(dt, 0.02):
@@ -211,6 +223,8 @@ class SpatialHindsightDataset(Dataset):
         self.waypoint_time_offsets_s = tuple(float(value) for value in waypoint_time_offsets_s)
         self.v_req_clip = v_req_clip
         self.goal_source = goal_source
+        self.goal_representation = goal_representation
+        self.goal_dim = goal_dimension(goal_representation)
         self.include_padded_starts = bool(include_padded_starts)
         self.startup_sample_multiplier = int(startup_sample_multiplier)
         self.symmetry_mode = symmetry_mode
@@ -227,7 +241,11 @@ class SpatialHindsightDataset(Dataset):
             raise ValueError("No valid samples: check episode lengths, history and goal horizon.")
 
     def _load_file(self, path: str) -> None:
-        _validate_hdf5(path, require_reference_path=self.goal_source == "reference")
+        _validate_hdf5(
+            path,
+            require_reference_path=self.goal_source == "reference",
+            require_holonomic_reference=self.goal_representation == "holonomic_se2_32",
+        )
         resolved = str(Path(path).resolve())
         with h5py.File(path, "r") as file:
             data = file["data"]
@@ -251,6 +269,11 @@ class SpatialHindsightDataset(Dataset):
                     if self.goal_source == "reference"
                     else None
                 )
+                reference_command_b = (
+                    obs["reference_command"][:].astype(np.float32)
+                    if self.goal_source == "reference"
+                    else None
+                )
                 self.demos.append(
                     DemoSequence(
                         source_file=resolved,
@@ -263,6 +286,7 @@ class SpatialHindsightDataset(Dataset):
                         skill_idx=demo["skill_idx"][:].astype(np.int16) if "skill_idx" in demo else None,
                         reference_pos_w=reference_pos_w,
                         reference_yaw_w=reference_yaw_w,
+                        reference_command_b=reference_command_b,
                         reference_cumulative_xy=(
                             cumulative_xy_lengths(reference_pos_w) if reference_pos_w is not None else None
                         ),
@@ -289,6 +313,7 @@ class SpatialHindsightDataset(Dataset):
                 demo.reference_pos_w is None
                 or demo.reference_yaw_w is None
                 or demo.reference_cumulative_xy is None
+                or (self.goal_representation == "holonomic_se2_32" and demo.reference_command_b is None)
             ):
                 raise RuntimeError("Reference goal requested but the demonstration has no reference path.")
             return build_goal_vector(
@@ -302,6 +327,8 @@ class SpatialHindsightDataset(Dataset):
                 dt=self.dt,
                 waypoint_time_offsets_s=self.waypoint_time_offsets_s,
                 v_req_clip=self.v_req_clip,
+                goal_representation=self.goal_representation,
+                reference_command_b=demo.reference_command_b,
             )
         return build_goal_vector(
             demo.root_pos_w,
@@ -314,6 +341,7 @@ class SpatialHindsightDataset(Dataset):
             dt=self.dt,
             waypoint_time_offsets_s=self.waypoint_time_offsets_s,
             v_req_clip=self.v_req_clip,
+            goal_representation=self.goal_representation,
         )
 
     def _goal_history(self, sample: HindsightSample) -> np.ndarray:
@@ -418,7 +446,7 @@ class SpatialHindsightDataset(Dataset):
         for demo in demos:
             actions = torch.from_numpy(demo.actions)
             proprio = torch.zeros((len(actions), PROPRIO_DIM), dtype=actions.dtype)
-            goals = torch.zeros((len(actions), GOAL_DIM), dtype=actions.dtype)
+            goals = torch.zeros((len(actions), self.goal_dim), dtype=actions.dtype)
             for index in range(self._symmetry_count):
                 _, _, _, transformed = apply_symmetry(
                     proprio,

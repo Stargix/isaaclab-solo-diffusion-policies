@@ -52,6 +52,7 @@ Example usage::
 """
 
 import argparse
+import json
 import math
 import os
 import random
@@ -69,10 +70,12 @@ from capability_routes import (
     ROUTE_FAMILIES,
     TrackerGains,
     generate_capability_route,
+    generate_holonomic_se2_route,
     tracking_command,
 )
 
 ROUTE_FAMILIES_TO_IDX = {name: index for index, name in enumerate(ROUTE_FAMILIES)}
+CLOSED_LOOP_ROUTE_PROFILES = {"phase_a_closed_loop", "phase_a_holonomic"}
 
 # --------------------------------------------------------------------------- #
 # Path setup: expose the upstream rsl_rl scripts so Hydra task resolution works.
@@ -107,12 +110,13 @@ parser.add_argument("--command_profile", choices=["native", "shared_height"], de
                     help="native: each expert's envelope; shared_height: common walk/crouch envelope for a fair posture-height ablation.")
 parser.add_argument(
     "--route_profile",
-    choices=["random_velocity", "phase_a", "phase_a_closed_loop"],
+    choices=["random_velocity", "phase_a", "phase_a_closed_loop", "phase_a_holonomic"],
     default="random_velocity",
     help=(
         "random_velocity preserves the legacy velocity dataset. phase_a preserves the old "
         "walk-only command-integrated route collector. phase_a_closed_loop generates a fixed "
-        "capability-bounded route and labels it with a route-aware command teacher."
+        "capability-bounded route and labels it with a route-aware command teacher. "
+        "phase_a_holonomic samples bounded SE(2) command trajectories without tying body yaw to path tangent."
     ),
 )
 parser.add_argument(
@@ -151,6 +155,14 @@ parser.add_argument("--tracker_longitudinal_gain", type=float, default=0.55)
 parser.add_argument("--tracker_lateral_gain", type=float, default=1.00)
 parser.add_argument("--tracker_heading_gain", type=float, default=1.15)
 parser.add_argument("--tracker_lateral_yaw_gain", type=float, default=0.65)
+parser.add_argument("--holonomic_knot_count_min", type=int, default=4,
+                    help="Holonomic Phase A: minimum independent SE(2) command knots per route.")
+parser.add_argument("--holonomic_knot_count_max", type=int, default=7,
+                    help="Holonomic Phase A: maximum independent SE(2) command knots per route.")
+parser.add_argument("--holonomic_transition_s", type=float, default=0.30,
+                    help="Holonomic Phase A: smooth transition duration between sampled command knots.")
+parser.add_argument("--holonomic_stop_probability", type=float, default=0.12,
+                    help="Holonomic Phase A: probability that a sampled command knot is a stop.")
 parser.add_argument("--desired_base_height", type=float, required=True,
                     help="Expert's commanded base height in metres; recorded for the velocity-height baseline.")
 parser.add_argument("--min_demo_len", type=int, default=100,
@@ -613,6 +625,7 @@ class HDF5Writer:
         desired_base_height: float,
         *,
         route_profile: str,
+        route_generation_config: dict[str, Any] | None = None,
     ):
         path.parent.mkdir(parents=True, exist_ok=True)
         self._f = h5py.File(path, "w")
@@ -624,12 +637,16 @@ class HDF5Writer:
         self._data.attrs["condition_schema"] = "velocity_xyyaw_plus_desired_base_height_v1"
         self._data.attrs["desired_base_height_m"] = float(desired_base_height)
         self._data.attrs["reference_schema"] = (
-            "fixed_capability_route_with_closed_loop_teacher_v2"
+            "fixed_holonomic_se2_route_with_closed_loop_teacher_v3"
+            if route_profile == "phase_a_holonomic"
+            else "fixed_capability_route_with_closed_loop_teacher_v2"
             if route_profile == "phase_a_closed_loop"
             else "command_integrated_world_route_v1"
         )
         self._data.attrs["route_profile"] = str(route_profile)
-        if route_profile == "phase_a_closed_loop":
+        if route_generation_config is not None:
+            self._data.attrs["route_generation_config_json"] = json.dumps(route_generation_config, sort_keys=True)
+        if route_profile in {"phase_a_closed_loop", "phase_a_holonomic"}:
             self._data.attrs["route_teacher"] = "timed_preview_feedback_to_velocity_expert_v1"
             self._data.attrs["route_family_names"] = np.array(ROUTE_FAMILIES, dtype="S32")
         self._demo_counter = 0
@@ -696,7 +713,26 @@ class HDF5Writer:
         dones[-1] = True
         return dones
 
-    def close(self) -> None:
+    def close(self, stats: CollectionStats | None = None) -> None:
+        """Persist collection outcomes before closing the immutable dataset.
+
+        Route samples are proposed before the expert executes them.  Recording
+        both accepted and rejected episodes makes that proposal distribution
+        falsifiable: a later reader can see whether the declared capability
+        envelope was conservative enough, rather than mistaking a selectively
+        retained set of easy rollouts for the original task distribution.
+        """
+
+        if stats is not None:
+            attempted = int(stats.finalized)
+            self._data.attrs["collection_attempted_demos"] = attempted
+            self._data.attrs["collection_saved_demos"] = int(stats.saved_demos)
+            self._data.attrs["collection_discarded_guardrail"] = int(stats.discard_guardrail)
+            self._data.attrs["collection_discarded_sim"] = int(stats.discard_sim)
+            self._data.attrs["collection_discarded_short"] = int(stats.discard_short)
+            self._data.attrs["collection_survival_rate"] = (
+                float(stats.survival_rate) if attempted > 0 else float("nan")
+            )
         self._f.close()
 
 
@@ -798,7 +834,7 @@ class CollectionState:
         for env_idx, route in enumerate(self.closed_loop_routes):
             if route is not None:
                 continue
-            self.closed_loop_routes[env_idx] = generate_capability_route(
+            kwargs = dict(
                 start_pos_w=state["root_pos_w"][env_idx],
                 start_yaw_w=float(yaw_from_quat_wxyz(state["root_quat_w"][env_idx])),
                 desired_height=desired_base_height,
@@ -810,6 +846,16 @@ class CollectionState:
                 initial_lateral_offset_m=args.route_initial_lateral_offset_m,
                 initial_yaw_offset_rad=args.route_initial_yaw_offset_rad,
             )
+            if args.route_profile == "phase_a_holonomic":
+                self.closed_loop_routes[env_idx] = generate_holonomic_se2_route(
+                    **kwargs,
+                    knot_count_min=args.holonomic_knot_count_min,
+                    knot_count_max=args.holonomic_knot_count_max,
+                    transition_s=args.holonomic_transition_s,
+                    stop_probability=args.holonomic_stop_probability,
+                )
+            else:
+                self.closed_loop_routes[env_idx] = generate_capability_route(**kwargs)
 
     def closed_loop_reference(self, env_idx: int) -> tuple[np.ndarray, float, np.ndarray, str]:
         route = self.closed_loop_routes[env_idx]
@@ -879,7 +925,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         )
     if args_cli.route_profile == "phase_a" and args_cli.skill_name not in (None, "walk"):
         raise ValueError("phase_a is intentionally walk-only; pass --skill_name walk.")
-    if args_cli.route_profile in {"phase_a", "phase_a_closed_loop"} and not args_cli.include_warmup_frames:
+    if args_cli.route_profile in {"phase_a", *CLOSED_LOOP_ROUTE_PROFILES} and not args_cli.include_warmup_frames:
         raise ValueError(
             "Phase-A route collection requires --include_warmup_frames so reset/start histories are represented."
         )
@@ -910,7 +956,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     # Initialize commands for every env. Phase-A routes start with an intentional
     # zero-command hold; later start/stop windows are part of the dataset.
     for i in range(num_envs):
-        if args_cli.route_profile in {"phase_a", "phase_a_closed_loop"}:
+        if args_cli.route_profile in {"phase_a", *CLOSED_LOOP_ROUTE_PROFILES}:
             raw_env._commands[i, :3] = 0.0
         else:
             resample_command(i, skill_names[state_tracker.current_skill_idx[i]], raw_env._commands, device, rng)
@@ -921,6 +967,32 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         args_cli.seed,
         args_cli.desired_base_height,
         route_profile=args_cli.route_profile,
+        route_generation_config={
+            "seed": args_cli.seed,
+            "limits": {
+                "vx_min": args_cli.route_vx_min,
+                "vx_abs_max": args_cli.route_vx_max,
+                "vy_abs_max": args_cli.route_vy_abs_max,
+                "wz_abs_max": args_cli.route_wz_abs_max,
+                "curvature_abs_max": args_cli.route_curvature_abs_max,
+                "acceleration_abs_max": args_cli.route_accel_abs_max,
+            },
+            "distribution": (
+                "iid_uniform_unit_disk_body_velocity_plus_uniform_yaw_knots"
+                if args_cli.route_profile == "phase_a_holonomic"
+                else "named_tangent_path_families"
+            ),
+            "holonomic": {
+                "knot_count_min": args_cli.holonomic_knot_count_min,
+                "knot_count_max": args_cli.holonomic_knot_count_max,
+                "transition_s": args_cli.holonomic_transition_s,
+                "stop_probability": args_cli.holonomic_stop_probability,
+            },
+            "initial_reference_offset": {
+                "lateral_abs_max_m": args_cli.route_initial_lateral_offset_m,
+                "yaw_abs_max_rad": args_cli.route_initial_yaw_offset_rad,
+            },
+        },
     )
     stats = CollectionStats()
     print(f"[INFO] Starting collection ({args_cli.mode} mode). Output: {output_path}")
@@ -938,7 +1010,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
     steps_collected = 0
     while writer.total_steps < args_cli.num_steps:
-        if args_cli.route_profile == "phase_a_closed_loop":
+        if args_cli.route_profile in CLOSED_LOOP_ROUTE_PROFILES:
             state_tracker.initialize_closed_loop_routes(
                 cached_state, args_cli.desired_base_height, args_cli, rng, raw_env.step_dt, route_steps
             )
@@ -977,7 +1049,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         for i in range(num_envs):
             if not args_cli.include_warmup_frames and state_tracker.steps_since_start[i] < args_cli.warmup_steps:
                 continue
-            if args_cli.route_profile == "phase_a_closed_loop":
+            if args_cli.route_profile in CLOSED_LOOP_ROUTE_PROFILES:
                 reference_pos, reference_yaw, reference_command, route_family = state_tracker.closed_loop_reference(i)
                 buffers[i].append(_make_frame(
                     cached_state, i, actions_np[i], state_tracker.current_skill_idx[i], args_cli.desired_base_height,
@@ -1002,7 +1074,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         for i in range(num_envs):
             tr = state_tracker
             command_used = cached_state["command"][i].copy()
-            if args_cli.route_profile != "phase_a_closed_loop":
+            if args_cli.route_profile not in CLOSED_LOOP_ROUTE_PROFILES:
                 tr.advance_reference(i, command_used, raw_env.step_dt)
             tr.steps_since_start[i] += 1
             tr.steps_since_resample[i] += 1
@@ -1015,7 +1087,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                     resample_command(i, skill_names[tr.current_skill_idx[i]], raw_env._commands, device, rng)
                     tr.steps_since_resample[i] = 0
                     tr.route_started[i] = True
-            elif args_cli.route_profile != "phase_a_closed_loop" and tr.steps_since_resample[i] >= resample_interval:
+            elif args_cli.route_profile not in CLOSED_LOOP_ROUTE_PROFILES and tr.steps_since_resample[i] >= resample_interval:
                 resample_command(i, skill_names[tr.current_skill_idx[i]], raw_env._commands, device, rng)
                 tr.steps_since_resample[i] = 0
 
@@ -1049,7 +1121,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                     is_fall=is_fall, sim_terminated=bool(reset_terminated_np[i]),
                     writer=writer, stats=stats, rng=rng, raw_env=raw_env, device=device,
                 )
-                if args_cli.route_profile in {"phase_a", "phase_a_closed_loop"}:
+                if args_cli.route_profile in {"phase_a", *CLOSED_LOOP_ROUTE_PROFILES}:
                     state_next["command"][i] = 0.0
                 # The cached state for a manually-reset env is now stale (pre-reset
                 # fallen state), but warmup prevents it from ever being recorded and
@@ -1066,7 +1138,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         if steps_collected % 500 == 0:
             print(f"[STATUS] sim_steps={steps_collected}, target_steps={args_cli.num_steps}, {stats.summary()}")
 
-    writer.close()
+    writer.close(stats)
     print(f"[SUCCESS] Collection complete. Demos: {writer.total_steps} steps saved to {output_path}")
     vec_env.close()
 
@@ -1163,7 +1235,7 @@ def _finalize_episode(env_idx: int, buffers: List[List[Dict[str, np.ndarray]]],
 def _reset_after_finalize(env_idx: int, tracker: CollectionState, rng: random.Random,
                           args: argparse.Namespace, raw_env: Any, device: torch.device) -> None:
     tracker.reset_env(env_idx, rng, args)
-    if args.route_profile in {"phase_a", "phase_a_closed_loop"}:
+    if args.route_profile in {"phase_a", *CLOSED_LOOP_ROUTE_PROFILES}:
         raw_env._commands[env_idx, :3] = 0.0
     else:
         resample_command(

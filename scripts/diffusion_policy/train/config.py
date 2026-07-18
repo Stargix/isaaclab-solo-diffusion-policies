@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .data.obs_utils import ACTION_HIST_DIM, GOAL_DIM, PROPRIO_DIM
-from .conditioning.goal_builder import GOAL_SCHEMA_NAME, WAYPOINT_TIME_OFFSETS_S
+from .conditioning.goal_builder import GOAL_SCHEMA_NAME, REFERENCE_GOAL_REPRESENTATIONS, WAYPOINT_TIME_OFFSETS_S
 
 
 @dataclass
@@ -23,6 +23,7 @@ class DatasetConfig:
     dt: float = 0.02
     v_req_clip: float = 2.0
     goal_source: str = "achieved"
+    goal_representation: str = "path11"
     include_padded_starts: bool = False
     startup_sample_multiplier: int = 1
     symmetry_mode: str = "quadruped"
@@ -107,6 +108,7 @@ TRAINING_CONFIG_KEYS = frozenset(
         "step_stride",
         "v_req_clip",
         "goal_source",
+        "goal_representation",
         "include_padded_starts",
         "startup_sample_multiplier",
         "symmetry_mode",

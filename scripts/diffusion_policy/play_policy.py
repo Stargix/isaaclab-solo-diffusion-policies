@@ -80,7 +80,7 @@ from train.runtime.checkpoint import load_training_checkpoint
 from train.runtime.optimization import trace_denoiser
 from train.config import resolve_inference_steps
 from train.conditioning.geometry import cumulative_xy_lengths, quat_wxyz_to_rotmat, yaw_from_rotmat
-from train.conditioning.goal_builder import build_goal_batch_from_path
+from train.conditioning.goal_builder import build_goal_batch_from_path, build_holonomic_goal_batch_from_path
 from train.data.normalization import NormalizerStats
 from train.data.obs_utils import proprio_from_env_tensors
 
@@ -221,6 +221,7 @@ def run_warmup(
     dt: float,
     speed: float,
     v_req_clip: float,
+    goal_representation: str,
     device: torch.device,
 ) -> None:
     """Fill delayed history buffers with stand-hold dynamics."""
@@ -242,6 +243,7 @@ def run_warmup(
             dt=dt,
             speed=speed,
             v_req_clip=v_req_clip,
+            goal_representation=goal_representation,
             device=device,
         )
         update_delayed_buffers(
@@ -273,6 +275,7 @@ def reset_env_history(
     dt: float,
     speed: float,
     v_req_clip: float,
+    goal_representation: str,
     device: torch.device,
 ) -> None:
     """Initialize history buffers for a single environment after reset without stepping the physics simulator."""
@@ -288,6 +291,7 @@ def reset_env_history(
         dt=dt,
         speed=speed,
         v_req_clip=v_req_clip,
+        goal_representation=goal_representation,
         device=device,
     )[env_idx]
 
@@ -319,26 +323,27 @@ def compute_goals(
     dt: float,
     speed: float,
     v_req_clip: float,
+    goal_representation: str,
     device: torch.device,
 ) -> torch.Tensor:
     robot = raw_env._robot
     pos_w = robot.data.root_pos_w.cpu().numpy()
     quat_w = robot.data.root_quat_w.cpu().numpy()
-    goals = build_goal_batch_from_path(
-        path_w,
-        cumulative_lengths,
-        yaws_w,
-        pos_w,
-        quat_w,
-        goal_horizon_steps=goal_horizon_steps,
-        waypoint_time_offsets_s=waypoint_time_offsets_s,
-        dt=dt,
-        speed=speed,
-        path_progress=path_progress,
-        v_req_clip=v_req_clip,
-    )
+    if goal_representation == "holonomic_se2_32":
+        goals = build_holonomic_goal_batch_from_path(
+            path_w, cumulative_lengths, yaws_w, pos_w, quat_w,
+            goal_horizon_steps=goal_horizon_steps, dt=dt, speed=speed,
+            path_progress=path_progress,
+        )
+    else:
+        goals = build_goal_batch_from_path(
+            path_w, cumulative_lengths, yaws_w, pos_w, quat_w,
+            goal_horizon_steps=goal_horizon_steps,
+            waypoint_time_offsets_s=waypoint_time_offsets_s,
+            dt=dt, speed=speed, path_progress=path_progress, v_req_clip=v_req_clip,
+        )
     goals_tensor = torch.from_numpy(goals).to(device)
-    if getattr(args_cli, "force_walk_goal", False):
+    if getattr(args_cli, "force_walk_goal", False) and goal_representation == "path11":
         goals_tensor[:, 0] = 0.2
         goals_tensor[:, 1] = 0.0
         goals_tensor[:, 2] = 0.4
@@ -391,7 +396,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     checkpoint = load_training_checkpoint(
         checkpoint_path,
         device,
-        expected_policy_kind=("spatial_time_preview_ddpm", "spatial_reference_path_ddpm"),
+        expected_policy_kind=("spatial_time_preview_ddpm", "spatial_reference_path_ddpm", "holonomic_reference_path_ddpm"),
     )
     config_dict = checkpoint["config"]
     print(
@@ -404,6 +409,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     policy_cfg.num_inference_steps = infer_steps
     goal_horizon_steps = args_cli.goal_horizon_steps or config_dict["dataset"]["goal_horizon_steps"]
     waypoint_time_offsets_s = tuple(config_dict["dataset"]["waypoint_time_offsets_s"])
+    goal_representation = config_dict["dataset"].get("goal_representation", "path11")
 
     policy = Solo12DiffusionPolicy(policy_cfg)
     policy.load_state_dict(checkpoint["ema_model_state_dict"])
@@ -492,6 +498,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         dt=dt,
         speed=args_cli.desired_speed,
         v_req_clip=v_req_clip,
+        goal_representation=goal_representation,
         device=device,
     )
 
@@ -539,6 +546,10 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 # Verify that the goal is in distribution before running inference
                 latest_goal = goal_buffer[:, -1]
                 for env_idx in range(num_envs):
+                    if goal_representation == "holonomic_se2_32":
+                        assert torch.isfinite(latest_goal[env_idx]).all(), f"Env {env_idx}: non-finite goal"
+                        assert latest_goal[env_idx].abs().max().item() < 5.0, f"Env {env_idx}: implausibly large route context"
+                        continue
                     dx = latest_goal[env_idx, 6].item()
                     target_height = latest_goal[env_idx, 8].item()
                     v_req = latest_goal[env_idx, 10].item()
@@ -588,6 +599,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 dt=dt,
                 speed=args_cli.desired_speed,
                 v_req_clip=v_req_clip,
+                goal_representation=goal_representation,
                 device=device,
             )
             _, _, dones, _ = vec_env.step(action_step)
@@ -629,6 +641,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                         dt=dt,
                         speed=args_cli.desired_speed,
                         v_req_clip=v_req_clip,
+                        goal_representation=goal_representation,
                         device=device,
                     )
 
@@ -643,9 +656,14 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             robot_z = robot_pos[2]
             goal_z = goal_zscore(current_goal[0], normalizer_stats)
             z_max = float(goal_z.abs().max().item())
-            target_dx = current_goal[0, 6].item()
-            target_height = current_goal[0, 8].item()
-            v_req_val = current_goal[0, 10].item()
+            if goal_representation == "holonomic_se2_32":
+                target_dx = current_goal[0, 24].item()
+                target_height = current_goal[0, 25].item()
+                v_req_val = float(torch.linalg.vector_norm(current_goal[0, 28:30]).item())
+            else:
+                target_dx = current_goal[0, 6].item()
+                target_height = current_goal[0, 8].item()
+                v_req_val = current_goal[0, 10].item()
             mode_str = "CROUCHING" if robot_z < 0.20 else "WALKING"
             dist_rem = float(np.linalg.norm(path_plan.path_w[-1, :2] - robot_pos[:2]))
             infer_per_step = infer_ms / max(1, args_cli.exec_horizon)

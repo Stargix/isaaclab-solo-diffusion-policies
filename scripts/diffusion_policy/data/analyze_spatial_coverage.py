@@ -15,7 +15,10 @@ import numpy as np
 _PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_PACKAGE_ROOT))
 
-from train.conditioning.goal_builder import GOAL_SCHEMA_NAME, REFERENCE_GOAL_SCHEMA_NAME, WAYPOINT_TIME_OFFSETS_S
+from train.conditioning.goal_builder import (
+    GOAL_SCHEMA_NAME, REFERENCE_GOAL_SCHEMA_NAME, HOLONOMIC_REFERENCE_GOAL_SCHEMA_NAME,
+    REFERENCE_GOAL_REPRESENTATIONS, WAYPOINT_TIME_OFFSETS_S,
+)
 from train.data.dataset import SpatialHindsightDataset
 
 
@@ -42,9 +45,9 @@ def sha256(path: str | Path) -> str:
     return digest.hexdigest().upper()
 
 
-def feature_stats(values: np.ndarray) -> dict[str, dict[str, float]]:
+def feature_stats(values: np.ndarray, feature_names: tuple[str, ...]) -> dict[str, dict[str, float]]:
     output = {}
-    for index, name in enumerate(FEATURE_NAMES):
+    for index, name in enumerate(feature_names):
         column = values[:, index]
         output[name] = {
             "min": float(np.min(column)),
@@ -132,6 +135,62 @@ def make_plots(values: np.ndarray, output: Path) -> None:
     plt.close(figure)
 
 
+def holonomic_feature_names() -> tuple[str, ...]:
+    names = []
+    for time_s in (0.5, 1.0, 1.5, 2.0):
+        prefix = f"t{time_s:.1f}".replace(".", "p")
+        names.extend((
+            f"{prefix}_x", f"{prefix}_y", f"{prefix}_sin_dyaw", f"{prefix}_cos_dyaw",
+            f"{prefix}_vx_ref", f"{prefix}_vy_ref", f"{prefix}_wz_ref", f"{prefix}_tau",
+        ))
+    return tuple(names)
+
+
+def holonomic_derived(values: np.ndarray) -> dict[str, float]:
+    tokens = values.reshape(-1, 4, 8)
+    distances = np.linalg.norm(tokens[:, :, :2], axis=-1)
+    speed = np.linalg.norm(tokens[:, :, 4:6], axis=-1)
+    heading = np.arctan2(tokens[:, :, 2], tokens[:, :, 3])
+    return {
+        "terminal_distance_p05_m": float(np.percentile(distances[:, -1], 5)),
+        "terminal_distance_p50_m": float(np.percentile(distances[:, -1], 50)),
+        "terminal_distance_p95_m": float(np.percentile(distances[:, -1], 95)),
+        "lateral_velocity_nonzero_fraction": float(np.mean(np.abs(tokens[:, :, 5]) > 0.02)),
+        "reverse_velocity_fraction": float(np.mean(tokens[:, :, 4] < -0.02)),
+        "diagonal_velocity_fraction": float(np.mean((np.abs(tokens[:, :, 4]) > 0.02) & (np.abs(tokens[:, :, 5]) > 0.02))),
+        "abs_heading_p95_rad": float(np.percentile(np.abs(heading), 95)),
+        "abs_wz_p95_rad_s": float(np.percentile(np.abs(tokens[:, :, 6]), 95)),
+        "speed_p95_m_s": float(np.percentile(speed, 95)),
+    }
+
+
+def make_holonomic_plots(values: np.ndarray, output: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    tokens = values.reshape(-1, 4, 8)
+    figure, axes = plt.subplots(2, 2, figsize=(11, 8))
+    terminal = tokens[:, -1]
+    axes[0, 0].scatter(terminal[:, 0], terminal[:, 1], s=4, alpha=0.2)
+    axes[0, 0].set(title="Terminal XY support", xlabel="x [m]", ylabel="y [m]")
+    axes[0, 0].axis("equal")
+    axes[0, 1].scatter(terminal[:, 4], terminal[:, 5], c=terminal[:, 6], s=4, alpha=0.2)
+    axes[0, 1].set(title="Terminal reference velocity", xlabel="vx [m/s]", ylabel="vy [m/s]")
+    axes[0, 1].axis("equal")
+    heading = np.arctan2(tokens[:, :, 2], tokens[:, :, 3]).reshape(-1)
+    axes[1, 0].hist(heading, bins=60)
+    axes[1, 0].set(title="Preview heading support", xlabel="delta yaw [rad]", ylabel="count")
+    axes[1, 1].boxplot(np.linalg.norm(tokens[:, :, 4:6], axis=-1), tick_labels=("0.5s", "1.0s", "1.5s", "2.0s"), showfliers=False)
+    axes[1, 1].set(title="Reference speed by preview", ylabel="speed [m/s]")
+    for axis in axes.flat:
+        axis.grid(True, alpha=0.2)
+    figure.tight_layout()
+    figure.savefig(output / "holonomic_goal_coverage.png", dpi=180)
+    plt.close(figure)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--datasets", nargs="+", required=True)
@@ -140,6 +199,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--goal_horizon_steps", type=int, default=100)
     parser.add_argument("--goal_source", choices=["achieved", "reference"], default="achieved")
+    parser.add_argument("--goal_representation", choices=REFERENCE_GOAL_REPRESENTATIONS, default="path11")
     parser.add_argument("--include_padded_starts", action="store_true")
     parser.add_argument("--startup_sample_multiplier", type=int, default=1)
     args = parser.parse_args()
@@ -151,6 +211,7 @@ def main() -> None:
         goal_horizon_steps=args.goal_horizon_steps,
         waypoint_time_offsets_s=WAYPOINT_TIME_OFFSETS_S,
         goal_source=args.goal_source,
+        goal_representation=args.goal_representation,
         include_padded_starts=args.include_padded_starts,
         startup_sample_multiplier=args.startup_sample_multiplier,
         symmetry_mode="none",
@@ -171,23 +232,32 @@ def main() -> None:
             name = dataset.skill_names[skill_id]
         skill_demo_counts[name] = skill_demo_counts.get(name, 0) + 1
 
+    holonomic = args.goal_representation == "holonomic_se2_32"
+    names = holonomic_feature_names() if holonomic else FEATURE_NAMES
     summary = {
-        "goal_schema": REFERENCE_GOAL_SCHEMA_NAME if args.goal_source == "reference" else GOAL_SCHEMA_NAME,
+        "goal_schema": HOLONOMIC_REFERENCE_GOAL_SCHEMA_NAME if holonomic else REFERENCE_GOAL_SCHEMA_NAME if args.goal_source == "reference" else GOAL_SCHEMA_NAME,
         "waypoint_time_offsets_s": WAYPOINT_TIME_OFFSETS_S,
         "goal_horizon_steps": args.goal_horizon_steps,
         "goal_source": args.goal_source,
+        "goal_representation": args.goal_representation,
         "control_rate_hz": 50.0,
         "datasets": {str(Path(path).resolve()): sha256(path) for path in args.datasets},
         "demos": len(dataset.demos),
         "indexed_windows": len(dataset.samples),
         "sampled_goals": sample_count,
         "skill_demo_counts": skill_demo_counts,
-        "feature_stats": feature_stats(values),
-        "derived": derived_metrics(values),
+        "feature_stats": feature_stats(values, names),
+        "derived": holonomic_derived(values) if holonomic else derived_metrics(values),
     }
     (output / "coverage_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    write_samples(output / "goal_samples.csv", values)
-    make_plots(values, output)
+    with (output / "goal_samples.csv").open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(names)
+        writer.writerows(values.tolist())
+    if holonomic:
+        make_holonomic_plots(values, output)
+    else:
+        make_plots(values, output)
     print(f"[DONE] Spatial coverage report: {output.resolve()}")
     print(json.dumps(summary["derived"], indent=2))
 

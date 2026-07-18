@@ -33,10 +33,17 @@ def main() -> None:
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--startup_hold_steps", type=int, default=25)
+    parser.add_argument(
+        "--min_survival_rate", type=float, default=0.80,
+        help="Minimum accepted/finished rollout fraction for phase_a_holonomic. "
+             "This audits the fixed proposal distribution; it is not a training filter.",
+    )
     args = parser.parse_args()
 
     if args.startup_hold_steps < 0:
         raise ValueError("--startup_hold_steps must be non-negative.")
+    if not 0.0 <= args.min_survival_rate <= 1.0:
+        raise ValueError("--min_survival_rate must be in [0, 1].")
     path = Path(args.dataset)
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -55,6 +62,15 @@ def main() -> None:
         schema_raw = data.attrs.get("reference_schema", "")
         route_profile = route_raw.decode() if isinstance(route_raw, bytes) else str(route_raw)
         reference_schema = schema_raw.decode() if isinstance(schema_raw, bytes) else str(schema_raw)
+        collection_survival_raw = data.attrs.get("collection_survival_rate", None)
+        collection_survival_rate = (
+            float(collection_survival_raw) if collection_survival_raw is not None else None
+        )
+        route_config_raw = data.attrs.get("route_generation_config_json", None)
+        route_generation_config = (
+            json.loads(route_config_raw.decode() if isinstance(route_config_raw, bytes) else str(route_config_raw))
+            if route_config_raw is not None else None
+        )
         skill_names = [item.decode() if isinstance(item, bytes) else str(item) for item in data.attrs["skill_names"]]
         if len(skill_names) != 1:
             raise ValueError(f"Phase A currently requires one expert, got skill_names={skill_names}.")
@@ -69,7 +85,7 @@ def main() -> None:
             reference_yaw = obs["reference_yaw_w"][:].astype(np.float32).reshape(-1)
             command = obs["reference_command"][:].astype(np.float32)
             recorded_command = obs["command_speed"][:].astype(np.float32)
-            is_closed_loop = route_profile == "phase_a_closed_loop"
+            is_closed_loop = route_profile in {"phase_a_closed_loop", "phase_a_holonomic"}
             if not is_closed_loop and not np.allclose(command, recorded_command, atol=1.0e-6, rtol=0.0):
                 raise ValueError(f"{demo_name}: legacy reference_command and command_speed differ.")
             if len(reference_pos) < 2:
@@ -110,6 +126,8 @@ def main() -> None:
         "dataset": str(path.resolve()),
         "route_profile": route_profile,
         "reference_schema": reference_schema,
+        "route_generation_config": route_generation_config,
+        "collection_survival_rate": collection_survival_rate,
         "demos": len(demo_lengths),
         "steps": int(sum(demo_lengths)),
         "length_p05_p50_p95": [float(np.percentile(demo_lengths, q)) for q in (5, 50, 95)],
@@ -119,13 +137,16 @@ def main() -> None:
         "stop_fraction_speed_lt_0p02": float(np.mean(speed_xy < 0.02)),
         "turn_fraction_abs_wz_gt_0p2": float(np.mean(np.abs(commands[:, 2]) > 0.2)),
         "lateral_fraction_abs_vy_gt_0p12": float(np.mean(np.abs(commands[:, 1]) > 0.12)),
+        "nominal_lateral_fraction_abs_vy_gt_0p02": float(np.mean(np.abs(commands[:, 1]) > 0.02)),
+        "nominal_reverse_fraction_vx_lt_minus_0p02": float(np.mean(commands[:, 0] < -0.02)),
+        "nominal_diagonal_fraction": float(np.mean((np.abs(commands[:, 0]) > 0.02) & (np.abs(commands[:, 1]) > 0.02))),
         "teacher_lateral_fraction_abs_vy_gt_0p02": float(np.mean(np.abs(teacher_commands[:, 1]) > 0.02)),
         "reference_integration_error_xy_max_m": float(np.max(integration)),
         "reference_integration_error_xy_p99_m": float(np.percentile(integration, 99)),
         "reference_yaw_integration_error_max_rad": float(np.max(yaw_error)),
         "reference_yaw_integration_error_p99_rad": float(np.percentile(yaw_error, 99)),
     }
-    if route_profile not in {"phase_a", "phase_a_closed_loop"}:
+    if route_profile not in {"phase_a", "phase_a_closed_loop", "phase_a_holonomic"}:
         raise ValueError(f"Expected a Phase-A route profile, got {route_profile!r}.")
     if summary["start_command_zero_fraction"] < 0.999:
         raise ValueError("Not every demo begins with a zero command; reset/start coverage is invalid.")
@@ -137,12 +158,36 @@ def main() -> None:
         raise ValueError("Reference yaw integration does not match the saved command.")
     if min(summary["stop_fraction_speed_lt_0p02"], summary["turn_fraction_abs_wz_gt_0p2"]) <= 0.0:
         raise ValueError("Phase A lacks stop or turn support in its nominal reference.")
-    if route_profile == "phase_a_closed_loop":
+    if route_profile in {"phase_a_closed_loop", "phase_a_holonomic"}:
         if summary["teacher_lateral_fraction_abs_vy_gt_0p02"] <= 0.0:
             raise ValueError("Closed-loop teacher never issued a lateral correction.")
         tracking_errors = np.concatenate(all_tracking_errors)
         summary["tracking_error_lateral_abs_p95_m"] = float(np.percentile(np.abs(tracking_errors[:, 1]), 95))
         summary["tracking_error_heading_abs_p95_rad"] = float(np.percentile(np.abs(tracking_errors[:, 2]), 95))
+    if route_profile == "phase_a_holonomic":
+        if reference_schema != "fixed_holonomic_se2_route_with_closed_loop_teacher_v3":
+            raise ValueError("Holonomic Phase A has an incompatible reference schema.")
+        if route_generation_config is None:
+            raise ValueError("Holonomic Phase A is missing its route-generation manifest.")
+        if collection_survival_rate is None or not math.isfinite(collection_survival_rate):
+            raise ValueError("Holonomic Phase A is missing collection survival statistics.")
+        if collection_survival_rate < args.min_survival_rate:
+            raise ValueError(
+                f"Holonomic proposal survival={collection_survival_rate:.3f} is below "
+                f"--min_survival_rate={args.min_survival_rate:.3f}; reduce the declared envelope "
+                "or diagnose the expert before training."
+            )
+        holonomic_support = (
+            summary["nominal_lateral_fraction_abs_vy_gt_0p02"],
+            summary["nominal_reverse_fraction_vx_lt_minus_0p02"],
+            summary["nominal_diagonal_fraction"],
+            summary["turn_fraction_abs_wz_gt_0p2"],
+        )
+        if min(holonomic_support) <= 0.02:
+            raise ValueError(
+                "Holonomic Phase A lacks lateral, reverse, diagonal or turning reference support; "
+                "do not train a holonomic route policy on it."
+            )
 
     (output / "phase_a_preflight.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps(summary, indent=2))

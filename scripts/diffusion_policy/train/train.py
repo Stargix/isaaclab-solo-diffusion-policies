@@ -42,7 +42,7 @@ if __package__ in (None, ""):
         TrainConfig,
         load_training_config_overrides,
     )
-    from train.conditioning.goal_builder import GOAL_SCHEMA_NAME, REFERENCE_GOAL_SCHEMA_NAME
+    from train.conditioning.goal_builder import GOAL_SCHEMA_NAME, REFERENCE_GOAL_SCHEMA_NAME, goal_dimension, goal_schema_name, REFERENCE_GOAL_REPRESENTATIONS
     from train.data.dataset import SpatialHindsightDataset
     from train.data.episode_split import split_episode_indices
     from train.runtime.checkpoint import load_training_checkpoint
@@ -61,7 +61,7 @@ else:  # pragma: no cover
         TrainConfig,
         load_training_config_overrides,
     )
-    from .conditioning.goal_builder import GOAL_SCHEMA_NAME, REFERENCE_GOAL_SCHEMA_NAME
+    from .conditioning.goal_builder import GOAL_SCHEMA_NAME, REFERENCE_GOAL_SCHEMA_NAME, goal_dimension, goal_schema_name, REFERENCE_GOAL_REPRESENTATIONS
     from .data.dataset import SpatialHindsightDataset
     from .data.episode_split import split_episode_indices
     from .runtime.checkpoint import load_training_checkpoint
@@ -97,6 +97,12 @@ def parse_args() -> argparse.Namespace:
         default=DATASET_DEFAULTS.waypoint_time_offsets_s,
         metavar=("T1", "T2", "T3"),
         help="Temporal preview offsets in seconds; all must precede the terminal horizon.",
+    )
+    parser.add_argument(
+        "--goal_representation",
+        choices=REFERENCE_GOAL_REPRESENTATIONS,
+        default=DATASET_DEFAULTS.goal_representation,
+        help="path11 is the legacy preview; holonomic_se2_32 exposes route position, yaw, velocity and time.",
     )
     parser.add_argument("--step_stride", type=int, default=DATASET_DEFAULTS.step_stride, help="Temporal stride to sub-sample step windows.")
     parser.add_argument("--v_req_clip", type=float, default=DATASET_DEFAULTS.v_req_clip)
@@ -188,6 +194,7 @@ def make_config(args: argparse.Namespace) -> TrainConfig:
             step_stride=args.step_stride,
             v_req_clip=args.v_req_clip,
             goal_source=args.goal_source,
+            goal_representation=args.goal_representation,
             include_padded_starts=args.include_padded_starts,
             startup_sample_multiplier=args.startup_sample_multiplier,
             symmetry_mode=args.symmetry_mode,
@@ -195,6 +202,7 @@ def make_config(args: argparse.Namespace) -> TrainConfig:
             val_fraction=args.val_fraction,
         ),
         model=ModelConfig(
+            goal_dim=goal_dimension(args.goal_representation),
             d_model=args.d_model,
             nhead=args.nhead,
             num_layers=args.num_layers,
@@ -226,9 +234,10 @@ def make_config(args: argparse.Namespace) -> TrainConfig:
         run_name=args.run_name,
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
-        schema_version=4 if is_reference else 3,
-        policy_kind="spatial_reference_path_ddpm" if is_reference else "spatial_time_preview_ddpm",
-        goal_schema=REFERENCE_GOAL_SCHEMA_NAME if is_reference else GOAL_SCHEMA_NAME,
+        schema_version=5 if args.goal_representation == "holonomic_se2_32" else 4 if is_reference else 3,
+        policy_kind=("holonomic_reference_path_ddpm" if args.goal_representation == "holonomic_se2_32"
+                     else "spatial_reference_path_ddpm" if is_reference else "spatial_time_preview_ddpm"),
+        goal_schema=goal_schema_name(args.goal_representation, reference=is_reference),
     )
 
 
@@ -374,6 +383,7 @@ def main() -> None:
         dt=cfg.dataset.dt,
         v_req_clip=cfg.dataset.v_req_clip,
         goal_source=cfg.dataset.goal_source,
+        goal_representation=cfg.dataset.goal_representation,
         include_padded_starts=cfg.dataset.include_padded_starts,
         startup_sample_multiplier=cfg.dataset.startup_sample_multiplier,
         symmetry_mode=cfg.dataset.symmetry_mode,

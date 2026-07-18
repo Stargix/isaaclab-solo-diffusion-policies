@@ -66,6 +66,13 @@ def _reflect_proprio_y(proprio_hist: torch.Tensor) -> torch.Tensor:
 
 def _reflect_goal_x(goal_hist: torch.Tensor) -> torch.Tensor:
     goal = goal_hist.clone()
+    if goal.shape[-1] == 32:
+        # Four [x, y, sin(dyaw), cos(dyaw), vx, vy, wz, tau] SE(2) tokens.
+        token = goal.reshape(*goal.shape[:-1], 4, 8)
+        token *= _device_tensor(torch.tensor([1.0, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0]), token)
+        return goal
+    if goal.shape[-1] != 11:
+        raise ValueError(f"Unsupported goal dimension for symmetry: {goal.shape[-1]}.")
     xy_sign = _device_tensor(GOAL_XY_REFLECT_X, goal)
     xyz_sign = _device_tensor(VECTOR_REFLECT_X, goal)
     goal[..., 0:2] *= xy_sign
@@ -78,6 +85,12 @@ def _reflect_goal_x(goal_hist: torch.Tensor) -> torch.Tensor:
 
 def _reflect_goal_y(goal_hist: torch.Tensor) -> torch.Tensor:
     goal = goal_hist.clone()
+    if goal.shape[-1] == 32:
+        token = goal.reshape(*goal.shape[:-1], 4, 8)
+        token *= _device_tensor(torch.tensor([-1.0, 1.0, 1.0, -1.0, -1.0, 1.0, -1.0, 1.0]), token)
+        return goal
+    if goal.shape[-1] != 11:
+        raise ValueError(f"Unsupported goal dimension for symmetry: {goal.shape[-1]}.")
     xy_sign = _device_tensor(GOAL_XY_REFLECT_Y, goal)
     xyz_sign = _device_tensor(VECTOR_REFLECT_Y, goal)
     goal[..., 0:2] *= xy_sign

@@ -62,7 +62,12 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from train.data.normalization import NormalizerStats
 from train.conditioning.geometry import cumulative_xy_lengths, quat_wxyz_to_rotmat, yaw_from_rotmat
-from train.conditioning.goal_builder import build_goal_from_path, build_goal_vector, advance_path_progress
+from train.conditioning.goal_builder import (
+    advance_path_progress,
+    build_goal_from_path,
+    build_goal_vector,
+    build_holonomic_goal_from_path,
+)
 from model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
 from train.config import resolve_inference_steps
 from train.data.obs_utils import proprio_from_env_tensors
@@ -77,6 +82,7 @@ class PathPlan:
     shape_name: str
     time_indexed: bool = False
     demo_name: str | None = None
+    reference_command_b: np.ndarray | None = None
 
 
 @dataclass
@@ -88,7 +94,9 @@ class Scenario:
     demo_name: str | None = None
 
 
-def load_reference_fragments(path: str, count: int, min_steps: int) -> list[tuple[str, np.ndarray, np.ndarray, float]]:
+def load_reference_fragments(
+    path: str, count: int, min_steps: int,
+) -> list[tuple[str, np.ndarray, np.ndarray, np.ndarray, float]]:
     fragments = []
     with h5py.File(path, "r") as file:
         for demo_name in sorted(file["data"]):
@@ -101,7 +109,7 @@ def load_reference_fragments(path: str, count: int, min_steps: int) -> list[tupl
                 continue
             command = obs["reference_command"][:] if "reference_command" in obs else obs["command_speed"][:]
             speed = float(np.mean(np.linalg.norm(command[:min_steps, :2], axis=1)))
-            fragments.append((demo_name, position, yaw, speed))
+            fragments.append((demo_name, position, yaw, command.astype(np.float32), speed))
             if len(fragments) >= count:
                 break
     if not fragments:
@@ -223,6 +231,7 @@ def compute_vectorized_goals(
     dt: float,
     v_req_clip: float,
     device: torch.device,
+    goal_representation: str,
     reference_step: int | None = None,
 ) -> torch.Tensor:
     robot = raw_env._robot
@@ -241,17 +250,34 @@ def compute_vectorized_goals(
                     goal_horizon_steps,
                     pos_w[i],
                     quat_w[i],
-                    yaws_w=plan.yaws_w,
-                    dt=dt,
-                    waypoint_time_offsets_s=waypoint_time_offsets_s,
-                    v_req_clip=v_req_clip,
+                yaws_w=plan.yaws_w,
+                dt=dt,
+                waypoint_time_offsets_s=waypoint_time_offsets_s,
+                v_req_clip=v_req_clip,
+                goal_representation=goal_representation,
+                reference_command_b=plan.reference_command_b,
                 )
             )
             continue
         start_idx = advance_path_progress(plan.path_w, pos_w[i], int(path_progress[i]))
         path_progress[i] = start_idx
-        goals.append(
-            build_goal_from_path(
+        if goal_representation == "holonomic_se2_32":
+            goals.append(
+                build_holonomic_goal_from_path(
+                    plan.path_w,
+                    plan.cumulative_lengths,
+                    plan.yaws_w,
+                    pos_w[i],
+                    quat_w[i],
+                    goal_horizon_steps=goal_horizon_steps,
+                    dt=dt,
+                    speed=speeds[i],
+                    start_idx=start_idx,
+                )
+            )
+        else:
+            goals.append(
+                build_goal_from_path(
                 plan.path_w,
                 plan.cumulative_lengths,
                 plan.yaws_w,
@@ -263,8 +289,8 @@ def compute_vectorized_goals(
                 start_idx=start_idx,
                 waypoint_time_offsets_s=waypoint_time_offsets_s,
                 v_req_clip=v_req_clip,
+                )
             )
-        )
     return torch.from_numpy(np.stack(goals, axis=0)).to(device)
 
 
@@ -330,7 +356,7 @@ def make_scenarios() -> list[Scenario]:
         )
         return [
             Scenario(index, 0, "reference_replay", speed, demo_name)
-            for index, (demo_name, _, _, speed) in enumerate(fragments)
+            for index, (demo_name, _, _, _, speed) in enumerate(fragments)
         ]
     scenarios = []
     shapes = ["straight", "circle", "s_curve"]
@@ -358,7 +384,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint = load_training_checkpoint(
-        checkpoint_path, device, expected_policy_kind=("spatial_time_preview_ddpm", "spatial_reference_path_ddpm")
+        checkpoint_path,
+        device,
+        expected_policy_kind=(
+            "spatial_time_preview_ddpm", "spatial_reference_path_ddpm", "holonomic_reference_path_ddpm",
+        ),
     )
     config = checkpoint["config"]
     inference_steps = resolve_inference_steps(args_cli.num_inference_steps, config["diffusion"])
@@ -394,6 +424,13 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     goal_horizon_steps = config["dataset"]["goal_horizon_steps"]
     waypoint_time_offsets_s = tuple(config["dataset"]["waypoint_time_offsets_s"])
     v_req_clip = config["dataset"].get("v_req_clip", 2.0)
+    goal_representation = config["dataset"].get("goal_representation", "path11")
+    if goal_representation == "holonomic_se2_32" and not args_cli.reference_replay_dataset:
+        raise ValueError(
+            "The primary holonomic evaluation must use --reference_replay_dataset from a separate "
+            "collection seed. Analytic tangent paths can be explored in play_policy, but they are "
+            "not a distribution-matched benchmark for this SE(2) route contract."
+        )
 
     # Initialize environment and get spawn points
     vec_env.reset()
@@ -413,7 +450,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         )
     for i, s in enumerate(scenarios):
         if replay_fragments is not None:
-            demo_name, stored_pos, stored_yaw, _ = replay_fragments[i]
+            demo_name, stored_pos, stored_yaw, stored_command, _ = replay_fragments[i]
             pts, yaws = align_reference_fragment(stored_pos, stored_yaw, start_pos[i], start_quat[i])
         elif s.path_shape == "straight":
             pts, yaws = build_straight_path(start_pos[i], start_quat[i])
@@ -432,6 +469,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 shape_name=s.path_shape,
                 time_indexed=replay_fragments is not None,
                 demo_name=s.demo_name,
+                reference_command_b=stored_command if replay_fragments is not None else None,
             )
         )
 
@@ -448,6 +486,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         proprio = get_proprio_30d(raw_env, joint_ids)
         goals = compute_vectorized_goals(
             raw_env, path_plans, speeds, path_progress, goal_horizon_steps, waypoint_time_offsets_s, dt, v_req_clip, device,
+            goal_representation,
             reference_step=0,
         )
         update_history(proprio_buffer, action_buffer, goal_buffer, proprio, previous_action, goals)
@@ -488,6 +527,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             proprio = get_proprio_30d(raw_env, joint_ids)
             goals = compute_vectorized_goals(
                 raw_env, path_plans, speeds, path_progress, goal_horizon_steps, waypoint_time_offsets_s, dt, v_req_clip, device,
+                goal_representation,
                 reference_step=step,
             )
             _, _, dones, _ = vec_env.step(action)
@@ -720,6 +760,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         "num_inference_steps": inference_steps,
         "exec_horizon": args_cli.exec_horizon,
         "goal_horizon_steps": goal_horizon_steps,
+        "goal_representation": goal_representation,
         "waypoint_time_offsets_s": waypoint_time_offsets_s,
         "speeds_evaluated": list(args_cli.speeds),
         "reference_replay_dataset": (
