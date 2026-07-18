@@ -3,40 +3,56 @@
 Run this after the command-only baseline. It keeps the same tested generative
 backbone and changes only the conditioning/data problem.
 
-## Phase A: walk-only reference-path tracker
+## Phase A: closed-loop reference-path teacher
 
-The first valid waypoint experiment is **walk only**. It does not train on
-achieved-future hindsight positions. Collection integrates the commanded
-`[vx, vy, wz]` in world coordinates and stores `reference_pos_w`,
-`reference_yaw_w` and `reference_command` alongside the measured robot state.
-Thus the target remains a desired route when the expert has tracking error.
+The current Phase-A experiment is **one robust crouch expert only**.  It does
+not train on achieved-future hindsight positions.  Before each rollout, the
+collector creates an immutable, dense world-frame route from a supplied command
+capability envelope.  A small feedback tracker converts route error and preview
+into `[vx, vy, wz]`, which is then consumed by the crouch RL expert.  The HDF5
+therefore stores both distinct quantities:
 
-The collector also records a zero-command reset hold, starts, stops, arcs and
-lateral phases. The Phase-A dataset loader includes padded reset samples and
-oversamples them modestly; this makes the all-zero action history used at
-deployment an explicit training condition instead of an accidental OOD state.
+- `reference_pos_w`, `reference_yaw_w`, `reference_command`: desired route and
+  its *nominal* command;
+- `command_speed`: closed-loop command actually observed by the expert;
+- `tracking_error_frenet`, `reference_progress`, route family: audit fields,
+  never hidden supervision for the diffusion student.
+
+This corrects the old Phase-A mismatch: a goal requested return to a route but
+the stored expert action only followed an open-loop velocity.  The route is
+never refitted to the achieved trajectory.  Small initial lateral/yaw offsets
+create genuine recovery examples, labelled by the same route-aware teacher.
+
+The implementation is skill-agnostic: route generation has no `walk`/`crouch`
+branch.  A future skill only needs a measured `vx/vy/wz/curvature/acceleration`
+envelope supplied through CLI flags.  The cautious crouch envelope below is the
+first validated instance, not a claim that every checkpoint can execute it.
 
 ### Collect and preflight
 
 ```powershell
 conda run --no-capture-output -n env_isaaclab python scripts/diffusion_policy/data/collect_data.py `
-  --mode single --task solo12-v0 `
-  --checkpoint checkpoints/walk_safe.pt --skill_name walk `
-  --desired_base_height 0.2932 `
-  --route_profile phase_a --command_resample_time_s 1.0 `
+  --mode single --task solo12-crouch-v0 `
+  --checkpoint checkpoints/crouch_exponential.pt --skill_name crouch `
+  --desired_base_height 0.1705 `
+  --route_profile phase_a_closed_loop `
   --startup_hold_steps 25 --include_warmup_frames `
+  --route_vx_min 0.10 --route_vx_max 0.45 `
+  --route_vy_abs_max 0.30 --route_wz_abs_max 0.50 `
+  --route_curvature_abs_max 0.90 --route_accel_abs_max 0.45 `
+  --route_initial_lateral_offset_m 0.06 --route_initial_yaw_offset_rad 0.12 `
   --num_envs 128 --num_steps 1500000 `
   --physics_dr_mode light --seed 42 `
-  --output_name walk_phase_a_reference_v1.hdf5 --headless
+  --output_name crouch_phase_a_closed_loop_v1.hdf5 --headless
 
 conda run --no-capture-output -n env_isaaclab python scripts/diffusion_policy/data/validate_phase_a_dataset.py `
-  --dataset scripts/diffusion_policy/data/datasets/walk_phase_a_reference_v1.hdf5 `
-  --output_dir scripts/diffusion_policy/data/coverage/walk_phase_a_reference_v1
+  --dataset scripts/diffusion_policy/data/datasets/crouch_phase_a_closed_loop_v1.hdf5 `
+  --output_dir scripts/diffusion_policy/data/coverage/crouch_phase_a_closed_loop_v1
 
 conda run --no-capture-output -n env_isaaclab python scripts/diffusion_policy/data/analyze_spatial_coverage.py `
-  --datasets scripts/diffusion_policy/data/datasets/walk_phase_a_reference_v1.hdf5 `
+  --datasets scripts/diffusion_policy/data/datasets/crouch_phase_a_closed_loop_v1.hdf5 `
   --goal_source reference --include_padded_starts --startup_sample_multiplier 16 `
-  --output_dir scripts/diffusion_policy/data/coverage/walk_phase_a_reference_v1_goals
+  --output_dir scripts/diffusion_policy/data/coverage/crouch_phase_a_closed_loop_v1_goals
 ```
 
 Do not merge this file with crouch data. Posture transitions are Phase B and
@@ -46,17 +62,19 @@ need a teacher that actually executes a height schedule within each episode.
 
 ```powershell
 conda run --no-capture-output -n env_isaaclab python scripts/diffusion_policy/train/train.py `
-  --datasets scripts/diffusion_policy/data/datasets/walk_phase_a_reference_v1.hdf5 `
-  --output_dir scripts/diffusion_policy/runs/phase_a_walk_reference_k10_v1 `
-  --config scripts/diffusion_policy/train/configs/phase_a_walk_reference_k10.json `
+  --datasets scripts/diffusion_policy/data/datasets/crouch_phase_a_closed_loop_v1.hdf5 `
+  --output_dir scripts/diffusion_policy/runs/phase_a_crouch_closed_loop_k10_v1 `
+  --config scripts/diffusion_policy/train/configs/phase_a_crouch_closed_loop_k10.json `
   --symmetry_mode quadruped `
-  --run_name phase_a_walk_reference_k10_v1_seed42 `
+  --run_name phase_a_crouch_closed_loop_k10_v1_seed42 `
   --wandb_project solo12-diffusion-policy
 ```
 
 The resulting checkpoint uses schema v4 / `spatial_reference_path_ddpm`; it is
-intentionally incompatible with the old achieved-hindsight run. Evaluate it on
-a constant-height straight `walk` route first, then on gentle curves.
+intentionally incompatible with the old achieved-hindsight run.  Do not launch
+the train until the validator and coverage tool complete.  First compare the
+teacher itself with the student on a straight route and then on held-out gentle
+arcs/S-curves; a low denoising loss alone is not a tracking result.
 
 ## Schema v3 contract
 

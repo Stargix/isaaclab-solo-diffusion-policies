@@ -3,10 +3,11 @@
 
 """Collect expert demonstrations from trained RSL-RL policies for Diffusion Policy training.
 
-The active schema is ``single`` expert collection. ``phase_a`` is the
-walk-only reference-path dataset: it records a command-integrated desired route
-in addition to the achieved robot trajectory. Chained posture collection is
-deliberately blocked until it has an explicit height-reference schedule.
+The active schema is ``single`` expert collection. ``phase_a_closed_loop``
+records a fixed procedural route plus the action of a route-aware command
+teacher wrapped around an existing locomotion expert.  Route generation is
+defined by a command capability envelope supplied on the command line, never by
+the name of a particular skill/checkpoint.
 
 HDF5 schema (per demo, under ``data/demo_<k>``)::
 
@@ -43,11 +44,11 @@ Alignment convention (important for the DataLoader):
 
 Example usage::
 
-    # Phase A: walk-only explicit reference path
-    python scripts/diffusion_policy/data/collect_data.py --mode single --task="solo12-v0" \
-        --checkpoint checkpoints/walk_safe.pt --skill_name walk --desired_base_height 0.2932 \
-        --route_profile phase_a --include_warmup_frames --num_envs 128 --num_steps 1500000 \
-        --output_name walk_phase_a_reference_v1.hdf5 --headless
+    # Phase A: closed-loop route teacher around a single expert
+    python scripts/diffusion_policy/data/collect_data.py --mode single --task="solo12-crouch-v0" \
+        --checkpoint checkpoints/crouch_exponential.pt --skill_name crouch --desired_base_height 0.1705 \
+        --route_profile phase_a_closed_loop --include_warmup_frames --num_envs 128 --num_steps 1000000 \
+        --output_name crouch_phase_a_closed_loop_v1.hdf5 --headless
 """
 
 import argparse
@@ -61,6 +62,17 @@ from typing import Any, Dict, List, Sequence, Tuple
 import h5py
 import numpy as np
 import torch
+
+from capability_routes import (
+    CapabilityLimits,
+    ReferenceRoute,
+    ROUTE_FAMILIES,
+    TrackerGains,
+    generate_capability_route,
+    tracking_command,
+)
+
+ROUTE_FAMILIES_TO_IDX = {name: index for index, name in enumerate(ROUTE_FAMILIES)}
 
 # --------------------------------------------------------------------------- #
 # Path setup: expose the upstream rsl_rl scripts so Hydra task resolution works.
@@ -95,27 +107,50 @@ parser.add_argument("--command_profile", choices=["native", "shared_height"], de
                     help="native: each expert's envelope; shared_height: common walk/crouch envelope for a fair posture-height ablation.")
 parser.add_argument(
     "--route_profile",
-    choices=["random_velocity", "phase_a"],
+    choices=["random_velocity", "phase_a", "phase_a_closed_loop"],
     default="random_velocity",
     help=(
-        "random_velocity preserves the legacy velocity dataset. phase_a samples walk-only "
-        "start/stop/straight/turn/lateral command phases and records an explicit route reference."
+        "random_velocity preserves the legacy velocity dataset. phase_a preserves the old "
+        "walk-only command-integrated route collector. phase_a_closed_loop generates a fixed "
+        "capability-bounded route and labels it with a route-aware command teacher."
     ),
 )
 parser.add_argument(
     "--startup_hold_steps",
     type=int,
     default=25,
-    help="phase_a: zero-command steps after each reset before the first motion phase (50 Hz).",
+    help="Phase-A route modes: zero-command steps after reset before motion (50 Hz).",
 )
 parser.add_argument(
     "--include_warmup_frames",
     action="store_true",
     help=(
-        "Keep reset/startup frames instead of discarding them. Required for phase_a so the "
+        "Keep reset/startup frames instead of discarding them. Required for Phase-A routes so the "
         "offline policy contains the padded-zero deployment history."
     ),
 )
+parser.add_argument("--route_vx_min", type=float, default=0.10,
+                    help="Closed-loop Phase A: minimum nominal forward speed (m/s).")
+parser.add_argument("--route_vx_max", type=float, default=0.45,
+                    help="Closed-loop Phase A: maximum command magnitude in x (m/s).")
+parser.add_argument("--route_vy_abs_max", type=float, default=0.30,
+                    help="Closed-loop Phase A: maximum corrective lateral command magnitude (m/s).")
+parser.add_argument("--route_wz_abs_max", type=float, default=0.50,
+                    help="Closed-loop Phase A: maximum yaw-rate command magnitude (rad/s).")
+parser.add_argument("--route_curvature_abs_max", type=float, default=0.90,
+                    help="Closed-loop Phase A: maximum nominal path curvature (1/m).")
+parser.add_argument("--route_accel_abs_max", type=float, default=0.45,
+                    help="Closed-loop Phase A: nominal longitudinal acceleration limit (m/s^2).")
+parser.add_argument("--route_initial_lateral_offset_m", type=float, default=0.06,
+                    help="Closed-loop Phase A: uniform initial reference offset magnitude (m).")
+parser.add_argument("--route_initial_yaw_offset_rad", type=float, default=0.12,
+                    help="Closed-loop Phase A: uniform initial reference yaw offset magnitude (rad).")
+parser.add_argument("--tracker_lookahead_s", type=float, default=0.45,
+                    help="Closed-loop Phase A: teacher preview horizon in seconds.")
+parser.add_argument("--tracker_longitudinal_gain", type=float, default=0.55)
+parser.add_argument("--tracker_lateral_gain", type=float, default=1.00)
+parser.add_argument("--tracker_heading_gain", type=float, default=1.15)
+parser.add_argument("--tracker_lateral_yaw_gain", type=float, default=0.65)
 parser.add_argument("--desired_base_height", type=float, required=True,
                     help="Expert's commanded base height in metres; recorded for the velocity-height baseline.")
 parser.add_argument("--min_demo_len", type=int, default=100,
@@ -588,8 +623,15 @@ class HDF5Writer:
         self._data.attrs["collection_seed"] = int(seed)
         self._data.attrs["condition_schema"] = "velocity_xyyaw_plus_desired_base_height_v1"
         self._data.attrs["desired_base_height_m"] = float(desired_base_height)
-        self._data.attrs["reference_schema"] = "command_integrated_world_route_v1"
+        self._data.attrs["reference_schema"] = (
+            "fixed_capability_route_with_closed_loop_teacher_v2"
+            if route_profile == "phase_a_closed_loop"
+            else "command_integrated_world_route_v1"
+        )
         self._data.attrs["route_profile"] = str(route_profile)
+        if route_profile == "phase_a_closed_loop":
+            self._data.attrs["route_teacher"] = "timed_preview_feedback_to_velocity_expert_v1"
+            self._data.attrs["route_family_names"] = np.array(ROUTE_FAMILIES, dtype="S32")
         self._demo_counter = 0
         self._total_steps = 0
 
@@ -609,6 +651,7 @@ class HDF5Writer:
             "joint_pos", "joint_vel", "base_ang_vel", "projected_gravity",
             "last_action", "root_pos_w", "root_quat_w", "command", "desired_base_height",
             "reference_pos_w", "reference_yaw_w", "reference_command",
+            "reference_progress", "tracking_error_frenet", "route_family_idx",
             "actions", "skill_idx",
         )
         stacked = {k: np.stack([fr[k] for fr in frames], axis=0) for k in keys}
@@ -628,6 +671,9 @@ class HDF5Writer:
         obs_grp.create_dataset("reference_pos_w", data=stacked["reference_pos_w"].astype(np.float32))
         obs_grp.create_dataset("reference_yaw_w", data=stacked["reference_yaw_w"].astype(np.float32))
         obs_grp.create_dataset("reference_command", data=stacked["reference_command"].astype(np.float32))
+        obs_grp.create_dataset("reference_progress", data=stacked["reference_progress"].astype(np.int32))
+        obs_grp.create_dataset("tracking_error_frenet", data=stacked["tracking_error_frenet"].astype(np.float32))
+        obs_grp.create_dataset("route_family_idx", data=stacked["route_family_idx"].astype(np.int8))
 
         grp.create_dataset("actions", data=stacked["actions"].astype(np.float32))
         grp.create_dataset("dones", data=self._make_dones(len(frames)))
@@ -635,6 +681,8 @@ class HDF5Writer:
 
         grp.attrs["num_samples"] = len(frames)
         grp.attrs["skills_sequence"] = np.array(skills_sequence, dtype="S32")
+        if "route_family" in frames[0]:
+            grp.attrs["route_family"] = str(frames[0]["route_family"])
 
         self._demo_counter += 1
         self._total_steps += len(frames)
@@ -691,6 +739,9 @@ class CollectionState:
         self.reference_yaw_w = np.zeros(num_envs, dtype=np.float32)
         self.reference_ready = np.zeros(num_envs, dtype=bool)
         self.route_started = np.zeros(num_envs, dtype=bool)
+        self.closed_loop_routes: List[ReferenceRoute | None] = [None] * num_envs
+        self.latest_tracking_error = np.zeros((num_envs, 3), dtype=np.float32)
+        self.latest_teacher_command = np.zeros((num_envs, 3), dtype=np.float32)
 
         # Per-env skill sequence (order of first appearance) for metadata.
         self.skill_sequences: List[List[str]] = [
@@ -710,6 +761,9 @@ class CollectionState:
         self.skill_sequences[env_idx] = [new_skill]
         self.reference_ready[env_idx] = False
         self.route_started[env_idx] = False
+        self.closed_loop_routes[env_idx] = None
+        self.latest_tracking_error[env_idx] = 0.0
+        self.latest_teacher_command[env_idx] = 0.0
 
     def initialize_references(self, state: Dict[str, np.ndarray], desired_base_height: float) -> None:
         """Anchor pending references at the reset pose before recording a frame."""
@@ -721,6 +775,73 @@ class CollectionState:
         self.reference_pos_w[pending, 2] = float(desired_base_height)
         self.reference_yaw_w[pending] = yaw_from_quat_wxyz(state["root_quat_w"][pending])
         self.reference_ready[pending] = True
+
+    def initialize_closed_loop_routes(
+        self,
+        state: Dict[str, np.ndarray],
+        desired_base_height: float,
+        args: argparse.Namespace,
+        rng: random.Random,
+        dt: float,
+        route_steps: int,
+    ) -> None:
+        """Plan pending fixed routes from the reset pose, independent of later motion."""
+
+        limits = CapabilityLimits(
+            args.route_vx_min,
+            args.route_vx_max,
+            args.route_vy_abs_max,
+            args.route_wz_abs_max,
+            args.route_curvature_abs_max,
+            args.route_accel_abs_max,
+        )
+        for env_idx, route in enumerate(self.closed_loop_routes):
+            if route is not None:
+                continue
+            self.closed_loop_routes[env_idx] = generate_capability_route(
+                start_pos_w=state["root_pos_w"][env_idx],
+                start_yaw_w=float(yaw_from_quat_wxyz(state["root_quat_w"][env_idx])),
+                desired_height=desired_base_height,
+                steps=route_steps,
+                dt=dt,
+                limits=limits,
+                rng=rng,
+                startup_hold_steps=args.startup_hold_steps,
+                initial_lateral_offset_m=args.route_initial_lateral_offset_m,
+                initial_yaw_offset_rad=args.route_initial_yaw_offset_rad,
+            )
+
+    def closed_loop_reference(self, env_idx: int) -> tuple[np.ndarray, float, np.ndarray, str]:
+        route = self.closed_loop_routes[env_idx]
+        if route is None:
+            raise RuntimeError("Closed-loop route requested before it was initialized.")
+        index = int(np.clip(self.steps_since_start[env_idx], 0, len(route.pos_w) - 1))
+        return route.pos_w[index], float(route.yaw_w[index]), route.nominal_command_b[index], route.family
+
+    def update_closed_loop_command(self, env_idx: int, state: Dict[str, np.ndarray], args: argparse.Namespace) -> None:
+        route = self.closed_loop_routes[env_idx]
+        if route is None:
+            raise RuntimeError("Closed-loop command requested before route initialization.")
+        index = int(np.clip(self.steps_since_start[env_idx], 0, len(route.pos_w) - 1))
+        # Keep an explicit settling/start token in the dataset.  Once movement
+        # begins, the command comes from feedback around the immutable reference.
+        if index < args.startup_hold_steps:
+            command = np.zeros(3, dtype=np.float32)
+            error = np.zeros(3, dtype=np.float32)
+        else:
+            limits = CapabilityLimits(
+                args.route_vx_min, args.route_vx_max, args.route_vy_abs_max,
+                args.route_wz_abs_max, args.route_curvature_abs_max, args.route_accel_abs_max,
+            )
+            gains = TrackerGains(
+                args.tracker_lookahead_s, args.tracker_longitudinal_gain,
+                args.tracker_lateral_gain, args.tracker_heading_gain, args.tracker_lateral_yaw_gain,
+            )
+            command, error = tracking_command(
+                route, index, state["root_pos_w"][env_idx], state["root_quat_w"][env_idx], limits, gains
+            )
+        self.latest_teacher_command[env_idx] = command
+        self.latest_tracking_error[env_idx] = error
 
     def advance_reference(self, env_idx: int, command_b: np.ndarray, dt: float) -> None:
         if not self.reference_ready[env_idx]:
@@ -758,9 +879,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         )
     if args_cli.route_profile == "phase_a" and args_cli.skill_name not in (None, "walk"):
         raise ValueError("phase_a is intentionally walk-only; pass --skill_name walk.")
-    if args_cli.route_profile == "phase_a" and not args_cli.include_warmup_frames:
+    if args_cli.route_profile in {"phase_a", "phase_a_closed_loop"} and not args_cli.include_warmup_frames:
         raise ValueError(
-            "phase_a requires --include_warmup_frames so reset/start action histories are represented."
+            "Phase-A route collection requires --include_warmup_frames so reset/start histories are represented."
         )
     if args_cli.startup_hold_steps < 0:
         raise ValueError("--startup_hold_steps must be non-negative.")
@@ -786,10 +907,10 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     state_tracker = CollectionState(num_envs, skill_names, args_cli, rng)
     resample_interval = max(1, int(round(args_cli.command_resample_time_s / raw_env.step_dt)))
 
-    # Initialize commands for every env. Phase A starts with an intentional
+    # Initialize commands for every env. Phase-A routes start with an intentional
     # zero-command hold; later start/stop windows are part of the dataset.
     for i in range(num_envs):
-        if args_cli.route_profile == "phase_a":
+        if args_cli.route_profile in {"phase_a", "phase_a_closed_loop"}:
             raw_env._commands[i, :3] = 0.0
         else:
             resample_command(i, skill_names[state_tracker.current_skill_idx[i]], raw_env._commands, device, rng)
@@ -811,12 +932,31 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     # Per-env frame buffers.
     buffers: List[List[Dict[str, np.ndarray]]] = [[] for _ in range(num_envs)]
 
-    obs = vec_env.get_observations()  # TensorDict; updated every iteration after step
+    obs = vec_env.get_observations()  # TensorDict; rebuilt after any command update below
     cached_state = query_raw_state(raw_env, joint_ids)  # state at t0 (post-reset)
+    route_steps = max(2, int(round(env_cfg.episode_length_s / raw_env.step_dt)))
 
     steps_collected = 0
     while writer.total_steps < args_cli.num_steps:
-        state_tracker.initialize_references(cached_state, args_cli.desired_base_height)
+        if args_cli.route_profile == "phase_a_closed_loop":
+            state_tracker.initialize_closed_loop_routes(
+                cached_state, args_cli.desired_base_height, args_cli, rng, raw_env.step_dt, route_steps
+            )
+            for i in range(num_envs):
+                state_tracker.update_closed_loop_command(i, cached_state, args_cli)
+                raw_env._commands[i, :3] = torch.as_tensor(
+                    state_tracker.latest_teacher_command[i], dtype=raw_env._commands.dtype, device=device
+                )
+            # ``cached_state`` was queried before the command write.  Update its
+            # command field as well: this exact vector is both in the expert
+            # observation and stored as command_speed alongside action_t.
+            cached_state["command"] = raw_env._commands[:, :3].detach().cpu().numpy()
+            # The RSL policy observation contains commands.  It must be rebuilt
+            # *after* writing the route-tracker command, otherwise labels are one
+            # simulator tick ahead of the observation consumed by the teacher.
+            obs = vec_env.get_observations()
+        else:
+            state_tracker.initialize_references(cached_state, args_cli.desired_base_height)
         # --- 1. Compute actions a_t from the current (time-t) policy obs. --- #
         # Single mode passes the TensorDict (matches rsl_rl play.py); chained mode
         # passes the "policy" obs tensor so it can be masked per active skill.
@@ -837,15 +977,19 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         for i in range(num_envs):
             if not args_cli.include_warmup_frames and state_tracker.steps_since_start[i] < args_cli.warmup_steps:
                 continue
-            buffers[i].append(_make_frame(
-                cached_state,
-                i,
-                actions_np[i],
-                state_tracker.current_skill_idx[i],
-                args_cli.desired_base_height,
-                state_tracker.reference_pos_w[i],
-                state_tracker.reference_yaw_w[i],
-            ))
+            if args_cli.route_profile == "phase_a_closed_loop":
+                reference_pos, reference_yaw, reference_command, route_family = state_tracker.closed_loop_reference(i)
+                buffers[i].append(_make_frame(
+                    cached_state, i, actions_np[i], state_tracker.current_skill_idx[i], args_cli.desired_base_height,
+                    reference_pos, reference_yaw, reference_command=reference_command,
+                    reference_progress=state_tracker.steps_since_start[i],
+                    tracking_error=state_tracker.latest_tracking_error[i], route_family=route_family,
+                ))
+            else:
+                buffers[i].append(_make_frame(
+                    cached_state, i, actions_np[i], state_tracker.current_skill_idx[i], args_cli.desired_base_height,
+                    state_tracker.reference_pos_w[i], state_tracker.reference_yaw_w[i],
+                ))
 
         # --- 3. Step the simulator (advances to time t+1). --- #
         obs, _, dones, _ = vec_env.step(actions)
@@ -858,7 +1002,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         for i in range(num_envs):
             tr = state_tracker
             command_used = cached_state["command"][i].copy()
-            tr.advance_reference(i, command_used, raw_env.step_dt)
+            if args_cli.route_profile != "phase_a_closed_loop":
+                tr.advance_reference(i, command_used, raw_env.step_dt)
             tr.steps_since_start[i] += 1
             tr.steps_since_resample[i] += 1
 
@@ -870,7 +1015,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                     resample_command(i, skill_names[tr.current_skill_idx[i]], raw_env._commands, device, rng)
                     tr.steps_since_resample[i] = 0
                     tr.route_started[i] = True
-            elif tr.steps_since_resample[i] >= resample_interval:
+            elif args_cli.route_profile != "phase_a_closed_loop" and tr.steps_since_resample[i] >= resample_interval:
                 resample_command(i, skill_names[tr.current_skill_idx[i]], raw_env._commands, device, rng)
                 tr.steps_since_resample[i] = 0
 
@@ -904,7 +1049,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                     is_fall=is_fall, sim_terminated=bool(reset_terminated_np[i]),
                     writer=writer, stats=stats, rng=rng, raw_env=raw_env, device=device,
                 )
-                if args_cli.route_profile == "phase_a":
+                if args_cli.route_profile in {"phase_a", "phase_a_closed_loop"}:
                     state_next["command"][i] = 0.0
                 # The cached state for a manually-reset env is now stale (pre-reset
                 # fallen state), but warmup prevents it from ever being recorded and
@@ -934,6 +1079,11 @@ def _make_frame(
     desired_base_height: float,
     reference_pos_w: np.ndarray,
     reference_yaw_w: float,
+    *,
+    reference_command: np.ndarray | None = None,
+    reference_progress: int = 0,
+    tracking_error: np.ndarray | None = None,
+    route_family: str | None = None,
 ) -> Dict[str, np.ndarray]:
     """Build an aligned recorded frame from the raw state of one env."""
     return {
@@ -948,7 +1098,13 @@ def _make_frame(
         "desired_base_height": np.asarray([desired_base_height], dtype=np.float32),
         "reference_pos_w":  np.array(reference_pos_w, dtype=np.float32),
         "reference_yaw_w":  np.asarray([reference_yaw_w], dtype=np.float32),
-        "reference_command": state["command"][env_idx],
+        "reference_command": state["command"][env_idx] if reference_command is None else reference_command,
+        "reference_progress": np.asarray([reference_progress], dtype=np.int32),
+        "tracking_error_frenet": (
+            np.zeros(3, dtype=np.float32) if tracking_error is None else np.asarray(tracking_error, dtype=np.float32)
+        ),
+        "route_family_idx": np.asarray([ROUTE_FAMILIES_TO_IDX.get(route_family, -1)], dtype=np.int8),
+        "route_family": route_family or "legacy",
         "actions":           action,
         "skill_idx":         np.int8(skill_idx),
     }
@@ -1007,7 +1163,7 @@ def _finalize_episode(env_idx: int, buffers: List[List[Dict[str, np.ndarray]]],
 def _reset_after_finalize(env_idx: int, tracker: CollectionState, rng: random.Random,
                           args: argparse.Namespace, raw_env: Any, device: torch.device) -> None:
     tracker.reset_env(env_idx, rng, args)
-    if args.route_profile == "phase_a":
+    if args.route_profile in {"phase_a", "phase_a_closed_loop"}:
         raw_env._commands[env_idx, :3] = 0.0
     else:
         resample_command(
