@@ -123,3 +123,10 @@ scripts/diffusion_policy/data/datasets/
 scripts/baseline_diffuseloco/evaluations/
 scripts/diffusion_policy/data/coverage/
 scripts/diffusion_policy/data/audits/
+
+# Local workspace links and SLURM outputs
+/sbs
+scripts/scripts
+/slurm-solo_dp-*
+/slurm_logs
+
