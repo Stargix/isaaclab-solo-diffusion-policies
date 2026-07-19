@@ -15,12 +15,14 @@ from .geometry import relative_yaw, transform_point_to_yaw_frame
 GOAL_SCHEMA_NAME = "spatial_time_preview11_v1"
 REFERENCE_GOAL_SCHEMA_NAME = "spatial_reference_path11_v1"
 HOLONOMIC_REFERENCE_GOAL_SCHEMA_NAME = "holonomic_reference_se2_32_v1"
+PATH_GUIDANCE_GOAL_SCHEMA_NAME = "path_guidance_se2_terminal36_v1"
 WAYPOINT_TIME_OFFSETS_S = (0.5, 1.0, 1.5)
 # The t=0 token makes the instantaneous cross-track/yaw error observable to
 # the student, exactly as it is to the route-tracking teacher.  The remaining
 # three previews retain the finite look-ahead needed for anticipatory control.
 HOLONOMIC_TOKEN_TIMES_S = (0.0, 0.5, 1.0, 1.5)
-REFERENCE_GOAL_REPRESENTATIONS = ("path11", "holonomic_se2_32")
+PATH_GUIDANCE_FRACTIONS = tuple(float(value) for value in np.linspace(0.0, 1.0, 7))
+REFERENCE_GOAL_REPRESENTATIONS = ("path11", "holonomic_se2_32", "path_guidance_se2_36")
 
 
 def goal_dimension(goal_representation: str) -> int:
@@ -30,6 +32,8 @@ def goal_dimension(goal_representation: str) -> int:
         return 11
     if goal_representation == "holonomic_se2_32":
         return 32
+    if goal_representation == "path_guidance_se2_36":
+        return 36
     raise ValueError(f"Unsupported goal representation {goal_representation!r}.")
 
 
@@ -40,6 +44,10 @@ def goal_schema_name(goal_representation: str, *, reference: bool) -> str:
         if not reference:
             raise ValueError("holonomic_se2_32 requires an explicit reference route.")
         return HOLONOMIC_REFERENCE_GOAL_SCHEMA_NAME
+    if goal_representation == "path_guidance_se2_36":
+        if not reference:
+            raise ValueError("path_guidance_se2_36 requires an explicit reference route.")
+        return PATH_GUIDANCE_GOAL_SCHEMA_NAME
     return REFERENCE_GOAL_SCHEMA_NAME if reference else GOAL_SCHEMA_NAME
 
 
@@ -165,6 +173,70 @@ def build_holonomic_reference_goal_vector(
     return np.asarray(values, dtype=np.float32)
 
 
+def build_path_guidance_goal_vector(
+    guidance_pos_w: np.ndarray,
+    guidance_cumulative_xy: np.ndarray,
+    reference_pos_w: np.ndarray,
+    reference_yaw_w: np.ndarray,
+    step_idx: int,
+    terminal_idx: int,
+    origin_w: np.ndarray,
+    quat_origin: np.ndarray,
+    *,
+    dt: float,
+    time_to_go_s: float | None = None,
+) -> np.ndarray:
+    """Encode fallible path context plus an authoritative terminal pose.
+
+    Seven path tokens contain ``[dir_x, dir_y, log1p(distance), arc_offset]``.
+    They are sampled uniformly in remaining guide arc length and deliberately
+    contain no reference or teacher velocity.  The last eight scalars are the
+    clean terminal SE(2) pose, height, time-to-go and stop/valid flags.
+    """
+
+    guidance = np.asarray(guidance_pos_w, dtype=np.float32)
+    cumulative = np.asarray(guidance_cumulative_xy, dtype=np.float32).reshape(-1)
+    reference = np.asarray(reference_pos_w, dtype=np.float32)
+    yaws = np.asarray(reference_yaw_w, dtype=np.float32).reshape(-1)
+    if guidance.shape != reference.shape or guidance.ndim != 2 or guidance.shape[1] != 3:
+        raise ValueError("Guidance and reference positions must share shape (T,3).")
+    if cumulative.shape != (len(guidance),) or yaws.shape != (len(reference),):
+        raise ValueError("Guidance cumulative length and reference yaw must have length T.")
+
+    step = int(np.clip(step_idx, 0, len(guidance) - 1))
+    terminal = int(np.clip(terminal_idx, step, len(guidance) - 1))
+    start_s, end_s = float(cumulative[step]), float(cumulative[terminal])
+    values: list[float] = []
+    for fraction in PATH_GUIDANCE_FRACTIONS:
+        target_s = start_s + float(fraction) * max(0.0, end_s - start_s)
+        index = int(np.searchsorted(cumulative, target_s, side="left"))
+        index = int(np.clip(index, step, terminal))
+        local = transform_point_to_yaw_frame(guidance[index], origin_w, quat_origin)[:2]
+        distance = float(np.linalg.norm(local))
+        if distance > 1.0e-6:
+            direction = local / distance
+        else:
+            direction = np.zeros(2, dtype=np.float32)
+        arc_offset = float(fraction) * max(0.0, end_s - start_s)
+        values.extend((float(direction[0]), float(direction[1]), math.log1p(distance), arc_offset))
+
+    terminal_local = transform_point_to_yaw_frame(reference[terminal], origin_w, quat_origin)
+    terminal_dyaw = relative_yaw(quat_origin, yaw_to_quat_wxyz(float(yaws[terminal])))
+    remaining = max(0.0, float(terminal - step) * float(dt)) if time_to_go_s is None else max(0.0, float(time_to_go_s))
+    guidance_terminal_error = float(np.linalg.norm(guidance[terminal, :2] - reference[terminal, :2]))
+    values.extend((
+        float(terminal_local[0]),
+        float(terminal_local[1]),
+        math.sin(float(terminal_dyaw)),
+        math.cos(float(terminal_dyaw)),
+        float(reference[terminal, 2]),
+        remaining,
+        1.0 if remaining <= 1.0e-6 else 0.0,  # terminal/hold phase
+        guidance_terminal_error,  # observable guide reliability at the endpoint
+    ))
+    return np.asarray(values, dtype=np.float32)
+
+
 def _planned_temporal_preview(
     path_w: np.ndarray,
     cumulative_xy: np.ndarray,
@@ -227,6 +299,9 @@ def build_goal_vector(
     v_req_clip: float = 2.0,
     goal_representation: str = "path11",
     reference_command_b: np.ndarray | None = None,
+    guidance_pos_w: np.ndarray | None = None,
+    guidance_cumulative_xy: np.ndarray | None = None,
+    terminal_idx: int | None = None,
 ) -> np.ndarray:
     """Build a declared goal vector shared by the DataLoader and inference."""
 
@@ -239,6 +314,20 @@ def build_goal_vector(
         return build_holonomic_reference_goal_vector(
             pos_w, step_idx, end_idx, origin_w, quat_origin,
             yaws_w=yaws_w, reference_command_b=reference_command_b, dt=dt,
+        )
+    if goal_representation == "path_guidance_se2_36":
+        if yaws_w is None or guidance_pos_w is None or guidance_cumulative_xy is None:
+            raise ValueError("path_guidance_se2_36 requires reference yaw and a stored guidance path.")
+        return build_path_guidance_goal_vector(
+            guidance_pos_w,
+            guidance_cumulative_xy,
+            pos_w,
+            yaws_w,
+            step_idx,
+            len(pos_w) - 1 if terminal_idx is None else terminal_idx,
+            origin_w,
+            quat_origin,
+            dt=dt,
         )
     if goal_representation != "path11":
         raise ValueError(f"Unsupported goal representation {goal_representation!r}.")
@@ -480,5 +569,67 @@ def build_holonomic_goal_batch_from_path(
             path_w, cumulative_xy, yaws_w, robot_pos_w[index], robot_quat_w[index],
             goal_horizon_steps=goal_horizon_steps, dt=dt, speed=speed, start_idx=start_idx,
             reference_command_b=reference_command_b,
+        ))
+    return np.stack(goals).astype(np.float32)
+
+
+def build_path_guidance_goal_from_path(
+    path_w: np.ndarray,
+    cumulative_xy: np.ndarray,
+    yaws_w: np.ndarray,
+    robot_pos_w: np.ndarray,
+    robot_quat_w: np.ndarray,
+    *,
+    speed: float,
+    start_idx: int | None = None,
+) -> np.ndarray:
+    """Deployment form of the velocity-free path-guidance contract."""
+
+    if start_idx is None:
+        start_idx = closest_path_index(path_w, robot_pos_w)
+    start = int(np.clip(start_idx, 0, len(path_w) - 1))
+    remaining_m = max(0.0, float(cumulative_xy[-1] - cumulative_xy[start]))
+    time_to_go = remaining_m / max(abs(float(speed)), 1.0e-3)
+    return build_path_guidance_goal_vector(
+        path_w,
+        cumulative_xy,
+        path_w,
+        yaws_w,
+        start,
+        len(path_w) - 1,
+        robot_pos_w,
+        robot_quat_w,
+        dt=1.0,
+        time_to_go_s=time_to_go,
+    )
+
+
+def build_path_guidance_goal_batch_from_path(
+    path_w: np.ndarray,
+    cumulative_xy: np.ndarray,
+    yaws_w: np.ndarray,
+    robot_pos_w: np.ndarray,
+    robot_quat_w: np.ndarray,
+    *,
+    speed: float,
+    path_progress: np.ndarray | None = None,
+) -> np.ndarray:
+    """Batch counterpart of :func:`build_path_guidance_goal_from_path`."""
+
+    num_envs = robot_pos_w.shape[0]
+    if path_progress is None:
+        path_progress = np.zeros(num_envs, dtype=np.int32)
+    goals = []
+    for index in range(num_envs):
+        start_idx = advance_path_progress(path_w, robot_pos_w[index], int(path_progress[index]))
+        path_progress[index] = start_idx
+        goals.append(build_path_guidance_goal_from_path(
+            path_w,
+            cumulative_xy,
+            yaws_w,
+            robot_pos_w[index],
+            robot_quat_w[index],
+            speed=speed,
+            start_idx=start_idx,
         ))
     return np.stack(goals).astype(np.float32)

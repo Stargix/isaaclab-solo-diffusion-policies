@@ -1,0 +1,109 @@
+{
+  "timestamp": "2026-07-19T04:49:21.094228",
+  "task": "solo12-v0",
+  "checkpoint": "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\checkpoints_iri\\best_holonomic.pt",
+  "checkpoint_sha256": "EE92112A41730DF161C26E582E12C93A8302156CADF4741CBDCA9FD22B976449",
+  "git_commit": "c327dd1d2659ecb27ffb1ed4a37e8e7d0ba34820",
+  "config": {
+    "dataset": {
+      "hdf5_paths": [
+        "scripts/diffusion_policy/data/datasets/crouch_phase_a_holonomic_train_v2.hdf5"
+      ],
+      "history": 8,
+      "prediction_horizon": 16,
+      "execution_offset": 8,
+      "goal_horizon_steps": 100,
+      "waypoint_time_offsets_s": [
+        0.5,
+        1.0,
+        1.5
+      ],
+      "step_stride": 1,
+      "dt": 0.02,
+      "v_req_clip": 2.0,
+      "goal_source": "reference",
+      "goal_representation": "holonomic_se2_32",
+      "include_padded_starts": false,
+      "startup_sample_multiplier": 1,
+      "symmetry_mode": "quadruped",
+      "max_stats_samples": 20000,
+      "val_fraction": 0.05
+    },
+    "model": {
+      "proprio_dim": 30,
+      "action_hist_dim": 12,
+      "goal_dim": 32,
+      "action_dim": 12,
+      "d_model": 128,
+      "nhead": 4,
+      "num_layers": 4,
+      "dim_feedforward": 512,
+      "p_drop_emb": 0.0,
+      "p_drop_attn": 0.3,
+      "separate_goal_conditioning": true
+    },
+    "diffusion": {
+      "num_train_timesteps": 10,
+      "num_inference_steps": 10,
+      "beta_start": 0.0001,
+      "beta_end": 0.02,
+      "beta_schedule": "squaredcos_cap_v2",
+      "prediction_type": "epsilon",
+      "variance_type": "fixed_small",
+      "clip_sample": true,
+      "cfg_dropout_prob": 0.0
+    },
+    "optim": {
+      "batch_size": 4096,
+      "epochs": 200,
+      "learning_rate": 0.0001,
+      "weight_decay": 0.001,
+      "grad_clip_norm": 1.0,
+      "ema_decay": 0.9999,
+      "lr_warmup_steps": 10000,
+      "num_workers": 4,
+      "seed": 42,
+      "mixed_precision": true,
+      "save_every": 10,
+      "log_every": 50
+    },
+    "output_dir": "scripts/diffusion_policy/runs/crouch_phase_a_holonomic_k10_v2",
+    "run_name": "crouch_phase_a_holonomic_k10_v2",
+    "wandb_project": "solo12-diffusion-policy",
+    "wandb_entity": null,
+    "schema_version": 5,
+    "policy_kind": "holonomic_reference_path_ddpm",
+    "goal_schema": "holonomic_reference_se2_32_v1"
+  },
+  "dataset_sha256": {
+    "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\scripts\\diffusion_policy\\data\\datasets\\crouch_phase_a_holonomic_train_v2.hdf5": "FC5C3E49CD0D2FD2BB542C600B24D0FC9A1FE02F6561A209A34D39F685C598BC"
+  },
+  "policy_kind": "holonomic_reference_path_ddpm",
+  "seed": 42,
+  "duration_s": 3.9,
+  "num_scenarios": 12,
+  "num_inference_steps": 10,
+  "exec_horizon": 8,
+  "goal_horizon_steps": 100,
+  "goal_representation": "holonomic_se2_32",
+  "waypoint_time_offsets_s": [
+    0.5,
+    1.0,
+    1.5
+  ],
+  "speeds_evaluated": [
+    0.2,
+    0.4,
+    0.6,
+    0.8,
+    1.0
+  ],
+  "reference_replay_dataset": "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\scripts\\diffusion_policy\\data\\datasets\\crouch_phase_a_holonomic_train_v2.hdf5",
+  "overall_survival_rate": 1.0,
+  "survival_by_path": {
+    "reference_replay": 1.0
+  },
+  "mean_xy_rmse_by_path": {
+    "reference_replay": 0.05852962869604977
+  }
+}

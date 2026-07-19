@@ -41,6 +41,11 @@ def _load_demo(data: h5py.Group, name: str) -> dict[str, np.ndarray | str]:
         "reference_command": obs["reference_command"][:].astype(np.float32),
         "root_quat": obs["root_quat_w"][:].astype(np.float32),
         "reference_yaw": obs["reference_yaw_w"][:].reshape(-1).astype(np.float32),
+        "guidance": (
+            obs["guidance_pos_w"][:].astype(np.float32)
+            if "guidance_pos_w" in obs
+            else obs["reference_pos_w"][:].astype(np.float32)
+        ),
     }
 
 
@@ -105,6 +110,10 @@ def main() -> None:
         axes[0, 0].plot(root[:, 0] - origin[0], root[:, 1] - origin[1],
                          color=colors[family], linestyle="--", alpha=0.45,
                          label=f"achieved {label}" if label else None)
+        if not np.allclose(np.asarray(demo["guidance"]), reference):
+            guidance = np.asarray(demo["guidance"])
+            axes[0, 0].plot(guidance[:, 0] - origin[0], guidance[:, 1] - origin[1],
+                            color=colors[family], linestyle=":", alpha=0.35)
         labelled.add(family)
     axes[0, 0].set_title("Fixed reference vs achieved XY")
     axes[0, 0].set_xlabel("x relative to robot start [m]")
@@ -120,6 +129,10 @@ def main() -> None:
                      label="reference", linewidth=2.2, color="tab:blue")
     axes[0, 1].plot(root[:, 0] - origin[0], root[:, 1] - origin[1],
                      label="achieved", linewidth=1.5, color="tab:orange")
+    guidance = np.asarray(example["guidance"])
+    if not np.allclose(guidance, reference):
+        axes[0, 1].plot(guidance[:, 0] - origin[0], guidance[:, 1] - origin[1],
+                        label="guide shown to student", linewidth=1.4, linestyle=":", color="tab:green")
     axes[0, 1].scatter(reference[0, 0] - origin[0], reference[0, 1] - origin[1], marker="o", color="tab:blue")
     axes[0, 1].scatter(root[0, 0] - origin[0], root[0, 1] - origin[1], marker="x", color="tab:orange")
     axes[0, 1].set_title(f"Example {example['name']} ({example['family']})")
@@ -151,6 +164,48 @@ def main() -> None:
     axes[1, 1].legend(fontsize=8)
     figure.savefig(output / "phase_a_routes_overview.png", dpi=180)
     plt.close(figure)
+
+    guidance_demos = [demo for demo in all_demos if not np.allclose(demo["guidance"], demo["reference"])]
+    if guidance_demos:
+        figure, axes = plt.subplots(2, 2, figsize=(14, 10), constrained_layout=True)
+        for demo in selected:
+            root = np.asarray(demo["root"])
+            reference = np.asarray(demo["reference"])
+            guide = np.asarray(demo["guidance"])
+            origin = root[0, :2]
+            axes[0, 0].plot(reference[:, 0] - origin[0], reference[:, 1] - origin[1], color="tab:blue", alpha=0.30)
+            axes[0, 0].plot(guide[:, 0] - origin[0], guide[:, 1] - origin[1], color="tab:green", linestyle=":", alpha=0.45)
+        axes[0, 0].set_title("Executable task (blue) and imperfect guide (green)")
+        axes[0, 0].axis("equal")
+
+        demo = guidance_demos[0]
+        root = np.asarray(demo["root"])
+        reference = np.asarray(demo["reference"])
+        guide = np.asarray(demo["guidance"])
+        origin = root[0, :2]
+        axes[0, 1].plot(reference[:, 0] - origin[0], reference[:, 1] - origin[1], label="task", color="tab:blue")
+        axes[0, 1].plot(guide[:, 0] - origin[0], guide[:, 1] - origin[1], label="noisy guide", color="tab:green", linestyle=":")
+        axes[0, 1].plot(root[:, 0] - origin[0], root[:, 1] - origin[1], label="achieved", color="tab:orange", linestyle="--")
+        axes[0, 1].set_title(f"Example {demo['name']}")
+        axes[0, 1].axis("equal")
+        axes[0, 1].legend()
+
+        time = np.arange(len(reference), dtype=np.float32) * 0.02
+        noise = np.linalg.norm(guide[:, :2] - reference[:, :2], axis=-1)
+        axes[1, 0].plot(time, noise, color="tab:purple")
+        axes[1, 0].set(title="Dense guidance corruption", xlabel="time [s]", ylabel="XY mismatch [m]")
+        all_noise = np.concatenate([
+            np.linalg.norm(np.asarray(item["guidance"])[:, :2] - np.asarray(item["reference"])[:, :2], axis=-1)
+            for item in all_demos
+        ])
+        axes[1, 1].hist(all_noise, bins=60, color="tab:purple")
+        axes[1, 1].set(title="Guide-noise coverage", xlabel="XY mismatch [m]", ylabel="count")
+        for axis in axes.flat:
+            axis.set_xlabel(axis.get_xlabel() or "x relative to robot start [m]")
+            axis.set_ylabel(axis.get_ylabel() or "y relative to robot start [m]")
+            axis.grid(alpha=0.2)
+        figure.savefig(output / "path_guidance_routes_overview.png", dpi=180)
+        plt.close(figure)
 
     counts_json = {family: int(counts[family]) for family in families}
     (output / "route_family_counts.json").write_text(json.dumps(counts_json, indent=2), encoding="utf-8")

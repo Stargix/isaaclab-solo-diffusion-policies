@@ -79,6 +79,9 @@ class ReferenceRoute:
     nominal_command_b: np.ndarray  # (T, 3), command that integrates pos[t] -> pos[t+1]
     family: str
     dt: float
+    guidance_pos_w: np.ndarray | None = None  # optional imperfect path shown to the student
+    task_waypoints_w: np.ndarray | None = None
+    guidance_waypoints_w: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         if self.pos_w.ndim != 2 or self.pos_w.shape[1] != 3:
@@ -89,10 +92,23 @@ class ReferenceRoute:
             raise ValueError("nominal_command_b must have shape (T, 3).")
         if len(self.pos_w) < 2 or self.dt <= 0.0:
             raise ValueError("A route needs at least two samples and a positive dt.")
+        if self.guidance_pos_w is not None and self.guidance_pos_w.shape != self.pos_w.shape:
+            raise ValueError("guidance_pos_w must have the same shape as pos_w.")
+        for name, value in (
+            ("task_waypoints_w", self.task_waypoints_w),
+            ("guidance_waypoints_w", self.guidance_waypoints_w),
+        ):
+            if value is not None and (value.ndim != 2 or value.shape[1] != 3):
+                raise ValueError(f"{name} must have shape (K, 3).")
 
 
 TANGENT_ROUTE_FAMILIES = ("straight", "arc_left", "arc_right", "s_curve", "stop_go")
-ROUTE_FAMILIES = (*TANGENT_ROUTE_FAMILIES, "holonomic_se2_stratified")
+ROUTE_FAMILIES = (
+    *TANGENT_ROUTE_FAMILIES,
+    "holonomic_se2_stratified",
+    "waypoint_bridge_clean_guidance",
+    "waypoint_bridge_noisy_guidance",
+)
 
 
 def _sample_family(rng: random.Random) -> str:
@@ -346,6 +362,216 @@ def generate_holonomic_se2_route(
         pos[t + 1, 2] = float(desired_height)
         yaw[t + 1] = float(yaw[t] + dt * wz)
     return ReferenceRoute(pos, yaw, command, "holonomic_se2_stratified", float(dt))
+
+
+def _sample_cubic_hermite(knots: np.ndarray, knot_steps: np.ndarray, steps: int) -> np.ndarray:
+    """Interpolate vector knots exactly with continuous first derivatives."""
+
+    values = np.asarray(knots, dtype=np.float64)
+    locations = np.asarray(knot_steps, dtype=np.int64)
+    if values.ndim != 2 or len(values) != len(locations) or len(values) < 2:
+        raise ValueError("Hermite interpolation needs matching (K,D) knots and K>=2 locations.")
+    if locations[0] < 0 or locations[-1] >= steps or np.any(np.diff(locations) <= 0):
+        raise ValueError("Hermite knot locations must be strictly increasing and inside the output.")
+
+    tangent = np.zeros_like(values)
+    for index in range(1, len(values) - 1):
+        span = float(locations[index + 1] - locations[index - 1])
+        tangent[index] = (values[index + 1] - values[index - 1]) / span
+
+    output = np.empty((steps, values.shape[1]), dtype=np.float64)
+    output[: locations[0] + 1] = values[0]
+    output[locations[-1] :] = values[-1]
+    for index in range(len(values) - 1):
+        lo, hi = int(locations[index]), int(locations[index + 1])
+        duration = float(hi - lo)
+        u = np.arange(hi - lo + 1, dtype=np.float64) / duration
+        h00 = 2.0 * u**3 - 3.0 * u**2 + 1.0
+        h10 = u**3 - 2.0 * u**2 + u
+        h01 = -2.0 * u**3 + 3.0 * u**2
+        h11 = u**3 - u**2
+        output[lo : hi + 1] = (
+            h00[:, None] * values[index]
+            + h10[:, None] * duration * tangent[index]
+            + h01[:, None] * values[index + 1]
+            + h11[:, None] * duration * tangent[index + 1]
+        )
+    return output.astype(np.float32)
+
+
+def _commands_from_pose_reference(pos_w: np.ndarray, yaw_w: np.ndarray, dt: float) -> np.ndarray:
+    """Derive the exact body twist which integrates one sampled pose into the next."""
+
+    command = np.zeros((len(pos_w), 3), dtype=np.float32)
+    delta_w = (pos_w[1:, :2] - pos_w[:-1, :2]) / float(dt)
+    cos_yaw, sin_yaw = np.cos(yaw_w[:-1]), np.sin(yaw_w[:-1])
+    command[:-1, 0] = cos_yaw * delta_w[:, 0] + sin_yaw * delta_w[:, 1]
+    command[:-1, 1] = -sin_yaw * delta_w[:, 0] + cos_yaw * delta_w[:, 1]
+    command[:-1, 2] = wrap_to_pi(yaw_w[1:] - yaw_w[:-1]) / float(dt)
+    return command
+
+
+def _waypoint_route_is_feasible(command: np.ndarray, limits: CapabilityLimits, dt: float) -> bool:
+    limit = np.asarray((limits.vx_max, limits.vy_abs_max, limits.wz_abs_max), dtype=np.float32)
+    if np.any(np.abs(command) > limit[None, :] + 1.0e-5):
+        return False
+    acceleration = np.diff(command[:, :2], axis=0) / float(dt)
+    return bool(np.max(np.abs(acceleration), initial=0.0) <= limits.acceleration_abs_max + 1.0e-4)
+
+
+def _bounded_xy_noise(rng: random.Random, std_m: float, max_m: float) -> np.ndarray:
+    if std_m <= 0.0 or max_m <= 0.0:
+        return np.zeros(2, dtype=np.float32)
+    value = np.asarray((rng.gauss(0.0, std_m), rng.gauss(0.0, std_m)), dtype=np.float32)
+    norm = float(np.linalg.norm(value))
+    if norm > max_m:
+        value *= float(max_m / norm)
+    return value
+
+
+def generate_waypoint_guidance_route(
+    *,
+    start_pos_w: np.ndarray,
+    start_yaw_w: float,
+    desired_height: float,
+    steps: int,
+    dt: float,
+    limits: CapabilityLimits,
+    rng: random.Random,
+    startup_hold_steps: int,
+    terminal_hold_steps: int = 50,
+    waypoint_count_min: int = 6,
+    waypoint_count_max: int = 9,
+    path_spread_m: float = 0.16,
+    path_spread_clip_m: float = 0.28,
+    guidance_noise_std_m: float = 0.06,
+    guidance_noise_clip_m: float = 0.14,
+    clean_guidance_probability: float = 0.25,
+    final_yaw_abs_max_rad: float = 1.20,
+    initial_lateral_offset_m: float = 0.0,
+    initial_yaw_offset_rad: float = 0.0,
+    max_sampling_attempts: int = 128,
+) -> ReferenceRoute:
+    """Generate an endpoint-first geometric task and a separately corrupted guide.
+
+    The executable route is sampled in waypoint/terminal-pose space, rather
+    than by integrating random velocity knots.  The locomotion expert follows
+    this clean, dynamically filtered task.  The student instead observes an
+    independently perturbed dense guide plus the clean terminal pose.  This is
+    the behavior-cloning analogue of treating a planner path as fallible
+    context: noise never changes an already recorded action label.
+    """
+
+    limits.validate()
+    if not (4 <= waypoint_count_min <= waypoint_count_max):
+        raise ValueError("Require 4 <= waypoint_count_min <= waypoint_count_max.")
+    if min(startup_hold_steps, terminal_hold_steps) < 0:
+        raise ValueError("Startup and terminal holds must be non-negative.")
+    if startup_hold_steps + terminal_hold_steps + 20 >= steps:
+        raise ValueError("Route is too short for startup, motion and terminal hold.")
+    if not 0.0 <= clean_guidance_probability <= 1.0:
+        raise ValueError("clean_guidance_probability must be in [0, 1].")
+    if min(path_spread_m, path_spread_clip_m, guidance_noise_std_m, guidance_noise_clip_m) < 0.0:
+        raise ValueError("Waypoint spread/noise magnitudes must be non-negative.")
+
+    motion_start = int(startup_hold_steps)
+    motion_end = int(steps - terminal_hold_steps - 1)
+    motion_duration_s = float(motion_end - motion_start) * float(dt)
+    yaw_offset = rng.uniform(-initial_yaw_offset_rad, initial_yaw_offset_rad)
+    lateral_offset = rng.uniform(-initial_lateral_offset_m, initial_lateral_offset_m)
+    initial_yaw = float(start_yaw_w + yaw_offset)
+    initial_pos = np.asarray(start_pos_w, dtype=np.float32).copy()
+    initial_pos[0] += -math.sin(initial_yaw) * lateral_offset
+    initial_pos[1] += math.cos(initial_yaw) * lateral_offset
+    initial_pos[2] = float(desired_height)
+
+    selected: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None
+    for _ in range(max_sampling_attempts):
+        count = rng.randint(waypoint_count_min, waypoint_count_max)
+        knot_steps = np.linspace(motion_start, motion_end, count, dtype=np.int64)
+        alpha = np.linspace(0.0, 1.0, count, dtype=np.float32)
+
+        direction = rng.uniform(-math.pi, math.pi)
+        distance = rng.uniform(0.24, 0.48) * limits.vx_max * motion_duration_s
+        endpoint_local = distance * np.asarray((math.cos(direction), math.sin(direction)), dtype=np.float32)
+        # A low-frequency Brownian-bridge approximation produces continuous
+        # curve/S diversity without the impossible accelerations caused by
+        # independently jittering the *executable* task waypoints.  Independent
+        # corruption is reserved for the non-authoritative student guide.
+        bend = _bounded_xy_noise(rng, path_spread_m, path_spread_clip_m)
+        s_bend = _bounded_xy_noise(rng, 0.45 * path_spread_m, 0.45 * path_spread_clip_m)
+        u = np.linspace(0.0, 1.0, motion_end - motion_start + 1, dtype=np.float32)
+        phase = 10.0 * u**3 - 15.0 * u**4 + 6.0 * u**5  # minimum-jerk timing
+        task_local = phase[:, None] * endpoint_local[None, :]
+        task_local += np.sin(math.pi * phase)[:, None] * bend[None, :]
+        task_local += np.sin(2.0 * math.pi * phase)[:, None] * s_bend[None, :]
+        cos_start, sin_start = math.cos(initial_yaw), math.sin(initial_yaw)
+        pos = np.repeat(initial_pos[None, :], steps, axis=0)
+        pos[motion_start : motion_end + 1, 0] = initial_pos[0] + cos_start * task_local[:, 0] - sin_start * task_local[:, 1]
+        pos[motion_start : motion_end + 1, 1] = initial_pos[1] + sin_start * task_local[:, 0] + cos_start * task_local[:, 1]
+        pos[motion_end + 1 :] = pos[motion_end]
+        pos[:, 2] = float(desired_height)
+        task_waypoints = pos[knot_steps].copy()
+
+        final_dyaw = rng.uniform(-final_yaw_abs_max_rad, final_yaw_abs_max_rad)
+        yaw_bend = rng.uniform(-0.18, 0.18)
+        yaw = np.full(steps, initial_yaw, dtype=np.float32)
+        yaw[motion_start : motion_end + 1] = initial_yaw + phase * final_dyaw + np.sin(math.pi * phase) * yaw_bend
+        yaw[motion_end + 1 :] = yaw[motion_end]
+        yaw_knots = yaw[knot_steps].copy()
+        command = _commands_from_pose_reference(pos, yaw, dt)
+        if _waypoint_route_is_feasible(command, limits, dt):
+            selected = task_waypoints, yaw_knots, knot_steps, pos, yaw
+            break
+
+    if selected is None:
+        # Guaranteed conservative fallback.  It is preferable to a collector
+        # crash after hours of simulation and remains visible in the manifest
+        # through the same continuous task distribution/coverage plots.
+        count = waypoint_count_min
+        knot_steps = np.linspace(motion_start, motion_end, count, dtype=np.int64)
+        alpha = np.linspace(0.0, 1.0, count, dtype=np.float32)
+        direction = rng.uniform(-math.pi, math.pi)
+        distance = 0.18 * min(limits.vx_max, limits.vy_abs_max) * motion_duration_s
+        task_waypoints = np.repeat(initial_pos[None, :], count, axis=0)
+        task_waypoints[:, 0] += alpha * distance * math.cos(initial_yaw + direction)
+        task_waypoints[:, 1] += alpha * distance * math.sin(initial_yaw + direction)
+        fallback_dyaw = rng.uniform(-0.25, 0.25)
+        yaw_knots = (initial_yaw + alpha * fallback_dyaw).astype(np.float32)
+        pos = _sample_cubic_hermite(task_waypoints, knot_steps, steps)
+        yaw = _sample_cubic_hermite(yaw_knots[:, None], knot_steps, steps)[:, 0]
+        pos[:, 2] = float(desired_height)
+        selected = task_waypoints, yaw_knots, knot_steps, pos, yaw
+
+    task_waypoints, _, knot_steps, pos, yaw = selected
+    command = _commands_from_pose_reference(pos, yaw, dt)
+    if not _waypoint_route_is_feasible(command, limits, dt):
+        raise RuntimeError("The conservative waypoint-route fallback violated the capability envelope.")
+
+    clean_guidance = rng.random() < clean_guidance_probability
+    guidance_waypoints = task_waypoints.copy()
+    if not clean_guidance:
+        # Preserve the current/start anchor (information parity for recovery),
+        # but allow all future waypoints, including the guide endpoint, to be
+        # imperfect.  The explicit terminal pose supplied to the student stays
+        # clean and can therefore disagree with the contextual guide.
+        for index in range(1, len(guidance_waypoints)):
+            guidance_waypoints[index, :2] += _bounded_xy_noise(
+                rng, guidance_noise_std_m, guidance_noise_clip_m
+            )
+    guidance = _sample_cubic_hermite(guidance_waypoints, knot_steps, steps)
+    guidance[:, 2] = float(desired_height)
+    family = "waypoint_bridge_clean_guidance" if clean_guidance else "waypoint_bridge_noisy_guidance"
+    return ReferenceRoute(
+        pos.astype(np.float32),
+        yaw.astype(np.float32),
+        command.astype(np.float32),
+        family,
+        float(dt),
+        guidance_pos_w=guidance.astype(np.float32),
+        task_waypoints_w=task_waypoints.astype(np.float32),
+        guidance_waypoints_w=guidance_waypoints.astype(np.float32),
+    )
 
 
 def tracking_command(

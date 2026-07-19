@@ -102,7 +102,8 @@ def parse_args() -> argparse.Namespace:
         "--goal_representation",
         choices=REFERENCE_GOAL_REPRESENTATIONS,
         default=DATASET_DEFAULTS.goal_representation,
-        help="path11 is the legacy preview; holonomic_se2_32 exposes route position, yaw, velocity and time.",
+        help=("path11 is the legacy preview; holonomic_se2_32 exposes route position, yaw, velocity and time; "
+              "path_guidance_se2_36 uses velocity-free guide tokens plus an explicit terminal pose."),
     )
     parser.add_argument("--step_stride", type=int, default=DATASET_DEFAULTS.step_stride, help="Temporal stride to sub-sample step windows.")
     parser.add_argument("--v_req_clip", type=float, default=DATASET_DEFAULTS.v_req_clip)
@@ -234,8 +235,11 @@ def make_config(args: argparse.Namespace) -> TrainConfig:
         run_name=args.run_name,
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
-        schema_version=5 if args.goal_representation == "holonomic_se2_32" else 4 if is_reference else 3,
+        schema_version=(6 if args.goal_representation == "path_guidance_se2_36"
+                        else 5 if args.goal_representation == "holonomic_se2_32"
+                        else 4 if is_reference else 3),
         policy_kind=("holonomic_reference_path_ddpm" if args.goal_representation == "holonomic_se2_32"
+                     else "path_guidance_terminal_ddpm" if args.goal_representation == "path_guidance_se2_36"
                      else "spatial_reference_path_ddpm" if is_reference else "spatial_time_preview_ddpm"),
         goal_schema=goal_schema_name(args.goal_representation, reference=is_reference),
     )

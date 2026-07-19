@@ -67,6 +67,7 @@ from train.conditioning.goal_builder import (
     build_goal_from_path,
     build_goal_vector,
     build_holonomic_goal_from_path,
+    build_path_guidance_goal_from_path,
 )
 from model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
 from train.config import resolve_inference_steps
@@ -83,6 +84,9 @@ class PathPlan:
     time_indexed: bool = False
     demo_name: str | None = None
     reference_command_b: np.ndarray | None = None
+    guidance_w: np.ndarray | None = None
+    guidance_cumulative: np.ndarray | None = None
+    terminal_step: int | None = None
 
 
 @dataclass
@@ -96,7 +100,7 @@ class Scenario:
 
 def load_reference_fragments(
     path: str, count: int, min_steps: int,
-) -> list[tuple[str, np.ndarray, np.ndarray, np.ndarray, float]]:
+) -> list[tuple[str, np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]]:
     fragments = []
     with h5py.File(path, "r") as file:
         for demo_name in sorted(file["data"]):
@@ -108,8 +112,9 @@ def load_reference_fragments(
             if len(position) < min_steps:
                 continue
             command = obs["reference_command"][:] if "reference_command" in obs else obs["command_speed"][:]
+            guidance = obs["guidance_pos_w"][:].astype(np.float32) if "guidance_pos_w" in obs else position.copy()
             speed = float(np.mean(np.linalg.norm(command[:min_steps, :2], axis=1)))
-            fragments.append((demo_name, position, yaw, command.astype(np.float32), speed))
+            fragments.append((demo_name, position, yaw, command.astype(np.float32), guidance, speed))
             if len(fragments) >= count:
                 break
     if not fragments:
@@ -118,8 +123,9 @@ def load_reference_fragments(
 
 
 def align_reference_fragment(
-    position: np.ndarray, yaw: np.ndarray, spawn_pos: np.ndarray, spawn_quat: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
+    position: np.ndarray, yaw: np.ndarray, spawn_pos: np.ndarray, spawn_quat: np.ndarray,
+    guidance: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     source_yaw = float(yaw[0])
     target_yaw = robot_yaw_w(spawn_quat)
     angle = target_yaw - source_yaw
@@ -128,7 +134,12 @@ def align_reference_fragment(
     aligned[:, :2] = (position[:, :2] - position[0, :2]) @ rotation.T + spawn_pos[:2]
     aligned[:, 2] = position[:, 2]
     aligned_yaw = np.unwrap(yaw.astype(np.float64) - source_yaw + target_yaw).astype(np.float32)
-    return aligned, aligned_yaw
+    aligned_guidance = None
+    if guidance is not None:
+        aligned_guidance = guidance.copy()
+        aligned_guidance[:, :2] = (guidance[:, :2] - position[0, :2]) @ rotation.T + spawn_pos[:2]
+        aligned_guidance[:, 2] = guidance[:, 2]
+    return aligned, aligned_yaw, aligned_guidance
 
 
 def robot_yaw_w(quat_wxyz: np.ndarray) -> float:
@@ -242,12 +253,31 @@ def compute_vectorized_goals(
         plan = path_plans[i]
         if plan.time_indexed:
             state_step = min(int(reference_step or 0), len(plan.path_w) - 1)
+            if goal_representation == "path_guidance_se2_36":
+                if plan.guidance_w is None or plan.guidance_cumulative is None or plan.terminal_step is None:
+                    raise RuntimeError("Path-guidance replay is missing guide/terminal metadata.")
+                goals.append(build_goal_vector(
+                    plan.path_w,
+                    plan.cumulative_lengths,
+                    state_step,
+                    len(plan.path_w) - 1,
+                    pos_w[i],
+                    quat_w[i],
+                    yaws_w=plan.yaws_w,
+                    dt=dt,
+                    goal_representation=goal_representation,
+                    reference_command_b=plan.reference_command_b,
+                    guidance_pos_w=plan.guidance_w,
+                    guidance_cumulative_xy=plan.guidance_cumulative,
+                    terminal_idx=plan.terminal_step,
+                ))
+                continue
             goals.append(
                 build_goal_vector(
                     plan.path_w,
                     plan.cumulative_lengths,
                     state_step,
-                    goal_horizon_steps,
+                    min(state_step + goal_horizon_steps, len(plan.path_w) - 1),
                     pos_w[i],
                     quat_w[i],
                 yaws_w=plan.yaws_w,
@@ -261,7 +291,17 @@ def compute_vectorized_goals(
             continue
         start_idx = advance_path_progress(plan.path_w, pos_w[i], int(path_progress[i]))
         path_progress[i] = start_idx
-        if goal_representation == "holonomic_se2_32":
+        if goal_representation == "path_guidance_se2_36":
+            goals.append(build_path_guidance_goal_from_path(
+                plan.path_w,
+                plan.cumulative_lengths,
+                plan.yaws_w,
+                pos_w[i],
+                quat_w[i],
+                speed=speeds[i],
+                start_idx=start_idx,
+            ))
+        elif goal_representation == "holonomic_se2_32":
             goals.append(
                 build_holonomic_goal_from_path(
                     plan.path_w,
@@ -350,13 +390,14 @@ def _model_cfg_from_checkpoint(config_dict: dict) -> Solo12DiffusionPolicyConfig
 
 def make_scenarios() -> list[Scenario]:
     if args_cli.reference_replay_dataset:
-        minimum = max(2, int(round(args_cli.duration_s * 50.0)) + 1)
+        # For holonomic evaluation, we need at least 76 extra lookahead steps (1.52s) to prevent the goal lookahead horizon check from exceeding the reference endpoint.
+        minimum = max(2, int(round(args_cli.duration_s * 50.0)) + 76)
         fragments = load_reference_fragments(
             args_cli.reference_replay_dataset, args_cli.reference_replay_demos, minimum
         )
         return [
             Scenario(index, 0, "reference_replay", speed, demo_name)
-            for index, (demo_name, _, _, _, speed) in enumerate(fragments)
+            for index, (demo_name, _, _, _, _, speed) in enumerate(fragments)
         ]
     scenarios = []
     shapes = ["straight", "circle", "s_curve"]
@@ -388,6 +429,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         device,
         expected_policy_kind=(
             "spatial_time_preview_ddpm", "spatial_reference_path_ddpm", "holonomic_reference_path_ddpm",
+            "path_guidance_terminal_ddpm",
         ),
     )
     config = checkpoint["config"]
@@ -425,9 +467,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     waypoint_time_offsets_s = tuple(config["dataset"]["waypoint_time_offsets_s"])
     v_req_clip = config["dataset"].get("v_req_clip", 2.0)
     goal_representation = config["dataset"].get("goal_representation", "path11")
-    if goal_representation == "holonomic_se2_32" and not args_cli.reference_replay_dataset:
+    if goal_representation in {"holonomic_se2_32", "path_guidance_se2_36"} and not args_cli.reference_replay_dataset:
         raise ValueError(
-            "The primary holonomic evaluation must use --reference_replay_dataset from a separate "
+            "The primary SE(2) route evaluation must use --reference_replay_dataset from a separate "
             "collection seed. Analytic tangent paths can be explored in play_policy, but they are "
             "not a distribution-matched benchmark for this SE(2) route contract."
         )
@@ -444,14 +486,17 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
     replay_fragments = None
     if args_cli.reference_replay_dataset:
-        minimum = max(2, int(round(args_cli.duration_s / dt)) + goal_horizon_steps + 1)
+        preview_margin = 0 if goal_representation == "path_guidance_se2_36" else goal_horizon_steps
+        minimum = max(2, int(round(args_cli.duration_s / dt)) + preview_margin + 1)
         replay_fragments = load_reference_fragments(
             args_cli.reference_replay_dataset, args_cli.reference_replay_demos, minimum
         )
     for i, s in enumerate(scenarios):
         if replay_fragments is not None:
-            demo_name, stored_pos, stored_yaw, stored_command, _ = replay_fragments[i]
-            pts, yaws = align_reference_fragment(stored_pos, stored_yaw, start_pos[i], start_quat[i])
+            demo_name, stored_pos, stored_yaw, stored_command, stored_guidance, _ = replay_fragments[i]
+            pts, yaws, aligned_guidance = align_reference_fragment(
+                stored_pos, stored_yaw, start_pos[i], start_quat[i], stored_guidance
+            )
         elif s.path_shape == "straight":
             pts, yaws = build_straight_path(start_pos[i], start_quat[i])
         elif s.path_shape == "s_curve":
@@ -470,6 +515,19 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 time_indexed=replay_fragments is not None,
                 demo_name=s.demo_name,
                 reference_command_b=stored_command if replay_fragments is not None else None,
+                guidance_w=aligned_guidance if replay_fragments is not None else None,
+                guidance_cumulative=(
+                    cumulative_xy_lengths(aligned_guidance) if replay_fragments is not None else None
+                ),
+                terminal_step=(
+                    min(
+                        len(stored_command) - 1,
+                        int(np.flatnonzero(np.linalg.norm(stored_command, axis=-1) > 1.0e-4)[-1]) + 1,
+                    )
+                    if replay_fragments is not None
+                    and np.any(np.linalg.norm(stored_command, axis=-1) > 1.0e-4)
+                    else 0 if replay_fragments is not None else None
+                ),
             )
         )
 
@@ -497,7 +555,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     trajectories = {i: {"ref": [], "actual": []} for i in range(num_envs)}
     tracking_errors = []
     achieved_speeds = []
+    achieved_planar_speeds = []
     achieved_heights = []
+    achieved_yaws = []
     tilts = []
     action_deltas = []
     failures = np.zeros(num_envs, dtype=bool)
@@ -540,7 +600,10 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         projected = robot.projected_gravity_b
         tilt = torch.rad2deg(torch.asin(torch.clamp(torch.linalg.vector_norm(projected[:, :2], dim=-1), 0.0, 1.0))).cpu().numpy()
         vx = robot.root_lin_vel_b[:, 0].cpu().numpy()
+        planar_speed = torch.linalg.vector_norm(robot.root_lin_vel_b[:, :2], dim=-1).cpu().numpy()
         height = robot.root_pos_w[:, 2].cpu().numpy()
+        quat = robot.root_quat_w.cpu().numpy()
+        yaw = np.asarray([robot_yaw_w(value) for value in quat], dtype=np.float32)
         a_delta = torch.sqrt(torch.mean(torch.square(action - previous_for_delta), dim=-1)).cpu().numpy()
         previous_for_delta = action.clone()
 
@@ -563,7 +626,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
         tracking_errors.append(step_errors)
         achieved_speeds.append(vx)
+        achieved_planar_speeds.append(planar_speed)
         achieved_heights.append(height)
+        achieved_yaws.append(yaw)
         tilts.append(tilt)
         action_deltas.append(a_delta)
 
@@ -576,7 +641,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     # Process metrics
     tracking_errors = np.stack(tracking_errors, axis=0)  # [steps, num_envs]
     achieved_speeds = np.stack(achieved_speeds, axis=0)  # [steps, num_envs]
+    achieved_planar_speeds = np.stack(achieved_planar_speeds, axis=0)
     achieved_heights = np.stack(achieved_heights, axis=0)
+    achieved_yaws = np.stack(achieved_yaws, axis=0)
     tilts = np.stack(tilts, axis=0)
     action_deltas = np.stack(action_deltas, axis=0)
 
@@ -589,13 +656,32 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         
         xy_errs = tracking_errors[:, i][mask]
         speeds_ach = achieved_speeds[:, i][mask]
+        planar_speeds_ach = achieved_planar_speeds[:, i][mask]
         hgts = achieved_heights[:, i][mask]
+        yaws_ach = achieved_yaws[:, i][mask]
         tls = tilts[:, i][mask]
         adeltas = action_deltas[:, i][mask]
 
         xy_rmse = float(np.sqrt(np.mean(np.square(xy_errs)))) if xy_errs.size else math.nan
-        h_rmse = float(np.sqrt(np.mean(np.square(hgts - 0.2932)))) if hgts.size else math.nan
+        plan = path_plans[i]
+        target_height = float(plan.path_w[-1, 2])
+        h_rmse = float(np.sqrt(np.mean(np.square(hgts - target_height)))) if hgts.size else math.nan
         survived = not bool(failures[i])
+        terminal_index = plan.terminal_step if plan.time_indexed and plan.terminal_step is not None else len(plan.path_w) - 1
+        terminal_index = int(np.clip(terminal_index, 0, len(plan.path_w) - 1))
+        if trajectories[i]["actual"]:
+            final_xy = np.asarray(trajectories[i]["actual"][-1]) + start_pos[i, :2]
+            terminal_position_error = float(np.linalg.norm(final_xy - plan.path_w[terminal_index, :2]))
+        else:
+            terminal_position_error = math.nan
+        terminal_yaw_error = (
+            float(abs(np.arctan2(
+                np.sin(float(plan.yaws_w[terminal_index]) - float(yaws_ach[-1])),
+                np.cos(float(plan.yaws_w[terminal_index]) - float(yaws_ach[-1])),
+            )))
+            if yaws_ach.size else math.nan
+        )
+        hold_count = min(50, planar_speeds_ach.size)
 
         summary_rows.append({
             "scenario_id": s.scenario_id,
@@ -608,7 +694,14 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             "time_to_failure_s": float(failure_step[i] * dt) if failures[i] else args_cli.duration_s,
             "xy_rmse": xy_rmse,
             "height_rmse": h_rmse,
+            "terminal_position_error_m": terminal_position_error,
+            "terminal_yaw_error_rad": terminal_yaw_error,
+            "final_planar_speed_m_s": float(planar_speeds_ach[-1]) if planar_speeds_ach.size else math.nan,
+            "last_1s_planar_speed_mean_m_s": (
+                float(np.mean(planar_speeds_ach[-hold_count:])) if hold_count else math.nan
+            ),
             "achieved_speed_mean": float(np.mean(speeds_ach)) if speeds_ach.size else math.nan,
+            "achieved_planar_speed_mean": float(np.mean(planar_speeds_ach)) if planar_speeds_ach.size else math.nan,
             "achieved_speed_ratio": (
                 float(np.mean(speeds_ach) / s.speed) if speeds_ach.size and s.speed > 1.0e-6 else math.nan
             ),
@@ -630,46 +723,106 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    # Set premium style defaults
+    plt.style.use("seaborn-v0_8-whitegrid" if "seaborn-v0_8-whitegrid" in plt.style.available else "default")
+    plt.rcParams["font.family"] = "sans-serif"
+    plt.rcParams["font.sans-serif"] = ["Helvetica", "Arial", "DejaVu Sans"]
+    plt.rcParams["axes.edgecolor"] = "#cccccc"
+    plt.rcParams["axes.linewidth"] = 0.8
+    plt.rcParams["xtick.color"] = "#333333"
+    plt.rcParams["ytick.color"] = "#333333"
+
+    # Color Palette: Sapphire Blue, Coral Pink, Emerald, Amber, Amethyst
+    colors_list = ["#0052CC", "#FF5A5F", "#00A86B", "#FFB300", "#7B1FA2"]
+    
     # 1. Trajectory comparison plot
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
     shapes = sorted({scenario.path_shape for scenario in scenarios})
     titles = [shape.replace("_", " ").title() for shape in shapes]
-    if len(shapes) == 1:
-        axes = [axes[0]]
-    for ax, shape, title in zip(axes, shapes, titles):
-        # Plot reference path relative to start pos
-        plan = None
-        for i, s in enumerate(scenarios):
-            if s.path_shape == shape and s.repeat == 0:
-                plan = path_plans[i]
-                ref_xy = plan.path_w[:, :2] - start_pos[i, :2]
-                ax.plot(ref_xy[:, 0], ref_xy[:, 1], "k--", linewidth=2.0, label="Reference")
-                break
-        
-        # Plot actual paths for different speeds
-        for speed in sorted({scenario.speed for scenario in scenarios}):
+
+    if replay_fragments is not None:
+        # Reference replay evaluation: each scenario has a different path.
+        # Plot the first 6 scenarios in a grid to show tracking accuracy per demo.
+        num_plots = min(6, len(scenarios))
+        cols = min(3, num_plots)
+        rows = (num_plots + cols - 1) // cols
+        fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 4.5 * rows), facecolor="white")
+        if num_plots == 1:
+            axes = [axes]
+        else:
+            axes = axes.flatten()
+            
+        for i in range(num_plots):
+            ax = axes[i]
+            ax.set_facecolor("#fafafa")
+            plan = path_plans[i]
+            ref_xy = (plan.path_w[:, :2] - start_pos[i, :2])[:duration_steps]
+            act_traj = np.array(trajectories[i]["actual"])
+            
+            # Plot reference and actual
+            ax.plot(ref_xy[:, 0], ref_xy[:, 1], color="#333333", linestyle="--", linewidth=2.0, label="Reference", zorder=3)
+            ax.plot(act_traj[:, 0], act_traj[:, 1], color="#0052CC", alpha=0.9, linewidth=2.0, label="Actual", zorder=4)
+            
+            ax.set_title(f"{plan.demo_name}\n({scenarios[i].speed:.2f} m/s)", fontsize=11, fontweight="bold", pad=8, color="#222222")
+            ax.set_xlabel("Relative X [m]", fontsize=9)
+            ax.set_ylabel("Relative Y [m]", fontsize=9)
+            ax.grid(True, which="both", color="#e5e5e5", linestyle="-", linewidth=0.5, zorder=1)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.axis("equal")
+            ax.legend(fontsize=8, facecolor="white", edgecolor="#eaeaea")
+            
+        # Hide any unused subplots
+        for j in range(num_plots, len(axes)):
+            axes[j].set_visible(False)
+            
+        fig.tight_layout()
+        fig.savefig(output_dir / "trajectories.png", dpi=200)
+        plt.close(fig)
+    else:
+        # Analytic paths evaluation
+        fig, axes = plt.subplots(1, len(shapes), figsize=(5.5 * len(shapes), 5), facecolor="white")
+        if len(shapes) == 1:
+            axes = [axes]
+        for ax, shape, title in zip(axes, shapes, titles):
+            ax.set_facecolor("#fafafa")
+            # Plot reference path relative to start pos
+            plan = None
             for i, s in enumerate(scenarios):
-                if s.path_shape == shape and s.speed == speed and s.repeat == 0:
-                    act_traj = np.array(trajectories[i]["actual"])
-                    ax.plot(act_traj[:, 0], act_traj[:, 1], alpha=0.8, linewidth=1.5, label=f"{speed} m/s")
+                if s.path_shape == shape and s.repeat == 0:
+                    plan = path_plans[i]
+                    ref_xy = plan.path_w[:, :2] - start_pos[i, :2]
+                    ax.plot(ref_xy[:, 0], ref_xy[:, 1], color="#333333", linestyle="--", linewidth=2.0, label="Reference", zorder=3)
                     break
-        ax.set_title(title, fontsize=12, fontweight="bold")
-        ax.set_xlabel("Relative X [m]")
-        ax.set_ylabel("Relative Y [m]")
-        ax.grid(True, alpha=0.3)
-        ax.axis("equal")
-        ax.legend(fontsize=8)
-    fig.tight_layout()
-    fig.savefig(output_dir / "trajectories.png", dpi=180)
-    plt.close(fig)
+            
+            # Plot actual paths for different speeds
+            speeds_list = sorted(list({scenario.speed for scenario in scenarios}))
+            for speed_idx, speed in enumerate(speeds_list):
+                for i, s in enumerate(scenarios):
+                    if s.path_shape == shape and s.speed == speed and s.repeat == 0:
+                        act_traj = np.array(trajectories[i]["actual"])
+                        color = colors_list[speed_idx % len(colors_list)]
+                        ax.plot(act_traj[:, 0], act_traj[:, 1], color=color, alpha=0.9, linewidth=2.0, label=f"{speed} m/s", zorder=4)
+                        break
+            ax.set_title(title, fontsize=13, fontweight="bold", pad=12, color="#222222")
+            ax.set_xlabel("Relative X [m]", fontsize=10, labelpad=8)
+            ax.set_ylabel("Relative Y [m]", fontsize=10, labelpad=8)
+            ax.grid(True, which="both", color="#e5e5e5", linestyle="-", linewidth=0.5, zorder=1)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.axis("equal")
+            ax.legend(fontsize=9, framealpha=0.9, facecolor="white", edgecolor="#eaeaea")
+        fig.tight_layout()
+        fig.savefig(output_dir / "trajectories.png", dpi=200)
+        plt.close(fig)
 
     # 2. Tracking error and speed plot
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    palette = ("tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple")
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.5), facecolor="white")
+    palette = ("#0052CC", "#FF5A5F", "#00A86B", "#FFB300", "#7B1FA2")
     colors = {shape: palette[index % len(palette)] for index, shape in enumerate(shapes)}
     
     # Speed Tracking Accuracy
-    axes[0].plot([0.0, 1.2], [0.0, 1.2], "k--", label="Ideal")
+    axes[0].set_facecolor("#fafafa")
+    axes[0].plot([0.0, 1.2], [0.0, 1.2], color="#777777", linestyle=":", linewidth=1.5, label="Ideal Reference")
     for shape in shapes:
         subset = [r for r in summary_rows if r["path_shape"] == shape]
         speeds_req = sorted(list({r["requested_speed"] for r in subset}))
@@ -679,14 +832,30 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             vals = [r["achieved_speed_mean"] for r in subset if r["requested_speed"] == v]
             speeds_ach.append(np.mean(vals) if vals else np.nan)
             speeds_std.append(np.std(vals) if vals else np.nan)
-        axes[0].errorbar(speeds_req, speeds_ach, yerr=speeds_std, fmt="o-", color=colors[shape], capsize=3, label=shape.capitalize())
-    axes[0].set_xlabel("Requested Speed [m/s]", fontsize=10)
-    axes[0].set_ylabel("Achieved Speed [m/s]", fontsize=10)
-    axes[0].set_title("Speed Tracking Performance", fontsize=11, fontweight="bold")
-    axes[0].grid(True, alpha=0.3)
-    axes[0].legend()
+        
+        speeds_ach = np.array(speeds_ach)
+        speeds_std = np.array(speeds_std)
+        axes[0].plot(speeds_req, speeds_ach, "o-", color=colors[shape], linewidth=2.0, markersize=6, markeredgecolor="white", markeredgewidth=1.0, label=shape.replace("_", " ").title())
+        valid_mask = ~np.isnan(speeds_ach) & ~np.isnan(speeds_std)
+        if np.any(valid_mask):
+            axes[0].fill_between(
+                np.array(speeds_req)[valid_mask],
+                (speeds_ach - speeds_std)[valid_mask],
+                (speeds_ach + speeds_std)[valid_mask],
+                color=colors[shape],
+                alpha=0.15
+            )
+            
+    axes[0].set_xlabel("Requested Speed [m/s]", fontsize=10, labelpad=8)
+    axes[0].set_ylabel("Achieved Speed [m/s]", fontsize=10, labelpad=8)
+    axes[0].set_title("Speed Tracking Accuracy", fontsize=12, fontweight="bold", pad=12, color="#222222")
+    axes[0].grid(True, color="#e5e5e5", linestyle="-", linewidth=0.5)
+    axes[0].spines["top"].set_visible(False)
+    axes[0].spines["right"].set_visible(False)
+    axes[0].legend(fontsize=9, facecolor="white", edgecolor="#eaeaea")
 
     # XY Tracking Error
+    axes[1].set_facecolor("#fafafa")
     for shape in shapes:
         subset = [r for r in summary_rows if r["path_shape"] == shape]
         speeds_req = sorted(list({r["requested_speed"] for r in subset}))
@@ -696,20 +865,36 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             vals = [r["xy_rmse"] for r in subset if r["requested_speed"] == v]
             errs.append(np.mean(vals) if vals else np.nan)
             errs_std.append(np.std(vals) if vals else np.nan)
-        axes[1].errorbar(speeds_req, errs, yerr=errs_std, fmt="o-", color=colors[shape], capsize=3, label=shape.capitalize())
-    axes[1].set_xlabel("Requested Speed [m/s]", fontsize=10)
-    axes[1].set_ylabel("XY Position RMSE [m]", fontsize=10)
-    axes[1].set_title("XY Path Tracking Error vs Speed", fontsize=11, fontweight="bold")
-    axes[1].grid(True, alpha=0.3)
-    axes[1].legend()
+            
+        errs = np.array(errs)
+        errs_std = np.array(errs_std)
+        axes[1].plot(speeds_req, errs, "o-", color=colors[shape], linewidth=2.0, markersize=6, markeredgecolor="white", markeredgewidth=1.0, label=shape.replace("_", " ").title())
+        valid_mask = ~np.isnan(errs) & ~np.isnan(errs_std)
+        if np.any(valid_mask):
+            axes[1].fill_between(
+                np.array(speeds_req)[valid_mask],
+                (errs - errs_std)[valid_mask],
+                (errs + errs_std)[valid_mask],
+                color=colors[shape],
+                alpha=0.15
+            )
+            
+    axes[1].set_xlabel("Requested Speed [m/s]", fontsize=10, labelpad=8)
+    axes[1].set_ylabel("XY Position RMSE [m]", fontsize=10, labelpad=8)
+    axes[1].set_title("XY Path Tracking Error vs Speed", fontsize=12, fontweight="bold", pad=12, color="#222222")
+    axes[1].grid(True, color="#e5e5e5", linestyle="-", linewidth=0.5)
+    axes[1].spines["top"].set_visible(False)
+    axes[1].spines["right"].set_visible(False)
+    axes[1].legend(fontsize=9, facecolor="white", edgecolor="#eaeaea")
     fig.tight_layout()
-    fig.savefig(output_dir / "speed_and_tracking_error.png", dpi=180)
+    fig.savefig(output_dir / "speed_and_tracking_error.png", dpi=200)
     plt.close(fig)
 
     # 3. Survival rate & stability plot
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.5), facecolor="white")
     
     # Survival Rate
+    axes[0].set_facecolor("#fafafa")
     for shape in shapes:
         subset = [r for r in summary_rows if r["path_shape"] == shape]
         speeds_req = sorted(list({r["requested_speed"] for r in subset}))
@@ -717,15 +902,18 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         for v in speeds_req:
             rates = [r["survived"] for r in subset if r["requested_speed"] == v]
             survival.append(sum(rates) / len(rates) * 100.0)
-        axes[0].plot(speeds_req, survival, "o-", color=colors[shape], label=shape.capitalize())
-    axes[0].set_xlabel("Requested Speed [m/s]", fontsize=10)
-    axes[0].set_ylabel("Survival Rate [%]", fontsize=10)
+        axes[0].plot(speeds_req, survival, "o-", color=colors[shape], linewidth=2.0, markersize=6, markeredgecolor="white", markeredgewidth=1.0, label=shape.replace("_", " ").title())
+    axes[0].set_xlabel("Requested Speed [m/s]", fontsize=10, labelpad=8)
+    axes[0].set_ylabel("Survival Rate [%]", fontsize=10, labelpad=8)
     axes[0].set_ylim(-5, 105)
-    axes[0].set_title("Controller Survival Rate vs Speed", fontsize=11, fontweight="bold")
-    axes[0].grid(True, alpha=0.3)
-    axes[0].legend()
+    axes[0].set_title("Controller Survival Rate vs Speed", fontsize=12, fontweight="bold", pad=12, color="#222222")
+    axes[0].grid(True, color="#e5e5e5", linestyle="-", linewidth=0.5)
+    axes[0].spines["top"].set_visible(False)
+    axes[0].spines["right"].set_visible(False)
+    axes[0].legend(fontsize=9, facecolor="white", edgecolor="#eaeaea")
 
     # Walking Smoothness (Action Delta RMS)
+    axes[1].set_facecolor("#fafafa")
     for shape in shapes:
         subset = [r for r in summary_rows if r["path_shape"] == shape]
         speeds_req = sorted(list({r["requested_speed"] for r in subset}))
@@ -733,14 +921,16 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         for v in speeds_req:
             vals = [r["action_delta_rms"] for r in subset if r["requested_speed"] == v]
             jerkiness.append(np.mean(vals) if vals else np.nan)
-        axes[1].plot(speeds_req, jerkiness, "o-", color=colors[shape], label=shape.capitalize())
-    axes[1].set_xlabel("Requested Speed [m/s]", fontsize=10)
-    axes[1].set_ylabel("Action Jerkiness (RMS Delta)", fontsize=10)
-    axes[1].set_title("Gait Smoothness vs Speed", fontsize=11, fontweight="bold")
-    axes[1].grid(True, alpha=0.3)
-    axes[1].legend()
+        axes[1].plot(speeds_req, jerkiness, "o-", color=colors[shape], linewidth=2.0, markersize=6, markeredgecolor="white", markeredgewidth=1.0, label=shape.replace("_", " ").title())
+    axes[1].set_xlabel("Requested Speed [m/s]", fontsize=10, labelpad=8)
+    axes[1].set_ylabel("Action Jerkiness (RMS Delta)", fontsize=10, labelpad=8)
+    axes[1].set_title("Gait Smoothness vs Speed", fontsize=12, fontweight="bold", pad=12, color="#222222")
+    axes[1].grid(True, color="#e5e5e5", linestyle="-", linewidth=0.5)
+    axes[1].spines["top"].set_visible(False)
+    axes[1].spines["right"].set_visible(False)
+    axes[1].legend(fontsize=9, facecolor="white", edgecolor="#eaeaea")
     fig.tight_layout()
-    fig.savefig(output_dir / "survival_and_smoothness.png", dpi=180)
+    fig.savefig(output_dir / "survival_and_smoothness.png", dpi=200)
     plt.close(fig)
 
     # Write overall validation JSON summary

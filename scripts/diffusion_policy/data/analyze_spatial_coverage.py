@@ -17,6 +17,7 @@ sys.path.insert(0, str(_PACKAGE_ROOT))
 
 from train.conditioning.goal_builder import (
     GOAL_SCHEMA_NAME, REFERENCE_GOAL_SCHEMA_NAME, HOLONOMIC_REFERENCE_GOAL_SCHEMA_NAME,
+    PATH_GUIDANCE_GOAL_SCHEMA_NAME, PATH_GUIDANCE_FRACTIONS,
     HOLONOMIC_TOKEN_TIMES_S, REFERENCE_GOAL_REPRESENTATIONS, WAYPOINT_TIME_OFFSETS_S,
 )
 from train.data.dataset import SpatialHindsightDataset
@@ -196,6 +197,72 @@ def make_holonomic_plots(values: np.ndarray, output: Path) -> None:
     plt.close(figure)
 
 
+def path_guidance_feature_names() -> tuple[str, ...]:
+    names: list[str] = []
+    for index, fraction in enumerate(PATH_GUIDANCE_FRACTIONS):
+        names.extend((
+            f"guide_{index}_dir_x",
+            f"guide_{index}_dir_y",
+            f"guide_{index}_log_distance",
+            f"guide_{index}_arc_offset_fraction_{fraction:.3f}",
+        ))
+    names.extend((
+        "terminal_x", "terminal_y", "terminal_sin_dyaw", "terminal_cos_dyaw",
+        "terminal_height", "terminal_time_to_go", "terminal_phase", "guide_terminal_error",
+    ))
+    return tuple(names)
+
+
+def path_guidance_derived(values: np.ndarray) -> dict[str, float]:
+    tokens = values[:, :28].reshape(-1, 7, 4)
+    guide_distance = np.expm1(tokens[:, :, 2])
+    guide_xy = tokens[:, :, :2] * guide_distance[:, :, None]
+    terminal_xy = values[:, 28:30]
+    guide_terminal_error = np.linalg.norm(guide_xy[:, -1] - terminal_xy, axis=-1)
+    return {
+        "terminal_distance_p05_m": float(np.percentile(np.linalg.norm(terminal_xy, axis=-1), 5)),
+        "terminal_distance_p50_m": float(np.percentile(np.linalg.norm(terminal_xy, axis=-1), 50)),
+        "terminal_distance_p95_m": float(np.percentile(np.linalg.norm(terminal_xy, axis=-1), 95)),
+        "guide_endpoint_terminal_error_p50_m": float(np.percentile(guide_terminal_error, 50)),
+        "guide_endpoint_terminal_error_p95_m": float(np.percentile(guide_terminal_error, 95)),
+        "guide_endpoint_terminal_error_nonzero_fraction": float(np.mean(guide_terminal_error > 0.01)),
+        "time_to_go_p05_s": float(np.percentile(values[:, 33], 5)),
+        "time_to_go_p50_s": float(np.percentile(values[:, 33], 50)),
+        "time_to_go_p95_s": float(np.percentile(values[:, 33], 95)),
+        "terminal_hold_fraction": float(np.mean(values[:, 33] <= 1.0e-6)),
+        "terminal_phase_fraction": float(np.mean(values[:, 34] > 0.5)),
+        "declared_guide_terminal_error_p95_m": float(np.percentile(values[:, 35], 95)),
+    }
+
+
+def make_path_guidance_plots(values: np.ndarray, output: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    tokens = values[:, :28].reshape(-1, 7, 4)
+    distance = np.expm1(tokens[:, :, 2])
+    guide_xy = tokens[:, :, :2] * distance[:, :, None]
+    terminal_xy = values[:, 28:30]
+    mismatch = np.linalg.norm(guide_xy[:, -1] - terminal_xy, axis=-1)
+    figure, axes = plt.subplots(2, 2, figsize=(11, 8))
+    axes[0, 0].scatter(terminal_xy[:, 0], terminal_xy[:, 1], s=4, alpha=0.2)
+    axes[0, 0].set(title="Clean terminal-pose support", xlabel="x [m]", ylabel="y [m]")
+    axes[0, 0].axis("equal")
+    axes[0, 1].hist(mismatch, bins=60)
+    axes[0, 1].set(title="Noisy guide endpoint vs clean terminal", xlabel="XY mismatch [m]", ylabel="count")
+    axes[1, 0].boxplot(distance, tick_labels=tuple(f"{v:.2f}" for v in PATH_GUIDANCE_FRACTIONS), showfliers=False)
+    axes[1, 0].set(title="Guide distance by remaining-path fraction", xlabel="path fraction", ylabel="distance [m]")
+    axes[1, 1].hist(values[:, 33], bins=60)
+    axes[1, 1].set(title="Terminal timing and hold coverage", xlabel="time-to-go [s]", ylabel="count")
+    for axis in axes.flat:
+        axis.grid(True, alpha=0.2)
+    figure.tight_layout()
+    figure.savefig(output / "path_guidance_goal_coverage.png", dpi=180)
+    plt.close(figure)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--datasets", nargs="+", required=True)
@@ -238,11 +305,15 @@ def main() -> None:
         skill_demo_counts[name] = skill_demo_counts.get(name, 0) + 1
 
     holonomic = args.goal_representation == "holonomic_se2_32"
-    names = holonomic_feature_names() if holonomic else FEATURE_NAMES
+    path_guidance = args.goal_representation == "path_guidance_se2_36"
+    names = path_guidance_feature_names() if path_guidance else holonomic_feature_names() if holonomic else FEATURE_NAMES
     summary = {
-        "goal_schema": HOLONOMIC_REFERENCE_GOAL_SCHEMA_NAME if holonomic else REFERENCE_GOAL_SCHEMA_NAME if args.goal_source == "reference" else GOAL_SCHEMA_NAME,
+        "goal_schema": (PATH_GUIDANCE_GOAL_SCHEMA_NAME if path_guidance
+                        else HOLONOMIC_REFERENCE_GOAL_SCHEMA_NAME if holonomic
+                        else REFERENCE_GOAL_SCHEMA_NAME if args.goal_source == "reference" else GOAL_SCHEMA_NAME),
         "waypoint_time_offsets_s": WAYPOINT_TIME_OFFSETS_S,
         "holonomic_token_times_s": HOLONOMIC_TOKEN_TIMES_S if holonomic else None,
+        "path_guidance_fractions": PATH_GUIDANCE_FRACTIONS if path_guidance else None,
         "goal_horizon_steps": args.goal_horizon_steps,
         "goal_source": args.goal_source,
         "goal_representation": args.goal_representation,
@@ -253,14 +324,17 @@ def main() -> None:
         "sampled_goals": sample_count,
         "skill_demo_counts": skill_demo_counts,
         "feature_stats": feature_stats(values, names),
-        "derived": holonomic_derived(values) if holonomic else derived_metrics(values),
+        "derived": (path_guidance_derived(values) if path_guidance
+                    else holonomic_derived(values) if holonomic else derived_metrics(values)),
     }
     (output / "coverage_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     with (output / "goal_samples.csv").open("w", newline="", encoding="utf-8") as stream:
         writer = csv.writer(stream)
         writer.writerow(names)
         writer.writerows(values.tolist())
-    if holonomic:
+    if path_guidance:
+        make_path_guidance_plots(values, output)
+    elif holonomic:
         make_holonomic_plots(values, output)
     else:
         make_plots(values, output)

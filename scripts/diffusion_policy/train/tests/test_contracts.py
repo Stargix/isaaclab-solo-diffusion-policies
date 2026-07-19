@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+import random
 from pathlib import Path
 
 import h5py
@@ -13,10 +14,12 @@ import torch
 
 _PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_PACKAGE_ROOT))
+sys.path.insert(0, str(_PACKAGE_ROOT / "data"))
 
 from train.data.dataset import SpatialHindsightDataset
 from train.data.episode_split import split_episode_indices
 from train.conditioning.goal_builder import advance_path_progress, build_goal_vector
+from capability_routes import CapabilityLimits, generate_waypoint_guidance_route
 from model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
 
 
@@ -163,6 +166,84 @@ class SpatialContractTests(unittest.TestCase):
         np.testing.assert_allclose(item["actions"][8, 0], 0.0)
         # The reference curves much more than the achieved trajectory.
         self.assertGreater(float(item["goal_hist"][-1, 7]), 0.5)
+
+    def test_waypoint_generator_is_bounded_and_has_terminal_hold(self) -> None:
+        limits = CapabilityLimits(0.10, 0.45, 0.30, 0.50, 0.90, 0.45)
+        route = generate_waypoint_guidance_route(
+            start_pos_w=np.array([0.0, 0.0, 0.17], dtype=np.float32),
+            start_yaw_w=0.0,
+            desired_height=0.1705,
+            steps=300,
+            dt=0.02,
+            limits=limits,
+            rng=random.Random(7),
+            startup_hold_steps=25,
+            terminal_hold_steps=50,
+        )
+        self.assertEqual(route.pos_w.shape, (300, 3))
+        self.assertIsNotNone(route.guidance_pos_w)
+        np.testing.assert_allclose(route.nominal_command_b[:25], 0.0, atol=1e-6)
+        np.testing.assert_allclose(route.nominal_command_b[-50:], 0.0, atol=1e-6)
+        self.assertLessEqual(float(np.max(np.abs(route.nominal_command_b[:, 0]))), limits.vx_max + 1e-5)
+        self.assertLessEqual(float(np.max(np.abs(route.nominal_command_b[:, 1]))), limits.vy_abs_max + 1e-5)
+        self.assertLessEqual(float(np.max(np.abs(route.nominal_command_b[:, 2]))), limits.wz_abs_max + 1e-5)
+
+    def test_path_guidance_goal_has_no_velocity_and_indexes_terminal_hold(self) -> None:
+        with h5py.File(self.path, "r+") as file:
+            data = file["data"]
+            data.attrs["route_profile"] = "phase_a_path_guidance"
+            data.attrs["reference_schema"] = "fixed_waypoint_task_with_noisy_guidance_and_terminal_stop_v1"
+            for demo in data.values():
+                obs = demo["obs"]
+                reference = obs["reference_pos_w"][:]
+                reference[190:] = reference[190]
+                del obs["reference_pos_w"]
+                obs.create_dataset("reference_pos_w", data=reference)
+                command = obs["reference_command"][:]
+                command[190:] = 0.0
+                del obs["reference_command"]
+                obs.create_dataset("reference_command", data=command)
+                guidance = reference.copy()
+                guidance[:, 1] += 0.04 * np.sin(np.linspace(0.0, 2.0 * np.pi, len(guidance)))
+                obs.create_dataset("guidance_pos_w", data=guidance)
+
+        dataset = SpatialHindsightDataset(
+            [str(self.path)],
+            goal_horizon_steps=100,
+            goal_source="reference",
+            goal_representation="path_guidance_se2_36",
+            symmetry_mode="none",
+        )
+        item = dataset[0]
+        self.assertEqual(tuple(item["goal_hist"].shape), (8, 36))
+        np.testing.assert_allclose(item["goal_hist"][:, 34], 0.0)
+        self.assertTrue(torch.all(item["goal_hist"][:, 35] > 0.0))
+        # The path tokens contain direction/log-distance/arc-offset only; the
+        # authoritative terminal block begins at 28 and exposes phase/time.
+        arc_offsets = item["goal_hist"][0, 3:28:4].numpy()
+        self.assertEqual(float(arc_offsets[0]), 0.0)
+        self.assertTrue(np.all(np.diff(arc_offsets) >= 0.0))
+        last_sample = max(
+            range(len(dataset.samples)),
+            key=lambda index: dataset.samples[index].anchor_step,
+        )
+        terminal_goal = dataset.goal_for_sample(last_sample)
+        self.assertEqual(float(terminal_goal[33]), 0.0)
+        self.assertEqual(float(terminal_goal[34]), 1.0)
+        policy = Solo12DiffusionPolicy(Solo12DiffusionPolicyConfig(
+            goal_dim=36,
+            d_model=32,
+            nhead=4,
+            num_layers=1,
+            p_drop_attn=0.0,
+            num_train_timesteps=2,
+            num_inference_steps=2,
+        ))
+        policy.set_normalizer_stats(dataset.build_normalizer_stats([0, 1], max_stats_samples=50))
+        batch = {key: value.unsqueeze(0) for key, value in item.items()}
+        loss = policy.compute_loss(batch)
+        self.assertTrue(torch.isfinite(loss))
+        loss.backward()
 
 
 if __name__ == "__main__":

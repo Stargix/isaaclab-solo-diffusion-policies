@@ -1,5 +1,9 @@
 # Expert data for the spatial policy
 
+The velocity-free waypoint/terminal-pose ablation is documented in
+[`PATH_GUIDANCE_PHASE_A.md`](PATH_GUIDANCE_PHASE_A.md). It is additive and does
+not change the existing holonomic collection or training contract.
+
 The collector records aligned pairs: `obs[t]` is captured before `actions[t]`
 and `last_action[t] = actions[t-1]`. It also stores world base pose for hindsight
 relabeling and the expert velocity command for baseline reuse.

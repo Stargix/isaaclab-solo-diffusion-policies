@@ -25,6 +25,7 @@ HDF5 schema (per demo, under ``data/demo_<k>``)::
             reference_pos_w    (T, 3)    float32   -- command-integrated desired base route
             reference_yaw_w    (T, 1)    float32   -- desired world yaw of that route
             reference_command  (T, 3)    float32   -- command used to integrate the route
+            guidance_pos_w     (T, 3)    float32   -- possibly imperfect path shown to path-guidance students
         actions                (T, 12)   float32   -- expert action executed at step t
         dones                  (T,)      bool      -- True only on the last step of the demo
         skill_idx              (T,)      int8      -- index into data.attrs["skill_names"]
@@ -71,11 +72,16 @@ from capability_routes import (
     TrackerGains,
     generate_capability_route,
     generate_holonomic_se2_route,
+    generate_waypoint_guidance_route,
     tracking_command,
 )
 
 ROUTE_FAMILIES_TO_IDX = {name: index for index, name in enumerate(ROUTE_FAMILIES)}
-CLOSED_LOOP_ROUTE_PROFILES = {"phase_a_closed_loop", "phase_a_holonomic"}
+CLOSED_LOOP_ROUTE_PROFILES = {
+    "phase_a_closed_loop",
+    "phase_a_holonomic",
+    "phase_a_path_guidance",
+}
 
 # --------------------------------------------------------------------------- #
 # Path setup: expose the upstream rsl_rl scripts so Hydra task resolution works.
@@ -110,13 +116,14 @@ parser.add_argument("--command_profile", choices=["native", "shared_height"], de
                     help="native: each expert's envelope; shared_height: common walk/crouch envelope for a fair posture-height ablation.")
 parser.add_argument(
     "--route_profile",
-    choices=["random_velocity", "phase_a", "phase_a_closed_loop", "phase_a_holonomic"],
+    choices=["random_velocity", "phase_a", "phase_a_closed_loop", "phase_a_holonomic", "phase_a_path_guidance"],
     default="random_velocity",
     help=(
         "random_velocity preserves the legacy velocity dataset. phase_a preserves the old "
         "walk-only command-integrated route collector. phase_a_closed_loop generates a fixed "
         "capability-bounded route and labels it with a route-aware command teacher. "
-        "phase_a_holonomic samples bounded SE(2) command trajectories without tying body yaw to path tangent."
+        "phase_a_holonomic samples bounded SE(2) command trajectories without tying body yaw to path tangent. "
+        "phase_a_path_guidance samples waypoint/terminal-pose tasks and records a separate imperfect guide."
     ),
 )
 parser.add_argument(
@@ -163,6 +170,24 @@ parser.add_argument("--holonomic_transition_s", type=float, default=0.30,
                     help="Holonomic Phase A: smooth transition duration between sampled command knots.")
 parser.add_argument("--holonomic_stop_probability", type=float, default=0.12,
                     help="Holonomic Phase A: probability that a sampled command knot is a stop.")
+parser.add_argument("--path_waypoint_count_min", type=int, default=6,
+                    help="Path-guidance Phase A: minimum geometric waypoints, including start/end.")
+parser.add_argument("--path_waypoint_count_max", type=int, default=9,
+                    help="Path-guidance Phase A: maximum geometric waypoints, including start/end.")
+parser.add_argument("--path_waypoint_spread_m", type=float, default=0.16,
+                    help="Path-guidance Phase A: standard deviation of clean task-waypoint deviations.")
+parser.add_argument("--path_waypoint_spread_clip_m", type=float, default=0.28,
+                    help="Path-guidance Phase A: radial clip for clean task-waypoint deviations.")
+parser.add_argument("--guidance_noise_std_m", type=float, default=0.06,
+                    help="Path-guidance Phase A: standard deviation of future guide corruption.")
+parser.add_argument("--guidance_noise_clip_m", type=float, default=0.14,
+                    help="Path-guidance Phase A: radial clip for each corrupted guide waypoint.")
+parser.add_argument("--guidance_clean_probability", type=float, default=0.25,
+                    help="Path-guidance Phase A: fraction of episodes with an exact clean guide.")
+parser.add_argument("--path_terminal_hold_steps", type=int, default=50,
+                    help="Path-guidance Phase A: zero-velocity terminal hold ticks (50 Hz).")
+parser.add_argument("--path_final_yaw_abs_max_rad", type=float, default=1.20,
+                    help="Path-guidance Phase A: maximum sampled final-yaw change.")
 parser.add_argument("--desired_base_height", type=float, required=True,
                     help="Expert's commanded base height in metres; recorded for the velocity-height baseline.")
 parser.add_argument("--min_demo_len", type=int, default=100,
@@ -637,6 +662,9 @@ class HDF5Writer:
         self._data.attrs["condition_schema"] = "velocity_xyyaw_plus_desired_base_height_v1"
         self._data.attrs["desired_base_height_m"] = float(desired_base_height)
         self._data.attrs["reference_schema"] = (
+            "fixed_waypoint_task_with_noisy_guidance_and_terminal_stop_v1"
+            if route_profile == "phase_a_path_guidance"
+            else
             "fixed_holonomic_se2_route_with_closed_loop_teacher_v3"
             if route_profile == "phase_a_holonomic"
             else "fixed_capability_route_with_closed_loop_teacher_v2"
@@ -646,7 +674,7 @@ class HDF5Writer:
         self._data.attrs["route_profile"] = str(route_profile)
         if route_generation_config is not None:
             self._data.attrs["route_generation_config_json"] = json.dumps(route_generation_config, sort_keys=True)
-        if route_profile in {"phase_a_closed_loop", "phase_a_holonomic"}:
+        if route_profile in CLOSED_LOOP_ROUTE_PROFILES:
             self._data.attrs["route_teacher"] = "timed_preview_feedback_to_velocity_expert_v1"
             self._data.attrs["route_family_names"] = np.array(ROUTE_FAMILIES, dtype="S32")
         self._demo_counter = 0
@@ -668,6 +696,7 @@ class HDF5Writer:
             "joint_pos", "joint_vel", "base_ang_vel", "projected_gravity",
             "last_action", "root_pos_w", "root_quat_w", "command", "desired_base_height",
             "reference_pos_w", "reference_yaw_w", "reference_command",
+            "guidance_pos_w",
             "reference_progress", "tracking_error_frenet", "route_family_idx",
             "actions", "skill_idx",
         )
@@ -688,6 +717,7 @@ class HDF5Writer:
         obs_grp.create_dataset("reference_pos_w", data=stacked["reference_pos_w"].astype(np.float32))
         obs_grp.create_dataset("reference_yaw_w", data=stacked["reference_yaw_w"].astype(np.float32))
         obs_grp.create_dataset("reference_command", data=stacked["reference_command"].astype(np.float32))
+        obs_grp.create_dataset("guidance_pos_w", data=stacked["guidance_pos_w"].astype(np.float32))
         obs_grp.create_dataset("reference_progress", data=stacked["reference_progress"].astype(np.int32))
         obs_grp.create_dataset("tracking_error_frenet", data=stacked["tracking_error_frenet"].astype(np.float32))
         obs_grp.create_dataset("route_family_idx", data=stacked["route_family_idx"].astype(np.int8))
@@ -854,6 +884,19 @@ class CollectionState:
                     transition_s=args.holonomic_transition_s,
                     stop_probability=args.holonomic_stop_probability,
                 )
+            elif args.route_profile == "phase_a_path_guidance":
+                self.closed_loop_routes[env_idx] = generate_waypoint_guidance_route(
+                    **kwargs,
+                    terminal_hold_steps=args.path_terminal_hold_steps,
+                    waypoint_count_min=args.path_waypoint_count_min,
+                    waypoint_count_max=args.path_waypoint_count_max,
+                    path_spread_m=args.path_waypoint_spread_m,
+                    path_spread_clip_m=args.path_waypoint_spread_clip_m,
+                    guidance_noise_std_m=args.guidance_noise_std_m,
+                    guidance_noise_clip_m=args.guidance_noise_clip_m,
+                    clean_guidance_probability=args.guidance_clean_probability,
+                    final_yaw_abs_max_rad=args.path_final_yaw_abs_max_rad,
+                )
             else:
                 self.closed_loop_routes[env_idx] = generate_capability_route(**kwargs)
 
@@ -980,6 +1023,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             "distribution": (
                 "iid_uniform_unit_disk_body_velocity_plus_uniform_yaw_knots"
                 if args_cli.route_profile == "phase_a_holonomic"
+                else "endpoint_first_brownian_bridge_waypoints_plus_imperfect_guidance"
+                if args_cli.route_profile == "phase_a_path_guidance"
                 else "named_tangent_path_families"
             ),
             "holonomic": {
@@ -987,6 +1032,17 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 "knot_count_max": args_cli.holonomic_knot_count_max,
                 "transition_s": args_cli.holonomic_transition_s,
                 "stop_probability": args_cli.holonomic_stop_probability,
+            },
+            "path_guidance": {
+                "waypoint_count_min": args_cli.path_waypoint_count_min,
+                "waypoint_count_max": args_cli.path_waypoint_count_max,
+                "task_waypoint_spread_m": args_cli.path_waypoint_spread_m,
+                "task_waypoint_spread_clip_m": args_cli.path_waypoint_spread_clip_m,
+                "guidance_noise_std_m": args_cli.guidance_noise_std_m,
+                "guidance_noise_clip_m": args_cli.guidance_noise_clip_m,
+                "clean_guidance_probability": args_cli.guidance_clean_probability,
+                "terminal_hold_steps": args_cli.path_terminal_hold_steps,
+                "final_yaw_abs_max_rad": args_cli.path_final_yaw_abs_max_rad,
             },
             "initial_reference_offset": {
                 "lateral_abs_max_m": args_cli.route_initial_lateral_offset_m,
@@ -1051,11 +1107,21 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 continue
             if args_cli.route_profile in CLOSED_LOOP_ROUTE_PROFILES:
                 reference_pos, reference_yaw, reference_command, route_family = state_tracker.closed_loop_reference(i)
+                route = state_tracker.closed_loop_routes[i]
+                if route is None:
+                    raise RuntimeError("Closed-loop frame requested without a route.")
+                route_index = int(np.clip(state_tracker.steps_since_start[i], 0, len(route.pos_w) - 1))
+                guidance_pos = (
+                    route.pos_w[route_index]
+                    if route.guidance_pos_w is None
+                    else route.guidance_pos_w[route_index]
+                )
                 buffers[i].append(_make_frame(
                     cached_state, i, actions_np[i], state_tracker.current_skill_idx[i], args_cli.desired_base_height,
                     reference_pos, reference_yaw, reference_command=reference_command,
                     reference_progress=state_tracker.steps_since_start[i],
                     tracking_error=state_tracker.latest_tracking_error[i], route_family=route_family,
+                    guidance_pos_w=guidance_pos,
                 ))
             else:
                 buffers[i].append(_make_frame(
@@ -1156,6 +1222,7 @@ def _make_frame(
     reference_progress: int = 0,
     tracking_error: np.ndarray | None = None,
     route_family: str | None = None,
+    guidance_pos_w: np.ndarray | None = None,
 ) -> Dict[str, np.ndarray]:
     """Build an aligned recorded frame from the raw state of one env."""
     return {
@@ -1172,6 +1239,11 @@ def _make_frame(
         "reference_yaw_w":  np.asarray([reference_yaw_w], dtype=np.float32),
         "reference_command": np.array(
             state["command"][env_idx] if reference_command is None else reference_command,
+            dtype=np.float32,
+            copy=True,
+        ),
+        "guidance_pos_w": np.array(
+            reference_pos_w if guidance_pos_w is None else guidance_pos_w,
             dtype=np.float32,
             copy=True,
         ),

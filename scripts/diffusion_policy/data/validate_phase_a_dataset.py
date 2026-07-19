@@ -87,6 +87,9 @@ def main() -> None:
     start_command_norms: list[float] = []
     startup_hold_norms: list[np.ndarray] = []
     demo_lengths: list[int] = []
+    guidance_errors: list[np.ndarray] = []
+    terminal_hold_norms: list[np.ndarray] = []
+    route_families: list[str] = []
     with h5py.File(path, "r") as file:
         data = file["data"]
         route_raw = data.attrs.get("route_profile", "")
@@ -116,7 +119,7 @@ def main() -> None:
             reference_yaw = obs["reference_yaw_w"][:].astype(np.float32).reshape(-1)
             command = obs["reference_command"][:].astype(np.float32)
             recorded_command = obs["command_speed"][:].astype(np.float32)
-            is_closed_loop = route_profile in {"phase_a_closed_loop", "phase_a_holonomic"}
+            is_closed_loop = route_profile in {"phase_a_closed_loop", "phase_a_holonomic", "phase_a_path_guidance"}
             if not is_closed_loop and not np.allclose(command, recorded_command, atol=1.0e-6, rtol=0.0):
                 raise ValueError(f"{demo_name}: legacy reference_command and command_speed differ.")
             if len(reference_pos) < 2:
@@ -131,6 +134,20 @@ def main() -> None:
             start_command_norms.append(float(np.linalg.norm(command[0])))
             startup_hold_norms.append(np.linalg.norm(command[: args.startup_hold_steps], axis=-1))
             demo_lengths.append(len(command))
+            family_raw = demo.attrs.get("route_family", "unknown")
+            route_families.append(family_raw.decode() if isinstance(family_raw, bytes) else str(family_raw))
+
+            if route_profile == "phase_a_path_guidance":
+                if "guidance_pos_w" not in obs:
+                    raise KeyError(f"{demo_name}: path-guidance Phase A is missing obs/guidance_pos_w.")
+                guidance = obs["guidance_pos_w"][:].astype(np.float32)
+                if guidance.shape != reference_pos.shape or not np.isfinite(guidance).all():
+                    raise ValueError(f"{demo_name}: invalid guidance path.")
+                guidance_errors.append(np.linalg.norm(guidance[:, :2] - reference_pos[:, :2], axis=-1))
+                terminal_steps = int((route_generation_config or {}).get("path_guidance", {}).get("terminal_hold_steps", 0))
+                if terminal_steps <= 0 or terminal_steps > len(command):
+                    raise ValueError("Path-guidance manifest has an invalid terminal hold.")
+                terminal_hold_norms.append(np.linalg.norm(command[-terminal_steps:], axis=-1))
 
             if is_closed_loop:
                 extra = (
@@ -188,7 +205,7 @@ def main() -> None:
         "reference_yaw_integration_error_max_rad": float(np.max(yaw_error)),
         "reference_yaw_integration_error_p99_rad": float(np.percentile(yaw_error, 99)),
     }
-    if route_profile not in {"phase_a", "phase_a_closed_loop", "phase_a_holonomic"}:
+    if route_profile not in {"phase_a", "phase_a_closed_loop", "phase_a_holonomic", "phase_a_path_guidance"}:
         raise ValueError(f"Expected a Phase-A route profile, got {route_profile!r}.")
     if summary["start_command_zero_fraction"] < 0.999:
         raise ValueError("Not every demo begins with a zero command; reset/start coverage is invalid.")
@@ -200,7 +217,7 @@ def main() -> None:
         raise ValueError("Reference yaw integration does not match the saved command.")
     if min(summary["stop_fraction_speed_lt_0p02"], summary["turn_fraction_abs_wz_gt_0p2"]) <= 0.0:
         raise ValueError("Phase A lacks stop or turn support in its nominal reference.")
-    if route_profile in {"phase_a_closed_loop", "phase_a_holonomic"}:
+    if route_profile in {"phase_a_closed_loop", "phase_a_holonomic", "phase_a_path_guidance"}:
         if summary["teacher_lateral_fraction_abs_vy_gt_0p02"] <= 0.0:
             raise ValueError("Closed-loop teacher never issued a lateral correction.")
         tracking_errors = np.concatenate(all_tracking_errors)
@@ -213,13 +230,18 @@ def main() -> None:
         summary["route_tracking_heading_abs_p95_rad"] = float(
             np.percentile(np.abs(tracking_errors[:, 2]), 95)
         )
-    if route_profile == "phase_a_holonomic":
-        if reference_schema != "fixed_holonomic_se2_route_with_closed_loop_teacher_v3":
-            raise ValueError("Holonomic Phase A has an incompatible reference schema.")
+    if route_profile in {"phase_a_holonomic", "phase_a_path_guidance"}:
+        expected_schema = (
+            "fixed_holonomic_se2_route_with_closed_loop_teacher_v3"
+            if route_profile == "phase_a_holonomic"
+            else "fixed_waypoint_task_with_noisy_guidance_and_terminal_stop_v1"
+        )
+        if reference_schema != expected_schema:
+            raise ValueError(f"{route_profile} has an incompatible reference schema.")
         if route_generation_config is None:
-            raise ValueError("Holonomic Phase A is missing its route-generation manifest.")
+            raise ValueError(f"{route_profile} is missing its route-generation manifest.")
         if collection_survival_rate is None or not math.isfinite(collection_survival_rate):
-            raise ValueError("Holonomic Phase A is missing collection survival statistics.")
+            raise ValueError(f"{route_profile} is missing collection survival statistics.")
         if collection_survival_rate < args.min_survival_rate:
             raise ValueError(
                 f"Holonomic proposal survival={collection_survival_rate:.3f} is below "
@@ -248,17 +270,36 @@ def main() -> None:
             raise ValueError("Holonomic route position tracking p95 exceeds the declared preflight gate.")
         if summary["route_tracking_heading_abs_p95_rad"] > args.max_tracking_heading_p95_rad:
             raise ValueError("Holonomic route heading tracking p95 exceeds the declared preflight gate.")
-        holonomic_support = (
-            summary["nominal_lateral_fraction_abs_vy_gt_0p02"],
-            summary["nominal_reverse_fraction_vx_lt_minus_0p02"],
-            summary["nominal_diagonal_fraction"],
-            summary["turn_fraction_abs_wz_gt_0p2"],
-        )
-        if min(holonomic_support) <= 0.02:
-            raise ValueError(
-                "Holonomic Phase A lacks lateral, reverse, diagonal or turning reference support; "
-                "do not train a holonomic route policy on it."
+        if route_profile == "phase_a_holonomic":
+            holonomic_support = (
+                summary["nominal_lateral_fraction_abs_vy_gt_0p02"],
+                summary["nominal_reverse_fraction_vx_lt_minus_0p02"],
+                summary["nominal_diagonal_fraction"],
+                summary["turn_fraction_abs_wz_gt_0p2"],
             )
+            if min(holonomic_support) <= 0.02:
+                raise ValueError(
+                    "Holonomic Phase A lacks lateral, reverse, diagonal or turning reference support; "
+                    "do not train a holonomic route policy on it."
+                )
+        else:
+            guide_error = np.concatenate(guidance_errors)
+            hold_error = np.concatenate(terminal_hold_norms)
+            clean_fraction = float(np.mean([family == "waypoint_bridge_clean_guidance" for family in route_families]))
+            summary.update({
+                "guidance_xy_error_p50_m": float(np.percentile(guide_error, 50)),
+                "guidance_xy_error_p95_m": float(np.percentile(guide_error, 95)),
+                "guidance_nonzero_fraction": float(np.mean(guide_error > 0.01)),
+                "clean_guidance_demo_fraction": clean_fraction,
+                "noisy_guidance_demo_fraction": 1.0 - clean_fraction,
+                "terminal_hold_zero_fraction": float(np.mean(hold_error < 1.0e-6)),
+            })
+            if summary["terminal_hold_zero_fraction"] < 0.999:
+                raise ValueError("Path-guidance reference does not hold a zero-velocity terminal pose.")
+            if min(summary["clean_guidance_demo_fraction"], summary["noisy_guidance_demo_fraction"]) < 0.05:
+                raise ValueError("Path-guidance data need both clean and noisy guide episodes.")
+            if summary["guidance_nonzero_fraction"] <= 0.02:
+                raise ValueError("Path-guidance data contain no meaningful waypoint corruption.")
 
     (output / "phase_a_preflight.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps(summary, indent=2))

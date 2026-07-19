@@ -1,0 +1,112 @@
+{
+  "timestamp": "2026-07-19T04:30:24.979498",
+  "task": "solo12-v0",
+  "checkpoint": "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\checkpoints_iri\\best_phase_A_walk.pt",
+  "checkpoint_sha256": "07C4F0F78D97EA4BA58B413AB245E30A8C93BEDC913AA0E489DE421C3DEE55F6",
+  "git_commit": "c327dd1d2659ecb27ffb1ed4a37e8e7d0ba34820",
+  "config": {
+    "dataset": {
+      "hdf5_paths": [
+        "scripts/diffusion_policy/data/datasets/walk_phase_a_reference_v1.hdf5"
+      ],
+      "history": 8,
+      "prediction_horizon": 16,
+      "execution_offset": 8,
+      "goal_horizon_steps": 100,
+      "waypoint_time_offsets_s": [
+        0.5,
+        1.0,
+        1.5
+      ],
+      "step_stride": 1,
+      "dt": 0.02,
+      "v_req_clip": 2.0,
+      "goal_source": "reference",
+      "include_padded_starts": true,
+      "startup_sample_multiplier": 16,
+      "symmetry_mode": "quadruped",
+      "max_stats_samples": 20000,
+      "val_fraction": 0.05
+    },
+    "model": {
+      "proprio_dim": 30,
+      "action_hist_dim": 12,
+      "goal_dim": 11,
+      "action_dim": 12,
+      "d_model": 128,
+      "nhead": 4,
+      "num_layers": 4,
+      "dim_feedforward": 512,
+      "p_drop_emb": 0.0,
+      "p_drop_attn": 0.3,
+      "separate_goal_conditioning": true
+    },
+    "diffusion": {
+      "num_train_timesteps": 10,
+      "num_inference_steps": 10,
+      "beta_start": 0.0001,
+      "beta_end": 0.02,
+      "beta_schedule": "squaredcos_cap_v2",
+      "prediction_type": "epsilon",
+      "variance_type": "fixed_small",
+      "clip_sample": true,
+      "cfg_dropout_prob": 0.0
+    },
+    "optim": {
+      "batch_size": 1024,
+      "epochs": 100,
+      "learning_rate": 0.0001,
+      "weight_decay": 0.001,
+      "grad_clip_norm": 1.0,
+      "ema_decay": 0.9999,
+      "lr_warmup_steps": 10000,
+      "num_workers": 4,
+      "seed": 42,
+      "mixed_precision": true,
+      "save_every": 5,
+      "log_every": 50
+    },
+    "output_dir": "scripts/diffusion_policy/runs/phase_a_walk_reference_k10_v1",
+    "run_name": "phase_a_walk_reference_k10_v1_seed42",
+    "wandb_project": "solo12-diffusion-policy",
+    "wandb_entity": null,
+    "schema_version": 4,
+    "policy_kind": "spatial_reference_path_ddpm",
+    "goal_schema": "spatial_reference_path11_v1"
+  },
+  "dataset_sha256": {
+    "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\scripts\\diffusion_policy\\data\\datasets\\walk_phase_a_reference_v1.hdf5": "CF0D02060362A145E6FC6815B723822A9A027844919A39E47B7491A98AE7345A"
+  },
+  "policy_kind": "spatial_reference_path_ddpm",
+  "seed": 42,
+  "duration_s": 20.0,
+  "num_scenarios": 15,
+  "num_inference_steps": 10,
+  "exec_horizon": 8,
+  "goal_horizon_steps": 100,
+  "goal_representation": "path11",
+  "waypoint_time_offsets_s": [
+    0.5,
+    1.0,
+    1.5
+  ],
+  "speeds_evaluated": [
+    0.2,
+    0.4,
+    0.6,
+    0.8,
+    1.0
+  ],
+  "reference_replay_dataset": null,
+  "overall_survival_rate": 0.4666666666666667,
+  "survival_by_path": {
+    "circle": 0.2,
+    "s_curve": 0.6,
+    "straight": 0.6
+  },
+  "mean_xy_rmse_by_path": {
+    "circle": 1.318919331756579,
+    "s_curve": 0.06867844358932818,
+    "straight": 0.07369500368763626
+  }
+}

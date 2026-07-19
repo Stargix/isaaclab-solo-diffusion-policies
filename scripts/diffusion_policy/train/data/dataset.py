@@ -53,6 +53,9 @@ class DemoSequence:
     reference_yaw_w: np.ndarray | None = None
     reference_command_b: np.ndarray | None = None
     reference_cumulative_xy: np.ndarray | None = None
+    guidance_pos_w: np.ndarray | None = None
+    guidance_cumulative_xy: np.ndarray | None = None
+    terminal_step: int | None = None
 
 
 @dataclass(frozen=True)
@@ -72,7 +75,13 @@ def _demo_sort_key(name: str) -> tuple[int, str]:
         return 0, name
 
 
-def _validate_hdf5(path: str, *, require_reference_path: bool, require_holonomic_reference: bool = False) -> None:
+def _validate_hdf5(
+    path: str,
+    *,
+    require_reference_path: bool,
+    require_holonomic_reference: bool = False,
+    require_path_guidance_reference: bool = False,
+) -> None:
     with h5py.File(path, "r") as file:
         if "data" not in file:
             raise KeyError(f"{path}: missing 'data' group.")
@@ -83,6 +92,17 @@ def _validate_hdf5(path: str, *, require_reference_path: bool, require_holonomic
             if route_profile != "phase_a_holonomic" or reference_schema != "fixed_holonomic_se2_route_with_closed_loop_teacher_v3":
                 raise ValueError(
                     f"{path}: holonomic_se2_32 requires phase_a_holonomic/v3 reference data, got "
+                    f"route_profile={route_profile!r}, reference_schema={reference_schema!r}."
+                )
+        if require_path_guidance_reference:
+            route_profile = _decode_attr(data.attrs.get("route_profile", ""))
+            reference_schema = _decode_attr(data.attrs.get("reference_schema", ""))
+            if (
+                route_profile != "phase_a_path_guidance"
+                or reference_schema != "fixed_waypoint_task_with_noisy_guidance_and_terminal_stop_v1"
+            ):
+                raise ValueError(
+                    f"{path}: path_guidance_se2_36 requires phase_a_path_guidance/v1 data, got "
                     f"route_profile={route_profile!r}, reference_schema={reference_schema!r}."
                 )
         convention = data.attrs.get("convention")
@@ -112,6 +132,8 @@ def _validate_hdf5(path: str, *, require_reference_path: bool, require_holonomic
                     raise KeyError(
                         f"{path}/{demo_name}: reference goal source requires obs keys {missing_reference}."
                     )
+            if require_path_guidance_reference and "guidance_pos_w" not in obs:
+                raise KeyError(f"{path}/{demo_name}: path-guidance data require obs/guidance_pos_w.")
             length = int(demo["actions"].shape[0])
             if length == 0:
                 raise ValueError(f"{path}/{demo_name}: empty demonstration.")
@@ -122,6 +144,8 @@ def _validate_hdf5(path: str, *, require_reference_path: bool, require_holonomic
                 for key in REFERENCE_OBS_KEYS:
                     if int(obs[key].shape[0]) != length:
                         raise ValueError(f"{path}/{demo_name}: obs/{key} length mismatch.")
+            if require_path_guidance_reference and int(obs["guidance_pos_w"].shape[0]) != length:
+                raise ValueError(f"{path}/{demo_name}: obs/guidance_pos_w length mismatch.")
             dones = demo["dones"][:]
             if len(dones) != length or (length and not bool(dones[-1])) or np.any(dones[:-1]):
                 raise ValueError(f"{path}/{demo_name}: dones must be false except at the final sample.")
@@ -139,6 +163,8 @@ def _validate_hdf5(path: str, *, require_reference_path: bool, require_holonomic
                     for key in REFERENCE_OBS_KEYS:
                         if not np.isfinite(obs[key][start:end]).all():
                             raise ValueError(f"{path}/{demo_name}: non-finite obs/{key}.")
+                if require_path_guidance_reference and not np.isfinite(obs["guidance_pos_w"][start:end]).all():
+                    raise ValueError(f"{path}/{demo_name}: non-finite obs/guidance_pos_w.")
                 expected = np.empty_like(actions)
                 if start == 0:
                     expected[0] = 0.0
@@ -201,7 +227,7 @@ class SpatialHindsightDataset(Dataset):
         if goal_source not in {"achieved", "reference"}:
             raise ValueError("goal_source must be 'achieved' or 'reference'.")
         if goal_source != "reference" and goal_representation != "path11":
-            raise ValueError("The holonomic representation requires goal_source='reference'.")
+            raise ValueError("SE(2) route representations require goal_source='reference'.")
         if startup_sample_multiplier < 1:
             raise ValueError("startup_sample_multiplier must be >= 1.")
         if not np.isclose(dt, 0.02):
@@ -245,6 +271,7 @@ class SpatialHindsightDataset(Dataset):
             path,
             require_reference_path=self.goal_source == "reference",
             require_holonomic_reference=self.goal_representation == "holonomic_se2_32",
+            require_path_guidance_reference=self.goal_representation == "path_guidance_se2_36",
         )
         resolved = str(Path(path).resolve())
         with h5py.File(path, "r") as file:
@@ -274,6 +301,15 @@ class SpatialHindsightDataset(Dataset):
                     if self.goal_source == "reference"
                     else None
                 )
+                guidance_pos_w = (
+                    obs["guidance_pos_w"][:].astype(np.float32)
+                    if self.goal_representation == "path_guidance_se2_36"
+                    else None
+                )
+                terminal_step = None
+                if self.goal_representation == "path_guidance_se2_36":
+                    moving = np.flatnonzero(np.linalg.norm(reference_command_b, axis=-1) > 1.0e-4)
+                    terminal_step = min(len(reference_command_b) - 1, int(moving[-1]) + 1) if len(moving) else 0
                 self.demos.append(
                     DemoSequence(
                         source_file=resolved,
@@ -290,6 +326,11 @@ class SpatialHindsightDataset(Dataset):
                         reference_cumulative_xy=(
                             cumulative_xy_lengths(reference_pos_w) if reference_pos_w is not None else None
                         ),
+                        guidance_pos_w=guidance_pos_w,
+                        guidance_cumulative_xy=(
+                            cumulative_xy_lengths(guidance_pos_w) if guidance_pos_w is not None else None
+                        ),
+                        terminal_step=terminal_step,
                     )
                 )
                 self._index_demo(demo_idx)
@@ -298,7 +339,11 @@ class SpatialHindsightDataset(Dataset):
         length = len(self.demos[demo_idx].actions)
         first_anchor = 0 if self.include_padded_starts else self.history + 1
         # Latest goal history token is at t-1 and looks goal_horizon_steps ahead.
-        last_for_goal_exclusive = length - self.goal_horizon_steps + 1
+        last_for_goal_exclusive = (
+            length
+            if self.goal_representation == "path_guidance_se2_36"
+            else length - self.goal_horizon_steps + 1
+        )
         last_for_actions_exclusive = length - self.future_horizon + 1
         last_anchor_exclusive = min(last_for_goal_exclusive, last_for_actions_exclusive)
         for anchor in range(first_anchor, last_anchor_exclusive, self.step_stride):
@@ -314,6 +359,14 @@ class SpatialHindsightDataset(Dataset):
                 or demo.reference_yaw_w is None
                 or demo.reference_cumulative_xy is None
                 or (self.goal_representation == "holonomic_se2_32" and demo.reference_command_b is None)
+                or (
+                    self.goal_representation == "path_guidance_se2_36"
+                    and (
+                        demo.guidance_pos_w is None
+                        or demo.guidance_cumulative_xy is None
+                        or demo.terminal_step is None
+                    )
+                )
             ):
                 raise RuntimeError("Reference goal requested but the demonstration has no reference path.")
             return build_goal_vector(
@@ -329,6 +382,9 @@ class SpatialHindsightDataset(Dataset):
                 v_req_clip=self.v_req_clip,
                 goal_representation=self.goal_representation,
                 reference_command_b=demo.reference_command_b,
+                guidance_pos_w=demo.guidance_pos_w,
+                guidance_cumulative_xy=demo.guidance_cumulative_xy,
+                terminal_idx=demo.terminal_step,
             )
         return build_goal_vector(
             demo.root_pos_w,
