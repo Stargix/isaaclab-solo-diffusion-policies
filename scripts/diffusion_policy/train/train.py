@@ -24,7 +24,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Dataset, Subset
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -114,6 +114,19 @@ def parse_args() -> argparse.Namespace:
         help="achieved = legacy hindsight; reference = explicit route stored in the HDF5.",
     )
     parser.add_argument(
+        "--waypoint_noise_std_m",
+        type=float,
+        default=DATASET_DEFAULTS.waypoint_noise_std_m,
+        help=("Training-only Gaussian jitter in metres applied to the three intermediate path11 waypoints. "
+              "The terminal pose is never changed."),
+    )
+    parser.add_argument(
+        "--waypoint_noise_clip_m",
+        type=float,
+        default=DATASET_DEFAULTS.waypoint_noise_clip_m,
+        help="Per-waypoint radial clip for --waypoint_noise_std_m; zero disables clipping.",
+    )
+    parser.add_argument(
         "--include_padded_starts",
         action="store_true",
         default=DATASET_DEFAULTS.include_padded_starts,
@@ -184,6 +197,13 @@ def set_seed(seed: int) -> None:
 
 def make_config(args: argparse.Namespace) -> TrainConfig:
     is_reference = args.goal_source == "reference"
+    if args.waypoint_noise_std_m < 0.0 or args.waypoint_noise_clip_m < 0.0:
+        raise ValueError("Waypoint-noise magnitudes must be non-negative.")
+    if args.waypoint_noise_std_m > 0.0 and (args.goal_source != "achieved" or args.goal_representation != "path11"):
+        raise ValueError(
+            "Waypoint jitter is the simple hindsight-path augmentation and requires "
+            "--goal_source achieved --goal_representation path11."
+        )
     return TrainConfig(
         dataset=DatasetConfig(
             hdf5_paths=args.datasets,
@@ -196,6 +216,8 @@ def make_config(args: argparse.Namespace) -> TrainConfig:
             v_req_clip=args.v_req_clip,
             goal_source=args.goal_source,
             goal_representation=args.goal_representation,
+            waypoint_noise_std_m=args.waypoint_noise_std_m,
+            waypoint_noise_clip_m=args.waypoint_noise_clip_m,
             include_padded_starts=args.include_padded_starts,
             startup_sample_multiplier=args.startup_sample_multiplier,
             symmetry_mode=args.symmetry_mode,
@@ -307,6 +329,35 @@ def build_policy(cfg: TrainConfig) -> Solo12DiffusionPolicy:
     return Solo12DiffusionPolicy(policy_cfg)
 
 
+class NoisyHindsightWaypointDataset(Dataset):
+    """Training-only jitter for hindsight waypoint observations.
+
+    Each history token gets one bounded XY displacement shared by its three
+    intermediate waypoints.  This keeps the guide path coherent while the
+    achieved terminal pose (the final five path11 values) and every action
+    label remain untouched.  Validation deliberately uses clean conditions.
+    """
+
+    def __init__(self, dataset: Dataset, *, std_m: float, clip_m: float) -> None:
+        self.dataset = dataset
+        self.std_m = float(std_m)
+        self.clip_m = float(clip_m)
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        item = self.dataset[index]
+        goal = item["goal_hist"].clone()
+        # path11 = [three waypoint XY pairs, clean terminal XY/Z/yaw/speed].
+        noise = torch.randn((goal.shape[0], 1, 2), dtype=goal.dtype) * self.std_m
+        if self.clip_m > 0.0:
+            norm = torch.linalg.vector_norm(noise, dim=-1, keepdim=True).clamp_min(1.0e-8)
+            noise = noise * torch.clamp(self.clip_m / norm, max=1.0)
+        goal[:, :6] += noise.expand(-1, 3, -1).reshape(goal.shape[0], 6)
+        return {**item, "goal_hist": goal}
+
+
 @torch.no_grad()
 def evaluate(policy: Solo12DiffusionPolicy, loader: DataLoader, device: torch.device, max_batches: int | None = None) -> float:
     policy.eval()
@@ -400,7 +451,13 @@ def main() -> None:
         max_stats_samples=cfg.dataset.max_stats_samples,
         seed=cfg.optim.seed,
     ).to_dict()
-    train_dataset = Subset(dataset, train_indices)
+    train_dataset: Dataset = Subset(dataset, train_indices)
+    if cfg.dataset.waypoint_noise_std_m > 0.0:
+        train_dataset = NoisyHindsightWaypointDataset(
+            train_dataset,
+            std_m=cfg.dataset.waypoint_noise_std_m,
+            clip_m=cfg.dataset.waypoint_noise_clip_m,
+        )
     val_dataset = Subset(dataset, val_indices)
     split_manifest = {
         "seed": cfg.optim.seed,

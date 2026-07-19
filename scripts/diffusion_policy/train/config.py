@@ -24,6 +24,10 @@ class DatasetConfig:
     v_req_clip: float = 2.0
     goal_source: str = "achieved"
     goal_representation: str = "path11"
+    # Goal-conditioned BC augmentation: perturb only the intermediate
+    # waypoint observations.  The achieved terminal pose remains clean.
+    waypoint_noise_std_m: float = 0.0
+    waypoint_noise_clip_m: float = 0.0
     include_padded_starts: bool = False
     startup_sample_multiplier: int = 1
     symmetry_mode: str = "quadruped"
@@ -109,6 +113,8 @@ TRAINING_CONFIG_KEYS = frozenset(
         "v_req_clip",
         "goal_source",
         "goal_representation",
+        "waypoint_noise_std_m",
+        "waypoint_noise_clip_m",
         "include_padded_starts",
         "startup_sample_multiplier",
         "symmetry_mode",
