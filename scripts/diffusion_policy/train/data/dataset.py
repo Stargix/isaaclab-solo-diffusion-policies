@@ -226,7 +226,9 @@ class SpatialHindsightDataset(Dataset):
             raise ValueError("step_stride must be >= 1.")
         if goal_source not in {"achieved", "reference"}:
             raise ValueError("goal_source must be 'achieved' or 'reference'.")
-        if goal_source != "reference" and goal_representation != "path11":
+        if goal_representation == "hindsight_geom_avg12" and goal_source != "achieved":
+            raise ValueError("hindsight_geom_avg12 requires goal_source='achieved'.")
+        if goal_source != "reference" and goal_representation not in {"path11", "hindsight_geom_avg12"}:
             raise ValueError("SE(2) route representations require goal_source='reference'.")
         if startup_sample_multiplier < 1:
             raise ValueError("startup_sample_multiplier must be >= 1.")

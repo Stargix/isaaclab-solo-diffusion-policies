@@ -82,6 +82,7 @@ from train.config import resolve_inference_steps
 from train.conditioning.geometry import cumulative_xy_lengths, quat_wxyz_to_rotmat, yaw_from_rotmat
 from train.conditioning.goal_builder import (
     build_goal_batch_from_path,
+    build_geometric_hindsight_goal_batch_from_path,
     build_holonomic_goal_batch_from_path,
     build_path_guidance_goal_batch_from_path,
 )
@@ -349,6 +350,12 @@ def compute_goals(
             goal_horizon_steps=goal_horizon_steps, dt=dt, speed=speed,
             path_progress=path_progress,
         )
+    elif goal_representation == "hindsight_geom_avg12":
+        goals = build_geometric_hindsight_goal_batch_from_path(
+            path_w, cumulative_lengths, yaws_w, pos_w, quat_w,
+            goal_horizon_steps=goal_horizon_steps, dt=dt, speed=speed,
+            path_progress=path_progress, v_avg_clip=v_req_clip,
+        )
     else:
         goals = build_goal_batch_from_path(
             path_w, cumulative_lengths, yaws_w, pos_w, quat_w,
@@ -410,7 +417,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     checkpoint = load_training_checkpoint(
         checkpoint_path,
         device,
-        expected_policy_kind=("spatial_time_preview_ddpm", "spatial_reference_path_ddpm", "holonomic_reference_path_ddpm", "path_guidance_terminal_ddpm"),
+        expected_policy_kind=("spatial_time_preview_ddpm", "spatial_reference_path_ddpm", "holonomic_reference_path_ddpm", "path_guidance_terminal_ddpm", "spatial_hindsight_geometry_ddpm"),
     )
     config_dict = checkpoint["config"]
     print(
@@ -564,9 +571,14 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                         assert torch.isfinite(latest_goal[env_idx]).all(), f"Env {env_idx}: non-finite goal"
                         assert latest_goal[env_idx].abs().max().item() < 10.0, f"Env {env_idx}: implausibly large route context"
                         continue
-                    dx = latest_goal[env_idx, 6].item()
-                    target_height = latest_goal[env_idx, 8].item()
-                    v_req = latest_goal[env_idx, 10].item()
+                    if goal_representation == "hindsight_geom_avg12":
+                        dx = latest_goal[env_idx, 6].item()
+                        target_height = latest_goal[env_idx, 10].item()
+                        v_req = latest_goal[env_idx, 11].item()
+                    else:
+                        dx = latest_goal[env_idx, 6].item()
+                        target_height = latest_goal[env_idx, 8].item()
+                        v_req = latest_goal[env_idx, 10].item()
                     assert abs(dx) < 3.0, f"Env {env_idx}: dx={dx:.2f} está OOD (entrenamiento max ~3m)"
                     assert 0.10 <= target_height <= 0.40, (
                         f"Env {env_idx}: target_height={target_height:.2f} fuera de rango fisico"
@@ -678,6 +690,10 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 target_dx = current_goal[0, 24].item()
                 target_height = current_goal[0, 25].item()
                 v_req_val = float(torch.linalg.vector_norm(current_goal[0, 28:30]).item())
+            elif goal_representation == "hindsight_geom_avg12":
+                target_dx = current_goal[0, 6].item()
+                target_height = current_goal[0, 10].item()
+                v_req_val = current_goal[0, 11].item()
             else:
                 target_dx = current_goal[0, 6].item()
                 target_height = current_goal[0, 8].item()

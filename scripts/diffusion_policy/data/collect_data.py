@@ -152,6 +152,25 @@ parser.add_argument("--route_curvature_abs_max", type=float, default=0.90,
                     help="Closed-loop Phase A: maximum nominal path curvature (1/m).")
 parser.add_argument("--route_accel_abs_max", type=float, default=0.45,
                     help="Closed-loop Phase A: nominal longitudinal acceleration limit (m/s^2).")
+parser.add_argument("--phase_a_forward_speed_min", type=float, default=0.20,
+                    help="Legacy no-tracker Phase-A: minimum forward speed for straight/arc command phases.")
+parser.add_argument("--phase_a_forward_speed_max", type=float, default=0.65,
+                    help="Legacy no-tracker Phase-A: maximum forward speed for straight command phases.")
+parser.add_argument("--phase_a_reverse_speed_abs_max", type=float, default=0.35,
+                    help="Legacy no-tracker Phase-A: maximum reverse speed magnitude.")
+parser.add_argument("--phase_a_lateral_speed_abs_max", type=float, default=0.35,
+                    help="Legacy no-tracker Phase-A: maximum lateral speed magnitude.")
+parser.add_argument("--phase_a_yaw_rate_abs_max", type=float, default=0.70,
+                    help="Legacy no-tracker Phase-A: maximum yaw-rate magnitude.")
+parser.add_argument(
+    "--phase_a_stop_hold_s",
+    type=float,
+    default=2.5,
+    help=(
+        "Legacy no-tracker Phase-A: minimum duration of a sampled zero-command hold. "
+        "Must cover the 2 s hindsight horizon so stop goals are represented."
+    ),
+)
 parser.add_argument("--route_initial_lateral_offset_m", type=float, default=0.06,
                     help="Closed-loop Phase A: uniform initial reference offset magnitude (m).")
 parser.add_argument("--route_initial_yaw_offset_rad", type=float, default=0.12,
@@ -349,7 +368,7 @@ def configure_env_for_collection(env_cfg: Any, args: argparse.Namespace) -> None
 # --------------------------------------------------------------------------- #
 # Command sampling
 # --------------------------------------------------------------------------- #
-def _sample_phase_a_command(rng: random.Random) -> tuple[float, float, float]:
+def _sample_phase_a_command(rng: random.Random, args: argparse.Namespace) -> tuple[float, float, float]:
     """Sample one stable walk command phase for reference-path tracking.
 
     The discrete mixture deliberately contains stops, starts, forward arcs,
@@ -358,6 +377,12 @@ def _sample_phase_a_command(rng: random.Random) -> tuple[float, float, float]:
     first path-following experiment.
     """
 
+    if not 0.0 < args.phase_a_forward_speed_min <= args.phase_a_forward_speed_max:
+        raise ValueError("Require 0 < --phase_a_forward_speed_min <= --phase_a_forward_speed_max.")
+    if min(args.phase_a_reverse_speed_abs_max, args.phase_a_lateral_speed_abs_max, args.phase_a_yaw_rate_abs_max) < 0.0:
+        raise ValueError("Phase-A reverse/lateral/yaw limits must be non-negative.")
+    if args.phase_a_stop_hold_s < 2.0:
+        raise ValueError("--phase_a_stop_hold_s must be at least 2.0 s for the current hindsight horizon.")
     mode = rng.choices(
         ("stop", "straight", "arc", "lateral", "reverse"),
         weights=(0.20, 0.30, 0.30, 0.12, 0.08),
@@ -366,14 +391,30 @@ def _sample_phase_a_command(rng: random.Random) -> tuple[float, float, float]:
     if mode == "stop":
         return 0.0, 0.0, 0.0
     if mode == "straight":
-        return rng.uniform(0.20, 0.65), rng.uniform(-0.10, 0.10), rng.uniform(-0.12, 0.12)
+        return (
+            rng.uniform(args.phase_a_forward_speed_min, args.phase_a_forward_speed_max),
+            rng.uniform(-min(0.10, args.phase_a_lateral_speed_abs_max), min(0.10, args.phase_a_lateral_speed_abs_max)),
+            rng.uniform(-min(0.12, args.phase_a_yaw_rate_abs_max), min(0.12, args.phase_a_yaw_rate_abs_max)),
+        )
     if mode == "arc":
         direction = -1.0 if rng.random() < 0.5 else 1.0
-        return rng.uniform(0.20, 0.55), rng.uniform(-0.08, 0.08), direction * rng.uniform(0.25, 0.70)
+        return (
+            rng.uniform(args.phase_a_forward_speed_min, min(0.55, args.phase_a_forward_speed_max)),
+            rng.uniform(-min(0.08, args.phase_a_lateral_speed_abs_max), min(0.08, args.phase_a_lateral_speed_abs_max)),
+            direction * rng.uniform(min(0.25, args.phase_a_yaw_rate_abs_max), args.phase_a_yaw_rate_abs_max),
+        )
     if mode == "lateral":
         direction = -1.0 if rng.random() < 0.5 else 1.0
-        return rng.uniform(0.15, 0.40), direction * rng.uniform(0.15, 0.35), rng.uniform(-0.25, 0.25)
-    return rng.uniform(-0.35, -0.12), rng.uniform(-0.12, 0.12), rng.uniform(-0.25, 0.25)
+        return (
+            rng.uniform(min(0.15, args.phase_a_forward_speed_max), min(0.40, args.phase_a_forward_speed_max)),
+            direction * rng.uniform(min(0.15, args.phase_a_lateral_speed_abs_max), args.phase_a_lateral_speed_abs_max),
+            rng.uniform(-min(0.25, args.phase_a_yaw_rate_abs_max), min(0.25, args.phase_a_yaw_rate_abs_max)),
+        )
+    return (
+        rng.uniform(-args.phase_a_reverse_speed_abs_max, -min(0.12, args.phase_a_reverse_speed_abs_max)),
+        rng.uniform(-min(0.12, args.phase_a_lateral_speed_abs_max), min(0.12, args.phase_a_lateral_speed_abs_max)),
+        rng.uniform(-min(0.25, args.phase_a_yaw_rate_abs_max), min(0.25, args.phase_a_yaw_rate_abs_max)),
+    )
 
 
 def resample_command(
@@ -387,7 +428,7 @@ def resample_command(
 
     del device  # The command tensor already owns the correct device.
     if args_cli.route_profile == "phase_a":
-        vx, vy, wz = _sample_phase_a_command(rng)
+        vx, vy, wz = _sample_phase_a_command(rng, args_cli)
         commands_tensor[env_idx, 0] = vx
         commands_tensor[env_idx, 1] = vy
         commands_tensor[env_idx, 2] = wz
@@ -995,6 +1036,22 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
     state_tracker = CollectionState(num_envs, skill_names, args_cli, rng)
     resample_interval = max(1, int(round(args_cli.command_resample_time_s / raw_env.step_dt)))
+    phase_a_stop_hold_steps = max(1, int(round(args_cli.phase_a_stop_hold_s / raw_env.step_dt)))
+    phase_a_resample_intervals = np.full(num_envs, resample_interval, dtype=np.int32)
+
+    def resample_phase_a(env_idx: int) -> None:
+        """Keep zero commands long enough to create a complete stop horizon."""
+
+        resample_command(
+            env_idx,
+            skill_names[state_tracker.current_skill_idx[env_idx]],
+            raw_env._commands,
+            device,
+            rng,
+        )
+        state_tracker.steps_since_resample[env_idx] = 0
+        is_stop = bool(torch.max(torch.abs(raw_env._commands[env_idx, :3])).item() < 1.0e-6)
+        phase_a_resample_intervals[env_idx] = phase_a_stop_hold_steps if is_stop else resample_interval
 
     # Initialize commands for every env. Phase-A routes start with an intentional
     # zero-command hold; later start/stop windows are part of the dataset.
@@ -1027,6 +1084,15 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 if args_cli.route_profile == "phase_a_path_guidance"
                 else "named_tangent_path_families"
             ),
+            "phase_a_command_distribution": {
+                "forward_speed_min": args_cli.phase_a_forward_speed_min,
+                "forward_speed_max": args_cli.phase_a_forward_speed_max,
+                "reverse_speed_abs_max": args_cli.phase_a_reverse_speed_abs_max,
+                "lateral_speed_abs_max": args_cli.phase_a_lateral_speed_abs_max,
+                "yaw_rate_abs_max": args_cli.phase_a_yaw_rate_abs_max,
+                "command_resample_time_s": args_cli.command_resample_time_s,
+                "stop_hold_s": args_cli.phase_a_stop_hold_s,
+            },
             "holonomic": {
                 "knot_count_min": args_cli.holonomic_knot_count_min,
                 "knot_count_max": args_cli.holonomic_knot_count_max,
@@ -1150,9 +1216,10 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             # independently integrated world-frame reference trajectory.
             if args_cli.route_profile == "phase_a" and not tr.route_started[i]:
                 if tr.steps_since_start[i] >= args_cli.startup_hold_steps:
-                    resample_command(i, skill_names[tr.current_skill_idx[i]], raw_env._commands, device, rng)
-                    tr.steps_since_resample[i] = 0
+                    resample_phase_a(i)
                     tr.route_started[i] = True
+            elif args_cli.route_profile == "phase_a" and tr.steps_since_resample[i] >= phase_a_resample_intervals[i]:
+                resample_phase_a(i)
             elif args_cli.route_profile not in CLOSED_LOOP_ROUTE_PROFILES and tr.steps_since_resample[i] >= resample_interval:
                 resample_command(i, skill_names[tr.current_skill_idx[i]], raw_env._commands, device, rng)
                 tr.steps_since_resample[i] = 0

@@ -66,6 +66,7 @@ from train.conditioning.goal_builder import (
     advance_path_progress,
     build_goal_from_path,
     build_goal_vector,
+    build_geometric_hindsight_goal_from_path,
     build_holonomic_goal_from_path,
     build_path_guidance_goal_from_path,
 )
@@ -315,6 +316,21 @@ def compute_vectorized_goals(
                     start_idx=start_idx,
                 )
             )
+        elif goal_representation == "hindsight_geom_avg12":
+            goals.append(
+                build_geometric_hindsight_goal_from_path(
+                    plan.path_w,
+                    plan.cumulative_lengths,
+                    plan.yaws_w,
+                    pos_w[i],
+                    quat_w[i],
+                    goal_horizon_steps=goal_horizon_steps,
+                    dt=dt,
+                    speed=speeds[i],
+                    start_idx=start_idx,
+                    v_avg_clip=v_req_clip,
+                )
+            )
         else:
             goals.append(
                 build_goal_from_path(
@@ -429,7 +445,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         device,
         expected_policy_kind=(
             "spatial_time_preview_ddpm", "spatial_reference_path_ddpm", "holonomic_reference_path_ddpm",
-            "path_guidance_terminal_ddpm",
+            "path_guidance_terminal_ddpm", "spatial_hindsight_geometry_ddpm",
         ),
     )
     config = checkpoint["config"]

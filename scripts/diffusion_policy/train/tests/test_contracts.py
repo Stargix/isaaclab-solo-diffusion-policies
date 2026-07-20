@@ -19,6 +19,7 @@ sys.path.insert(0, str(_PACKAGE_ROOT / "data"))
 from train.data.dataset import SpatialHindsightDataset
 from train.data.episode_split import split_episode_indices
 from train.conditioning.goal_builder import advance_path_progress, build_goal_vector
+from train.data.symmetry import apply_symmetry
 from capability_routes import CapabilityLimits, generate_waypoint_guidance_route
 from model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
 
@@ -116,6 +117,50 @@ class SpatialContractTests(unittest.TestCase):
         )
         stats = dataset.build_normalizer_stats([0], max_stats_samples=2, seed=3)
         self.assertEqual(float(stats.action.max.max()), 239.0)
+
+    def test_geometric_hindsight_goal_uses_arc_fractions_and_average_speed(self) -> None:
+        dataset = SpatialHindsightDataset(
+            [str(self.path)],
+            goal_horizon_steps=100,
+            goal_source="achieved",
+            goal_representation="hindsight_geom_avg12",
+            symmetry_mode="none",
+        )
+        item = dataset[0]
+        self.assertEqual(tuple(item["goal_hist"].shape), (8, 12))
+        demo = dataset.demos[0]
+        expected = build_goal_vector(
+            demo.root_pos_w,
+            demo.cumulative_xy,
+            1,
+            101,
+            demo.root_pos_w[1],
+            demo.root_quat_w[1],
+            quat_w=demo.root_quat_w,
+            goal_representation="hindsight_geom_avg12",
+        )
+        np.testing.assert_allclose(item["goal_hist"][0], expected, atol=1e-6)
+        self.assertGreater(float(item["goal_hist"][0, 11]), 0.0)
+        # The 25/50/75% points must advance geometrically along the trajectory.
+        distances = np.linalg.norm(item["goal_hist"][0, :8].numpy().reshape(4, 2), axis=-1)
+        self.assertTrue(np.all(np.diff(distances) >= -1.0e-5))
+
+        mirrored = apply_symmetry(
+            torch.zeros((8, 30)), torch.zeros((8, 12)), item["goal_hist"], torch.zeros((16, 12)),
+            index=1, mode="quadruped",
+        )[2]
+        np.testing.assert_allclose(mirrored[:, 0::2][:, :4], item["goal_hist"][:, 0::2][:, :4], atol=1e-6)
+        np.testing.assert_allclose(mirrored[:, 1:8:2], -item["goal_hist"][:, 1:8:2], atol=1e-6)
+        np.testing.assert_allclose(mirrored[:, 8], -item["goal_hist"][:, 8], atol=1e-6)
+        np.testing.assert_allclose(mirrored[:, 9:], item["goal_hist"][:, 9:], atol=1e-6)
+
+        policy = Solo12DiffusionPolicy(Solo12DiffusionPolicyConfig(
+            goal_dim=12, d_model=32, nhead=4, num_layers=1, p_drop_attn=0.0,
+            num_train_timesteps=2, num_inference_steps=2,
+        ))
+        policy.set_normalizer_stats(dataset.build_normalizer_stats([0, 1], max_stats_samples=50))
+        batch = {key: value.unsqueeze(0) for key, value in item.items()}
+        self.assertTrue(torch.isfinite(policy.compute_loss(batch)))
 
     def test_progress_search_does_not_jump_to_crossing_branch(self) -> None:
         path = np.zeros((120, 3), dtype=np.float32)

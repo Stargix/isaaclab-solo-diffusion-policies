@@ -18,6 +18,7 @@ sys.path.insert(0, str(_PACKAGE_ROOT))
 from train.conditioning.goal_builder import (
     GOAL_SCHEMA_NAME, REFERENCE_GOAL_SCHEMA_NAME, HOLONOMIC_REFERENCE_GOAL_SCHEMA_NAME,
     PATH_GUIDANCE_GOAL_SCHEMA_NAME, PATH_GUIDANCE_FRACTIONS,
+    GEOMETRIC_HINDSIGHT_GOAL_SCHEMA_NAME, GEOMETRIC_WAYPOINT_FRACTIONS,
     HOLONOMIC_TOKEN_TIMES_S, REFERENCE_GOAL_REPRESENTATIONS, WAYPOINT_TIME_OFFSETS_S,
 )
 from train.data.dataset import SpatialHindsightDataset
@@ -263,6 +264,59 @@ def make_path_guidance_plots(values: np.ndarray, output: Path) -> None:
     plt.close(figure)
 
 
+GEOMETRIC_FEATURE_NAMES = (
+    "waypoint_25_x", "waypoint_25_y",
+    "waypoint_50_x", "waypoint_50_y",
+    "waypoint_75_x", "waypoint_75_y",
+    "terminal_x", "terminal_y",
+    "terminal_sin_dyaw", "terminal_cos_dyaw",
+    "terminal_height_abs", "average_path_speed",
+)
+
+
+def geometric_derived(values: np.ndarray) -> dict[str, float]:
+    points = values[:, :8].reshape(-1, 4, 2)
+    increments = np.linalg.norm(np.diff(points, axis=1), axis=-1)
+    return {
+        "terminal_distance_p05_m": float(np.percentile(np.linalg.norm(points[:, -1], axis=-1), 5)),
+        "terminal_distance_p50_m": float(np.percentile(np.linalg.norm(points[:, -1], axis=-1), 50)),
+        "terminal_distance_p95_m": float(np.percentile(np.linalg.norm(points[:, -1], axis=-1), 95)),
+        "average_speed_p05_m_s": float(np.percentile(values[:, 11], 5)),
+        "average_speed_p50_m_s": float(np.percentile(values[:, 11], 50)),
+        "average_speed_p95_m_s": float(np.percentile(values[:, 11], 95)),
+        "stop_fraction_v_avg_lt_0p02": float(np.mean(values[:, 11] < 0.02)),
+        "duplicate_waypoint_fraction": float(np.mean(np.any(increments < 1.0e-4, axis=-1))),
+    }
+
+
+def make_geometric_plots(values: np.ndarray, output: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    points = values[:, :8].reshape(-1, 4, 2)
+    figure, axes = plt.subplots(2, 2, figsize=(11, 8))
+    axes[0, 0].scatter(points[:, -1, 0], points[:, -1, 1], c=values[:, 11], s=4, alpha=0.2)
+    axes[0, 0].set(title="Terminal XY support", xlabel="terminal x [m]", ylabel="terminal y [m]")
+    axes[0, 0].axis("equal")
+    axes[0, 1].scatter(values[:, 11], np.linalg.norm(points[:, -1], axis=-1), s=4, alpha=0.2)
+    axes[0, 1].set(title="Average speed and terminal reach", xlabel="v_avg [m/s]", ylabel="terminal distance [m]")
+    axes[1, 0].boxplot(
+        np.linalg.norm(points, axis=-1),
+        tick_labels=("25%", "50%", "75%", "terminal"),
+        showfliers=False,
+    )
+    axes[1, 0].set(title="Geometric waypoint distance", ylabel="distance [m]")
+    axes[1, 1].hist(values[:, 11], bins=60)
+    axes[1, 1].set(title="Average path speed", xlabel="v_avg [m/s]", ylabel="count")
+    for axis in axes.flat:
+        axis.grid(True, alpha=0.2)
+    figure.tight_layout()
+    figure.savefig(output / "hindsight_geom_avg12_coverage.png", dpi=180)
+    plt.close(figure)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--datasets", nargs="+", required=True)
@@ -306,14 +360,20 @@ def main() -> None:
 
     holonomic = args.goal_representation == "holonomic_se2_32"
     path_guidance = args.goal_representation == "path_guidance_se2_36"
-    names = path_guidance_feature_names() if path_guidance else holonomic_feature_names() if holonomic else FEATURE_NAMES
+    geometric = args.goal_representation == "hindsight_geom_avg12"
+    names = (
+        path_guidance_feature_names() if path_guidance else holonomic_feature_names() if holonomic
+        else GEOMETRIC_FEATURE_NAMES if geometric else FEATURE_NAMES
+    )
     summary = {
-        "goal_schema": (PATH_GUIDANCE_GOAL_SCHEMA_NAME if path_guidance
+        "goal_schema": (GEOMETRIC_HINDSIGHT_GOAL_SCHEMA_NAME if geometric
+                        else PATH_GUIDANCE_GOAL_SCHEMA_NAME if path_guidance
                         else HOLONOMIC_REFERENCE_GOAL_SCHEMA_NAME if holonomic
                         else REFERENCE_GOAL_SCHEMA_NAME if args.goal_source == "reference" else GOAL_SCHEMA_NAME),
         "waypoint_time_offsets_s": WAYPOINT_TIME_OFFSETS_S,
         "holonomic_token_times_s": HOLONOMIC_TOKEN_TIMES_S if holonomic else None,
         "path_guidance_fractions": PATH_GUIDANCE_FRACTIONS if path_guidance else None,
+        "geometric_waypoint_fractions": GEOMETRIC_WAYPOINT_FRACTIONS if geometric else None,
         "goal_horizon_steps": args.goal_horizon_steps,
         "goal_source": args.goal_source,
         "goal_representation": args.goal_representation,
@@ -324,7 +384,8 @@ def main() -> None:
         "sampled_goals": sample_count,
         "skill_demo_counts": skill_demo_counts,
         "feature_stats": feature_stats(values, names),
-        "derived": (path_guidance_derived(values) if path_guidance
+        "derived": (geometric_derived(values) if geometric
+                    else path_guidance_derived(values) if path_guidance
                     else holonomic_derived(values) if holonomic else derived_metrics(values)),
     }
     (output / "coverage_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -336,6 +397,8 @@ def main() -> None:
         make_path_guidance_plots(values, output)
     elif holonomic:
         make_holonomic_plots(values, output)
+    elif geometric:
+        make_geometric_plots(values, output)
     else:
         make_plots(values, output)
     print(f"[DONE] Spatial coverage report: {output.resolve()}")
