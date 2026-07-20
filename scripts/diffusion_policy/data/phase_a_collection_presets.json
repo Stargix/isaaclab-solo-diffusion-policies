@@ -1,0 +1,46 @@
+{
+  "schema": "phase_a_single_skill_collection_v1",
+  "description": "Reproducible command envelope for the joint walk/crouch hindsight dataset.",
+  "shared": {
+    "route_profile": "phase_a",
+    "include_warmup_frames": true,
+    "startup_hold_steps": 25,
+    "command_resample_time_s": 5.0,
+    "phase_a_stop_probability": 0.08,
+    "phase_a_stop_hold_s": 2.0,
+    "num_envs": 1024,
+    "num_steps": 1000000,
+    "physics_dr_mode": "light"
+  },
+  "walk": {
+    "task": "solo12-v0",
+    "checkpoint": "checkpoints/walk_final.pt",
+    "skill_name": "walk",
+    "desired_base_height": 0.2932,
+    "num_envs": 4096,
+    "phase_a_forward_speed_min": 0.20,
+    "phase_a_forward_speed_max": 1.00,
+    "phase_a_arc_forward_speed_max": 0.80,
+    "phase_a_reverse_speed_abs_max": 1.00,
+    "phase_a_lateral_speed_abs_max": 0.50,
+    "phase_a_lateral_forward_speed_max": 0.65,
+    "phase_a_yaw_rate_abs_max": 0.50,
+    "seed": 42,
+    "output_name": "walk_phase_a_balanced_slow_v2.hdf5"
+  },
+  "crouch": {
+    "task": "solo12-crouch-v0",
+    "checkpoint": "checkpoints/crouch_final.pt",
+    "skill_name": "crouch",
+    "desired_base_height": 0.1705,
+    "phase_a_forward_speed_min": 0.10,
+    "phase_a_forward_speed_max": 0.45,
+    "phase_a_arc_forward_speed_max": 0.50,
+    "phase_a_reverse_speed_abs_max": 0.50,
+    "phase_a_lateral_speed_abs_max": 0.25,
+    "phase_a_lateral_forward_speed_max": 0.35,
+    "phase_a_yaw_rate_abs_max": 0.35,
+    "seed": 43,
+    "output_name": "crouch_phase_a_balanced_slow_v2.hdf5"
+  }
+}

@@ -33,6 +33,14 @@ parser.add_argument("--task", type=str, default="solo12-v0")
 parser.add_argument("--checkpoint", type=str, required=True)
 parser.add_argument("--output_dir", type=str, default=None)
 parser.add_argument("--speeds", type=float, nargs="+", default=(0.2, 0.4, 0.6, 0.8, 1.0))
+parser.add_argument(
+    "--path_shapes",
+    type=str,
+    nargs="+",
+    choices=("straight", "circle", "s_curve", "right_angle", "random_polyline"),
+    default=("straight", "circle", "s_curve", "right_angle", "random_polyline"),
+    help="Path families to evaluate. New non-smooth families expose corner and polyline generalization.",
+)
 parser.add_argument("--repeats", type=int, default=3, help="Stochastic repeats per scenario condition.")
 parser.add_argument("--duration_s", type=float, default=50.0)
 parser.add_argument("--warmup_steps", type=int, default=25)
@@ -223,14 +231,79 @@ def build_circle_path(start_pos: np.ndarray, start_quat: np.ndarray, radius: flo
     center_y = start_pos[1] + radius * np.cos(yaw)
     path_points = []
     for theta in np.linspace(-np.pi/2, 5/2*np.pi, num_points):  # 1.5 loops
-        wx = float(center_x + radius * np.cos(yaw + theta + np.pi/2))
-        wy = float(center_y + radius * np.sin(yaw + theta + np.pi/2))
+        # theta=-pi/2 is exactly the robot's spawn point.  The previous extra
+        # +pi/2 rotated the circle and made every evaluation start 2.12 m OOD.
+        wx = float(center_x + radius * np.cos(yaw + theta))
+        wy = float(center_y + radius * np.sin(yaw + theta))
         path_points.append([wx, wy, 0.2932])
         
     yaws = [yaw]
     for idx in range(1, len(path_points)):
         yaws.append(np.arctan2(path_points[idx][1] - path_points[idx - 1][1], path_points[idx][0] - path_points[idx - 1][0]))
     return np.array(path_points, dtype=np.float32), np.array(yaws, dtype=np.float32)
+
+
+def _sample_local_polyline(
+    waypoints_xy: np.ndarray,
+    *,
+    start_pos: np.ndarray,
+    start_yaw: float,
+    z: float = 0.2932,
+    spacing_m: float = 0.05,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Sample connected local line segments and assign tangent yaw per segment."""
+
+    waypoints = np.asarray(waypoints_xy, dtype=np.float32)
+    if waypoints.ndim != 2 or waypoints.shape[1] != 2 or len(waypoints) < 2:
+        raise ValueError("Polyline waypoints must have shape (N,2), N>=2.")
+    cos_y, sin_y = float(np.cos(start_yaw)), float(np.sin(start_yaw))
+    rotation = np.asarray([[cos_y, -sin_y], [sin_y, cos_y]], dtype=np.float32)
+    points: list[list[float]] = []
+    yaws: list[float] = []
+    for segment_idx, (a, b) in enumerate(zip(waypoints[:-1], waypoints[1:])):
+        delta = b - a
+        length = float(np.linalg.norm(delta))
+        if length < 1.0e-4:
+            continue
+        count = max(1, int(np.ceil(length / spacing_m)))
+        tangent_yaw = float(start_yaw + np.arctan2(delta[1], delta[0]))
+        for sample_idx in range(count):
+            if segment_idx > 0 and sample_idx == 0:
+                continue
+            local = a + (b - a) * (sample_idx / count)
+            world_xy = start_pos[:2] + rotation @ local
+            points.append([float(world_xy[0]), float(world_xy[1]), z])
+            yaws.append(tangent_yaw)
+    final_world = start_pos[:2] + rotation @ waypoints[-1]
+    points.append([float(final_world[0]), float(final_world[1]), z])
+    yaws.append(yaws[-1] if yaws else float(start_yaw))
+    return np.asarray(points, dtype=np.float32), np.asarray(yaws, dtype=np.float32)
+
+
+def build_right_angle_path(start_pos: np.ndarray, start_quat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Connected 90-degree corners with no circular smoothing."""
+
+    yaw = robot_yaw_w(start_quat)
+    waypoints = np.asarray(
+        [[0.0, 0.0], [2.0, 0.0], [2.0, 1.2], [4.0, 1.2], [4.0, -0.2], [6.0, -0.2]],
+        dtype=np.float32,
+    )
+    return _sample_local_polyline(waypoints, start_pos=start_pos, start_yaw=yaw)
+
+
+def build_random_polyline_path(start_pos: np.ndarray, start_quat: np.ndarray, seed: int = 17) -> tuple[np.ndarray, np.ndarray]:
+    """Deterministic connected random polyline for repeatable generalization tests."""
+
+    yaw = robot_yaw_w(start_quat)
+    rng = np.random.default_rng(seed)
+    x = 0.0
+    y = 0.0
+    waypoints = [[x, y]]
+    for _ in range(7):
+        x += float(rng.uniform(0.65, 1.15))
+        y = float(np.clip(y + rng.uniform(-0.85, 0.85), -1.15, 1.15))
+        waypoints.append([x, y])
+    return _sample_local_polyline(np.asarray(waypoints, dtype=np.float32), start_pos=start_pos, start_yaw=yaw)
 
 
 def compute_vectorized_goals(
@@ -416,7 +489,7 @@ def make_scenarios() -> list[Scenario]:
             for index, (demo_name, _, _, _, _, speed) in enumerate(fragments)
         ]
     scenarios = []
-    shapes = ["straight", "circle", "s_curve"]
+    shapes = list(args_cli.path_shapes)
     for shape in shapes:
         for speed in args_cli.speeds:
             for r in range(args_cli.repeats):
@@ -519,6 +592,10 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             pts, yaws = build_s_curve_path(start_pos[i], start_quat[i])
         elif s.path_shape == "circle":
             pts, yaws = build_circle_path(start_pos[i], start_quat[i])
+        elif s.path_shape == "right_angle":
+            pts, yaws = build_right_angle_path(start_pos[i], start_quat[i])
+        elif s.path_shape == "random_polyline":
+            pts, yaws = build_random_polyline_path(start_pos[i], start_quat[i])
         else:
             raise ValueError(f"Unknown shape: {s.path_shape}")
         
@@ -683,7 +760,16 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         target_height = float(plan.path_w[-1, 2])
         h_rmse = float(np.sqrt(np.mean(np.square(hgts - target_height)))) if hgts.size else math.nan
         survived = not bool(failures[i])
-        terminal_index = plan.terminal_step if plan.time_indexed and plan.terminal_step is not None else len(plan.path_w) - 1
+        if plan.time_indexed and plan.terminal_step is not None:
+            terminal_index = int(plan.terminal_step)
+            target_progress_m = float(plan.cumulative_lengths[terminal_index] - plan.cumulative_lengths[0])
+        else:
+            # Analytic paths are longer than a finite evaluation episode at low
+            # speed.  Compare against the point reachable in v*t, not always
+            # against the global endpoint of the polyline.
+            target_progress_m = min(float(s.speed) * float(args_cli.duration_s), float(plan.cumulative_lengths[-1]))
+            target_arc = float(plan.cumulative_lengths[0] + target_progress_m)
+            terminal_index = int(np.clip(np.searchsorted(plan.cumulative_lengths, target_arc, side="left"), 0, len(plan.path_w) - 1))
         terminal_index = int(np.clip(terminal_index, 0, len(plan.path_w) - 1))
         if trajectories[i]["actual"]:
             final_xy = np.asarray(trajectories[i]["actual"][-1]) + start_pos[i, :2]
@@ -710,6 +796,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             "time_to_failure_s": float(failure_step[i] * dt) if failures[i] else args_cli.duration_s,
             "xy_rmse": xy_rmse,
             "height_rmse": h_rmse,
+            "target_progress_m": target_progress_m,
+            "target_path_index": terminal_index,
             "terminal_position_error_m": terminal_position_error,
             "terminal_yaw_error_rad": terminal_yaw_error,
             "final_planar_speed_m_s": float(planar_speeds_ach[-1]) if planar_speeds_ach.size else math.nan,

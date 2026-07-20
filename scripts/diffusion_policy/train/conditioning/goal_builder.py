@@ -276,6 +276,7 @@ def build_geometric_hindsight_goal_vector(
     yaws_w: np.ndarray | None = None,
     dt: float,
     v_avg_clip: float,
+    duration_s: float | None = None,
 ) -> np.ndarray:
     """Encode a local achieved path without per-waypoint deadlines.
 
@@ -304,8 +305,15 @@ def build_geometric_hindsight_goal_vector(
         dyaw = relative_yaw(quat_origin, quat_w[terminal])
     else:
         dyaw = relative_yaw(quat_origin, yaw_to_quat_wxyz(float(yaws_w[terminal])))
-    duration_s = max(float(terminal - step) * float(dt), float(dt))
-    v_avg = float(np.clip((float(cumulative[terminal]) - float(cumulative[step])) / duration_s, 0.0, v_avg_clip))
+    # Training trajectories are sampled at the control rate, but deployment
+    # paths may be sparse spatial polylines.  Callers supplying a planned path
+    # must therefore provide the physical lookahead duration explicitly rather
+    # than interpreting a polyline point index as a simulation tick.
+    duration = max(
+        float(terminal - step) * float(dt) if duration_s is None else float(duration_s),
+        float(dt),
+    )
+    v_avg = float(np.clip((float(cumulative[terminal]) - float(cumulative[step])) / duration, 0.0, v_avg_clip))
     values.extend((
         float(terminal_local[0]), float(terminal_local[1]),
         math.sin(float(dyaw)), math.cos(float(dyaw)),
@@ -532,6 +540,7 @@ def build_geometric_hindsight_goal_from_path(
     return build_geometric_hindsight_goal_vector(
         path_w, cumulative_xy, start_idx, end_idx, robot_pos_w, robot_quat_w,
         yaws_w=yaws_w, dt=dt, v_avg_clip=v_avg_clip,
+        duration_s=float(goal_horizon_steps) * float(dt),
     )
 
 

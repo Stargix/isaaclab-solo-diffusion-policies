@@ -119,8 +119,8 @@ parser.add_argument(
     choices=["random_velocity", "phase_a", "phase_a_closed_loop", "phase_a_holonomic", "phase_a_path_guidance"],
     default="random_velocity",
     help=(
-        "random_velocity preserves the legacy velocity dataset. phase_a preserves the old "
-        "walk-only command-integrated route collector. phase_a_closed_loop generates a fixed "
+        "random_velocity preserves the legacy velocity dataset. phase_a preserves the simple "
+        "single-skill command-integrated route collector. phase_a_closed_loop generates a fixed "
         "capability-bounded route and labels it with a route-aware command teacher. "
         "phase_a_holonomic samples bounded SE(2) command trajectories without tying body yaw to path tangent. "
         "phase_a_path_guidance samples waypoint/terminal-pose tasks and records a separate imperfect guide."
@@ -156,16 +156,34 @@ parser.add_argument("--phase_a_forward_speed_min", type=float, default=0.20,
                     help="Legacy no-tracker Phase-A: minimum forward speed for straight/arc command phases.")
 parser.add_argument("--phase_a_forward_speed_max", type=float, default=0.65,
                     help="Legacy no-tracker Phase-A: maximum forward speed for straight command phases.")
+parser.add_argument(
+    "--phase_a_arc_forward_speed_max",
+    type=float,
+    default=0.55,
+    help="Legacy no-tracker Phase-A: maximum forward speed sampled for arc command phases.",
+)
 parser.add_argument("--phase_a_reverse_speed_abs_max", type=float, default=0.35,
                     help="Legacy no-tracker Phase-A: maximum reverse speed magnitude.")
 parser.add_argument("--phase_a_lateral_speed_abs_max", type=float, default=0.35,
                     help="Legacy no-tracker Phase-A: maximum lateral speed magnitude.")
+parser.add_argument(
+    "--phase_a_lateral_forward_speed_max",
+    type=float,
+    default=0.40,
+    help="Legacy no-tracker Phase-A: maximum forward component sampled for lateral command phases.",
+)
 parser.add_argument("--phase_a_yaw_rate_abs_max", type=float, default=0.70,
                     help="Legacy no-tracker Phase-A: maximum yaw-rate magnitude.")
 parser.add_argument(
+    "--phase_a_stop_probability",
+    type=float,
+    default=0.08,
+    help="Legacy no-tracker Phase-A: probability of sampling a zero-command hold at each resample.",
+)
+parser.add_argument(
     "--phase_a_stop_hold_s",
     type=float,
-    default=2.5,
+    default=2.1,
     help=(
         "Legacy no-tracker Phase-A: minimum duration of a sampled zero-command hold. "
         "Must cover the 2 s hindsight horizon so stop goals are represented."
@@ -369,7 +387,7 @@ def configure_env_for_collection(env_cfg: Any, args: argparse.Namespace) -> None
 # Command sampling
 # --------------------------------------------------------------------------- #
 def _sample_phase_a_command(rng: random.Random, args: argparse.Namespace) -> tuple[float, float, float]:
-    """Sample one stable walk command phase for reference-path tracking.
+    """Sample one stable command phase for single-skill reference-path tracking.
 
     The discrete mixture deliberately contains stops, starts, forward arcs,
     lateral motion and a small reverse component.  This is not a global
@@ -379,13 +397,29 @@ def _sample_phase_a_command(rng: random.Random, args: argparse.Namespace) -> tup
 
     if not 0.0 < args.phase_a_forward_speed_min <= args.phase_a_forward_speed_max:
         raise ValueError("Require 0 < --phase_a_forward_speed_min <= --phase_a_forward_speed_max.")
+    if not args.phase_a_forward_speed_min <= args.phase_a_arc_forward_speed_max:
+        raise ValueError("--phase_a_arc_forward_speed_max must be at least --phase_a_forward_speed_min.")
+    if args.phase_a_lateral_forward_speed_max <= 0.0:
+        raise ValueError("--phase_a_lateral_forward_speed_max must be positive.")
     if min(args.phase_a_reverse_speed_abs_max, args.phase_a_lateral_speed_abs_max, args.phase_a_yaw_rate_abs_max) < 0.0:
         raise ValueError("Phase-A reverse/lateral/yaw limits must be non-negative.")
+    if not 0.0 <= args.phase_a_stop_probability < 1.0:
+        raise ValueError("--phase_a_stop_probability must be in [0, 1).")
     if args.phase_a_stop_hold_s < 2.0:
         raise ValueError("--phase_a_stop_hold_s must be at least 2.0 s for the current hindsight horizon.")
+
+    moving_probability = 1.0 - args.phase_a_stop_probability
     mode = rng.choices(
         ("stop", "straight", "arc", "lateral", "reverse"),
-        weights=(0.20, 0.30, 0.30, 0.12, 0.08),
+        # Preserve the original relative mix among moving modes, while making
+        # stops a deliberate minority rather than the dominant sampled goal.
+        weights=(
+            args.phase_a_stop_probability,
+            0.375 * moving_probability,
+            0.375 * moving_probability,
+            0.150 * moving_probability,
+            0.100 * moving_probability,
+        ),
         k=1,
     )[0]
     if mode == "stop":
@@ -399,14 +433,18 @@ def _sample_phase_a_command(rng: random.Random, args: argparse.Namespace) -> tup
     if mode == "arc":
         direction = -1.0 if rng.random() < 0.5 else 1.0
         return (
-            rng.uniform(args.phase_a_forward_speed_min, min(0.55, args.phase_a_forward_speed_max)),
+            rng.uniform(
+                args.phase_a_forward_speed_min,
+                min(args.phase_a_arc_forward_speed_max, args.phase_a_forward_speed_max),
+            ),
             rng.uniform(-min(0.08, args.phase_a_lateral_speed_abs_max), min(0.08, args.phase_a_lateral_speed_abs_max)),
             direction * rng.uniform(min(0.25, args.phase_a_yaw_rate_abs_max), args.phase_a_yaw_rate_abs_max),
         )
     if mode == "lateral":
         direction = -1.0 if rng.random() < 0.5 else 1.0
+        lateral_forward_upper = min(args.phase_a_lateral_forward_speed_max, args.phase_a_forward_speed_max)
         return (
-            rng.uniform(min(0.15, args.phase_a_forward_speed_max), min(0.40, args.phase_a_forward_speed_max)),
+            rng.uniform(min(0.15, lateral_forward_upper), lateral_forward_upper),
             direction * rng.uniform(min(0.15, args.phase_a_lateral_speed_abs_max), args.phase_a_lateral_speed_abs_max),
             rng.uniform(-min(0.25, args.phase_a_yaw_rate_abs_max), min(0.25, args.phase_a_yaw_rate_abs_max)),
         )
@@ -1007,8 +1045,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             "The velocity-height schema is intentionally single-expert only. "
             "Collect one file per expert and merge them; chained transitions need an explicit per-skill height schedule."
         )
-    if args_cli.route_profile == "phase_a" and args_cli.skill_name not in (None, "walk"):
-        raise ValueError("phase_a is intentionally walk-only; pass --skill_name walk.")
+    if args_cli.route_profile == "phase_a" and args_cli.skill_name not in (None, "walk", "crouch"):
+        raise ValueError("phase_a accepts exactly one named locomotion expert: --skill_name walk or crouch.")
     if args_cli.route_profile in {"phase_a", *CLOSED_LOOP_ROUTE_PROFILES} and not args_cli.include_warmup_frames:
         raise ValueError(
             "Phase-A route collection requires --include_warmup_frames so reset/start histories are represented."
@@ -1030,8 +1068,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     policy_mgr = PolicyManager(vec_env, agent_cfg, device, args_cli.mode,
                                args_cli.checkpoint, args_cli.checkpoints, args_cli.skill_name)
     skill_names = policy_mgr.skill_names
-    if args_cli.route_profile == "phase_a" and skill_names != ["walk"]:
-        raise ValueError(f"phase_a requires exactly the walk expert, got {skill_names}.")
+    if args_cli.route_profile == "phase_a" and (len(skill_names) != 1 or skill_names[0] not in {"walk", "crouch"}):
+        raise ValueError(f"phase_a requires exactly one walk or crouch expert, got {skill_names}.")
     num_envs = args_cli.num_envs
 
     state_tracker = CollectionState(num_envs, skill_names, args_cli, rng)
@@ -1087,9 +1125,12 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             "phase_a_command_distribution": {
                 "forward_speed_min": args_cli.phase_a_forward_speed_min,
                 "forward_speed_max": args_cli.phase_a_forward_speed_max,
+                "arc_forward_speed_max": args_cli.phase_a_arc_forward_speed_max,
                 "reverse_speed_abs_max": args_cli.phase_a_reverse_speed_abs_max,
                 "lateral_speed_abs_max": args_cli.phase_a_lateral_speed_abs_max,
+                "lateral_forward_speed_max": args_cli.phase_a_lateral_forward_speed_max,
                 "yaw_rate_abs_max": args_cli.phase_a_yaw_rate_abs_max,
+                "stop_probability": args_cli.phase_a_stop_probability,
                 "command_resample_time_s": args_cli.command_resample_time_s,
                 "stop_hold_s": args_cli.phase_a_stop_hold_s,
             },
