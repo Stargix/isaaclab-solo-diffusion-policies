@@ -26,19 +26,7 @@ from isaaclab.terrains import TerrainGeneratorCfg, TerrainImporterCfg
 from isaaclab.utils import configclass
 
 
-# ``SoloFlat.usd`` in older asset exports references the generated layer
-# ``solo12_gen_wout_includes.usd``, which is not shipped in this repository.
-# ``solo12.usd`` is the versioned wrapper that composes the robot, physics and
-# sensor layers from ``configuration/`` before Isaac Lab activates contacts.
-SOLO12_USD_PATH = (
-    Path(__file__).parents[4]
-    / "isaaclab_assets/data/Robots/Solo12/solo12.usd"
-)
-if not SOLO12_USD_PATH.is_file():
-    raise FileNotFoundError(
-        f"Solo12 asset not found at {SOLO12_USD_PATH}. "
-        "Check that source/isaaclab_assets is present in the checkout."
-    )
+SOLO12_USD_PATH = Path(__file__).parents[4] / "isaaclab_assets/data/Robots/Solo12/SoloFlat.usd"
 
 ROOT_LIN_VEL_OBS_DIM = 3
 BASE_OBSERVATION_SPACE = 48

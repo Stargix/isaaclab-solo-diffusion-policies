@@ -43,6 +43,8 @@ parser.add_argument(
 )
 parser.add_argument("--repeats", type=int, default=3, help="Stochastic repeats per scenario condition.")
 parser.add_argument("--duration_s", type=float, default=50.0)
+parser.add_argument("--path_height", type=float, default=None,
+                    help="Route height in metres. Defaults to the checkpoint dataset's desired_base_height.")
 parser.add_argument("--warmup_steps", type=int, default=25)
 parser.add_argument("--num_inference_steps", type=int, default=None)
 parser.add_argument("--exec_horizon", type=int, default=8)
@@ -522,6 +524,29 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         ),
     )
     config = checkpoint["config"]
+    if args_cli.path_height is None:
+        path_height = 0.2932
+        for raw_dataset in config.get("dataset", {}).get("hdf5_paths", []):
+            dataset_path = Path(raw_dataset)
+            if not dataset_path.is_absolute():
+                dataset_path = _PROJECT_ROOT / dataset_path
+            if dataset_path.is_file():
+                try:
+                    with h5py.File(dataset_path, "r") as dataset:
+                        values = []
+                        for demo in dataset.get("data", {}).values():
+                            if "desired_base_height" in demo["obs"]:
+                                values.append(float(np.median(demo["obs"]["desired_base_height"][:])))
+                        if values:
+                            path_height = float(np.median(values))
+                except (OSError, KeyError, ValueError):
+                    pass
+                break
+    else:
+        path_height = float(args_cli.path_height)
+    if not 0.10 <= path_height <= 0.40:
+        raise ValueError(f"--path_height must be in [0.10, 0.40], got {path_height}.")
+    print(f"[INFO] Evaluation route height: {path_height:.4f} m")
     inference_steps = resolve_inference_steps(args_cli.num_inference_steps, config["diffusion"])
     policy_cfg = _model_cfg_from_checkpoint(config)
     policy_cfg.num_inference_steps = inference_steps
@@ -598,6 +623,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             pts, yaws = build_random_polyline_path(start_pos[i], start_quat[i])
         else:
             raise ValueError(f"Unknown shape: {s.path_shape}")
+        # Analytic route builders use walk height by default. Match the
+        # posture support of the checkpoint unless explicitly overridden.
+        pts[:, 2] = path_height
         
         path_plans.append(
             PathPlan(
@@ -649,6 +677,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     tracking_errors = []
     achieved_speeds = []
     achieved_planar_speeds = []
+    achieved_tangent_speeds = []
     achieved_heights = []
     achieved_yaws = []
     tilts = []
@@ -694,6 +723,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         tilt = torch.rad2deg(torch.asin(torch.clamp(torch.linalg.vector_norm(projected[:, :2], dim=-1), 0.0, 1.0))).cpu().numpy()
         vx = robot.root_lin_vel_b[:, 0].cpu().numpy()
         planar_speed = torch.linalg.vector_norm(robot.root_lin_vel_b[:, :2], dim=-1).cpu().numpy()
+        vel_world = robot.root_lin_vel_w[:, :2].cpu().numpy()
         height = robot.root_pos_w[:, 2].cpu().numpy()
         quat = robot.root_quat_w.cpu().numpy()
         yaw = np.asarray([robot_yaw_w(value) for value in quat], dtype=np.float32)
@@ -701,6 +731,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         previous_for_delta = action.clone()
 
         step_errors = []
+        tangent_speeds = []
         for i in range(num_envs):
             plan = path_plans[i]
             closest_idx = (
@@ -710,6 +741,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             )
             err = float(np.linalg.norm(pos_w[i, :2] - plan.path_w[closest_idx, :2]))
             step_errors.append(err)
+            tangent_idx = min(closest_idx + 1, len(plan.path_w) - 1)
+            tangent = plan.path_w[tangent_idx, :2] - plan.path_w[max(0, tangent_idx - 1), :2]
+            tangent_norm = float(np.linalg.norm(tangent))
+            tangent = tangent / tangent_norm if tangent_norm > 1.0e-6 else np.zeros(2, dtype=np.float32)
+            tangent_speeds.append(float(np.dot(vel_world[i], tangent)))
 
             if not failures[i]:
                 # Track actual vs reference relative to spawn
@@ -720,6 +756,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         tracking_errors.append(step_errors)
         achieved_speeds.append(vx)
         achieved_planar_speeds.append(planar_speed)
+        achieved_tangent_speeds.append(np.asarray(tangent_speeds, dtype=np.float32))
         achieved_heights.append(height)
         achieved_yaws.append(yaw)
         tilts.append(tilt)
@@ -735,6 +772,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     tracking_errors = np.stack(tracking_errors, axis=0)  # [steps, num_envs]
     achieved_speeds = np.stack(achieved_speeds, axis=0)  # [steps, num_envs]
     achieved_planar_speeds = np.stack(achieved_planar_speeds, axis=0)
+    achieved_tangent_speeds = np.stack(achieved_tangent_speeds, axis=0)
     achieved_heights = np.stack(achieved_heights, axis=0)
     achieved_yaws = np.stack(achieved_yaws, axis=0)
     tilts = np.stack(tilts, axis=0)
@@ -750,6 +788,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         xy_errs = tracking_errors[:, i][mask]
         speeds_ach = achieved_speeds[:, i][mask]
         planar_speeds_ach = achieved_planar_speeds[:, i][mask]
+        tangent_speeds_ach = achieved_tangent_speeds[:, i][mask]
         hgts = achieved_heights[:, i][mask]
         yaws_ach = achieved_yaws[:, i][mask]
         tls = tilts[:, i][mask]
@@ -806,8 +845,10 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             ),
             "achieved_speed_mean": float(np.mean(speeds_ach)) if speeds_ach.size else math.nan,
             "achieved_planar_speed_mean": float(np.mean(planar_speeds_ach)) if planar_speeds_ach.size else math.nan,
+            "achieved_tangent_speed_mean": float(np.mean(tangent_speeds_ach)) if tangent_speeds_ach.size else math.nan,
             "achieved_speed_ratio": (
-                float(np.mean(speeds_ach) / s.speed) if speeds_ach.size and s.speed > 1.0e-6 else math.nan
+                float(np.mean(tangent_speeds_ach) / s.speed)
+                if tangent_speeds_ach.size and s.speed > 1.0e-6 else math.nan
             ),
             "achieved_height_mean": float(np.mean(hgts)) if hgts.size else math.nan,
             "tilt_rms_deg": float(np.sqrt(np.mean(np.square(tls)))) if tls.size else math.nan,
@@ -933,7 +974,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         speeds_ach = []
         speeds_std = []
         for v in speeds_req:
-            vals = [r["achieved_speed_mean"] for r in subset if r["requested_speed"] == v]
+            vals = [r["achieved_tangent_speed_mean"] for r in subset if r["requested_speed"] == v]
             speeds_ach.append(np.mean(vals) if vals else np.nan)
             speeds_std.append(np.std(vals) if vals else np.nan)
         

@@ -1,0 +1,119 @@
+{
+  "timestamp": "2026-07-21T12:21:35.074237",
+  "task": "solo12-v0",
+  "checkpoint": "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\checkpoints_iri\\hindsight_walk_crouch.pt",
+  "checkpoint_sha256": "0F2CEB46A790E6FD773AFBB533EA7001FB9C84CBC461A0536ADB27B664C47DC8",
+  "git_commit": "84aa9902f83203c302ce9bcd11135834441a2b99",
+  "config": {
+    "dataset": {
+      "hdf5_paths": [
+        "scripts/diffusion_policy/data/datasets/crouch_phase_a_holonomic_train_v2.hdf5"
+      ],
+      "history": 8,
+      "prediction_horizon": 16,
+      "execution_offset": 8,
+      "goal_horizon_steps": 100,
+      "waypoint_time_offsets_s": [
+        0.5,
+        1.0,
+        1.5
+      ],
+      "step_stride": 1,
+      "dt": 0.02,
+      "v_req_clip": 2.0,
+      "goal_source": "achieved",
+      "goal_representation": "path11",
+      "waypoint_noise_std_m": 0.03,
+      "waypoint_noise_clip_m": 0.06,
+      "include_padded_starts": false,
+      "startup_sample_multiplier": 1,
+      "symmetry_mode": "quadruped",
+      "max_stats_samples": 20000,
+      "val_fraction": 0.05
+    },
+    "model": {
+      "proprio_dim": 30,
+      "action_hist_dim": 12,
+      "goal_dim": 11,
+      "action_dim": 12,
+      "d_model": 128,
+      "nhead": 4,
+      "num_layers": 4,
+      "dim_feedforward": 512,
+      "p_drop_emb": 0.0,
+      "p_drop_attn": 0.3,
+      "separate_goal_conditioning": true
+    },
+    "diffusion": {
+      "num_train_timesteps": 10,
+      "num_inference_steps": 10,
+      "beta_start": 0.0001,
+      "beta_end": 0.02,
+      "beta_schedule": "squaredcos_cap_v2",
+      "prediction_type": "epsilon",
+      "variance_type": "fixed_small",
+      "clip_sample": true,
+      "cfg_dropout_prob": 0.0
+    },
+    "optim": {
+      "batch_size": 4096,
+      "epochs": 200,
+      "learning_rate": 0.0001,
+      "weight_decay": 0.001,
+      "grad_clip_norm": 1.0,
+      "ema_decay": 0.9999,
+      "lr_warmup_steps": 10000,
+      "num_workers": 4,
+      "seed": 42,
+      "mixed_precision": true,
+      "save_every": 10,
+      "log_every": 50
+    },
+    "output_dir": "scripts/diffusion_policy/runs/crouch_hindsight_waypoints_k10_v1",
+    "run_name": "crouch_hindsight_waypoints_k10_v1",
+    "wandb_project": "solo12-diffusion-policy",
+    "wandb_entity": null,
+    "schema_version": 3,
+    "policy_kind": "spatial_time_preview_ddpm",
+    "goal_schema": "spatial_time_preview11_v1"
+  },
+  "dataset_sha256": {
+    "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\scripts\\diffusion_policy\\data\\datasets\\crouch_phase_a_holonomic_train_v2.hdf5": "FC5C3E49CD0D2FD2BB542C600B24D0FC9A1FE02F6561A209A34D39F685C598BC"
+  },
+  "policy_kind": "spatial_time_preview_ddpm",
+  "seed": 42,
+  "duration_s": 20.0,
+  "num_scenarios": 75,
+  "num_inference_steps": 10,
+  "exec_horizon": 4,
+  "goal_horizon_steps": 100,
+  "goal_representation": "path11",
+  "waypoint_time_offsets_s": [
+    0.5,
+    1.0,
+    1.5
+  ],
+  "speeds_evaluated": [
+    0.2,
+    0.4,
+    0.6,
+    0.8,
+    1.0
+  ],
+  "reference_replay_dataset": null,
+  "overall_survival_rate": 0.8,
+  "survival_by_path": {
+    "circle": 0.8,
+    "random_polyline": 0.8666666666666667,
+    "right_angle": 0.9333333333333333,
+    "s_curve": 0.6,
+    "straight": 0.8
+  },
+  "mean_xy_rmse_by_path": {
+    "circle": 0.07936903629674184,
+    "random_polyline": 0.06767675853692395,
+    "right_angle": 0.06657340617688413,
+    "s_curve": 0.04359396191554078,
+    "straight": 0.05450310224151017
+  }
+}
