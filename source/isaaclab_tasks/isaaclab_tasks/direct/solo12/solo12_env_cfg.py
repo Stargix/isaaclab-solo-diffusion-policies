@@ -28,11 +28,11 @@ from isaaclab.utils import configclass
 
 # ``SoloFlat.usd`` in older asset exports references the generated layer
 # ``solo12_gen_wout_includes.usd``, which is not shipped in this repository.
-# The physics layer below is the self-contained, versioned assembly and keeps
-# the articulation bodies available for both PhysX and ContactSensor.
+# ``solo12.usd`` is the versioned wrapper that composes the robot, physics and
+# sensor layers from ``configuration/`` before Isaac Lab activates contacts.
 SOLO12_USD_PATH = (
     Path(__file__).parents[4]
-    / "isaaclab_assets/data/Robots/Solo12/configuration/solo12_gen_wout_includes_physics.usd"
+    / "isaaclab_assets/data/Robots/Solo12/solo12.usd"
 )
 if not SOLO12_USD_PATH.is_file():
     raise FileNotFoundError(
