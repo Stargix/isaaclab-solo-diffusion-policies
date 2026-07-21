@@ -5,8 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 import torch
 
+from isaaclab.utils import configclass
 
-@dataclass
+
+@configclass
 class RewardWeights:
     progress: float = 2.0
     cross_track: float = 3.0
