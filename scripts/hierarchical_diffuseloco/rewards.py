@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import torch
 
 
-@dataclass(frozen=True)
+@dataclass
 class RewardWeights:
     progress: float = 2.0
     cross_track: float = 3.0
