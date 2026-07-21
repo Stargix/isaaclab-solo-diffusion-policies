@@ -26,7 +26,19 @@ from isaaclab.terrains import TerrainGeneratorCfg, TerrainImporterCfg
 from isaaclab.utils import configclass
 
 
-SOLO12_USD_PATH = Path(__file__).parents[4] / "isaaclab_assets/data/Robots/Solo12/SoloFlat.usd"
+# ``SoloFlat.usd`` in older asset exports references the generated layer
+# ``solo12_gen_wout_includes.usd``, which is not shipped in this repository.
+# The physics layer below is the self-contained, versioned assembly and keeps
+# the articulation bodies available for both PhysX and ContactSensor.
+SOLO12_USD_PATH = (
+    Path(__file__).parents[4]
+    / "isaaclab_assets/data/Robots/Solo12/configuration/solo12_gen_wout_includes_physics.usd"
+)
+if not SOLO12_USD_PATH.is_file():
+    raise FileNotFoundError(
+        f"Solo12 asset not found at {SOLO12_USD_PATH}. "
+        "Check that source/isaaclab_assets is present in the checkout."
+    )
 
 ROOT_LIN_VEL_OBS_DIM = 3
 BASE_OBSERVATION_SPACE = 48
