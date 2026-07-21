@@ -42,13 +42,15 @@ parser.add_argument("--v_req_clip", type=float, default=None)
 parser.add_argument("--desired_speed", type=float, default=0.4, help="Speed used for spatial goal lookahead.")
 parser.add_argument(
     "--default_path_mode",
-    choices=("walk", "crouch", "walk_to_crouch"),
+    choices=("walk", "crouch", "walk_to_crouch", "right_angle_walk_to_crouch"),
     default="walk",
     help=(
-        "Built-in route when --path_file is omitted.  walk_to_crouch is an explicit "
+        "Built-in route when --path_file is omitted.  transition modes are explicit "
         "out-of-distribution diagnostic until transition demonstrations are collected."
     ),
 )
+parser.add_argument("--transition_fraction", type=float, default=0.5,
+                    help="Fraction of the route completed before walk->crouch.")
 parser.add_argument("--warmup_steps", type=int, default=25, help="Stand-hold steps before activating the policy.")
 parser.add_argument("--temporal_blend_alpha", type=float, default=1.0, help="1.0 = no chunk blending (less tremor).")
 parser.add_argument(
@@ -102,7 +104,8 @@ class PathPlan:
         if self.is_custom:
             return
         self.path_w, self.yaws_w = build_default_path(
-            pos_w[env_idx], quat_w[env_idx], mode=self.default_path_mode
+            pos_w[env_idx], quat_w[env_idx], mode=self.default_path_mode,
+            transition_fraction=args_cli.transition_fraction,
         )
         self.cumulative_lengths = cumulative_xy_lengths(self.path_w)
 
@@ -120,6 +123,7 @@ def build_default_path(
     walk_z: float = 0.2932,
     crouch_z: float = 0.1705,
     mode: str = "walk",
+    transition_fraction: float = 0.5,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build a straight path in the robot's forward (yaw) direction.
 
@@ -129,14 +133,36 @@ def build_default_path(
     retained only as an explicit future diagnostic.
     """
 
-    if mode not in {"walk", "crouch", "walk_to_crouch"}:
+    if mode not in {"walk", "crouch", "walk_to_crouch", "right_angle_walk_to_crouch"}:
         raise ValueError(f"Unsupported default path mode: {mode}")
+    if not 0.0 < transition_fraction < 1.0:
+        raise ValueError("transition_fraction must be strictly between 0 and 1")
 
     yaw = robot_yaw_w(start_quat_w)
     cos_y = float(np.cos(yaw))
     sin_y = float(np.sin(yaw))
     path_points: list[list[float]] = []
     yaws: list[float] = []
+    if mode == "right_angle_walk_to_crouch":
+        # Forward segment followed by a 90-degree left turn.
+        half = max(2, num_points // 2)
+        local_xy = np.concatenate([
+            np.stack([np.linspace(0.0, length_m / 2.0, half), np.zeros(half)], axis=1),
+            np.stack([np.full(half, length_m / 2.0), np.linspace(0.0, length_m / 2.0, half)], axis=1)[1:],
+        ])
+        local_yaw = np.concatenate([
+            np.full(half, yaw, dtype=np.float32),
+            np.full(half - 1, yaw + np.pi / 2.0, dtype=np.float32),
+        ])
+        arc = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(local_xy, axis=0), axis=1))])
+        for (lx, ly), segment_yaw, travelled in zip(local_xy, local_yaw, arc):
+            x = float(start_pos_w[0] + cos_y * lx - sin_y * ly)
+            y = float(start_pos_w[1] + sin_y * lx + cos_y * ly)
+            z = walk_z if travelled < transition_fraction * arc[-1] else crouch_z
+            path_points.append([x, y, z])
+            yaws.append(float(segment_yaw))
+        return np.array(path_points, dtype=np.float32), np.array(yaws, dtype=np.float32)
+
     for s in np.linspace(0.0, length_m, num_points):
         x = float(start_pos_w[0] + cos_y * s)
         y = float(start_pos_w[1] + sin_y * s)
@@ -145,7 +171,7 @@ def build_default_path(
         elif mode == "crouch":
             z = crouch_z
         else:
-            z = walk_z if s < 0.5 * length_m else crouch_z
+            z = walk_z if s < transition_fraction * length_m else crouch_z
         path_points.append([x, y, z])
         yaws.append(yaw)
     return np.array(path_points, dtype=np.float32), np.array(yaws, dtype=np.float32)
@@ -174,7 +200,10 @@ def load_or_build_path(
         return PathPlan(path_w, yaws_w, cumulative_xy_lengths(path_w), is_custom=True)
 
     print(f"[INFO] Generating default 3 m {default_path_mode} path aligned to robot yaw.")
-    path_w, yaws_w = build_default_path(start_pos[0], start_quat[0], mode=default_path_mode)
+    path_w, yaws_w = build_default_path(
+        start_pos[0], start_quat[0], mode=default_path_mode,
+        transition_fraction=args_cli.transition_fraction,
+    )
     return PathPlan(
         path_w,
         yaws_w,

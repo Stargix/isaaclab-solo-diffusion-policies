@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-07-21T12:46:04.230012",
+  "timestamp": "2026-07-21T18:23:02.886184",
   "task": "solo12-v0",
   "checkpoint": "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\checkpoints_iri\\real_walk_crouch_hindsight.pt",
   "checkpoint_sha256": "7975FE63FDFB5526A8E4613951C6337742CD95A043E1272A2DF98F4CC7CAB553",
@@ -83,7 +83,7 @@
   "policy_kind": "spatial_hindsight_geometry_ddpm",
   "seed": 42,
   "duration_s": 20.0,
-  "num_scenarios": 75,
+  "num_scenarios": 45,
   "num_inference_steps": 10,
   "exec_horizon": 4,
   "goal_horizon_steps": 100,
@@ -96,24 +96,33 @@
   "speeds_evaluated": [
     0.2,
     0.4,
-    0.6,
-    0.8,
-    1.0
+    0.6
+  ],
+  "transition_fractions": [],
+  "height_profile": "random",
+  "height_segment_m": 1.0,
+  "height_cycle": [
+    0.2932,
+    0.25,
+    0.21,
+    0.1705,
+    0.21,
+    0.25
   ],
   "reference_replay_dataset": null,
-  "overall_survival_rate": 0.7733333333333333,
+  "overall_survival_rate": 0.6666666666666666,
   "survival_by_path": {
-    "circle": 0.9333333333333333,
-    "random_polyline": 0.8,
+    "circle": 0.3333333333333333,
+    "random_polyline": 0.6666666666666666,
     "right_angle": 0.6666666666666666,
-    "s_curve": 0.6666666666666666,
-    "straight": 0.8
+    "s_curve": 0.7777777777777778,
+    "straight": 0.8888888888888888
   },
   "mean_xy_rmse_by_path": {
-    "circle": 0.08789767521670357,
-    "random_polyline": 0.05527635920392815,
-    "right_angle": 0.0633693411307642,
-    "s_curve": 0.05676182950892193,
-    "straight": 0.05532185973680903
+    "circle": 0.049640391506478636,
+    "random_polyline": 0.044720749853181536,
+    "right_angle": 0.06155907245899386,
+    "s_curve": 0.03428285708210747,
+    "straight": 0.04473847755579348
   }
 }

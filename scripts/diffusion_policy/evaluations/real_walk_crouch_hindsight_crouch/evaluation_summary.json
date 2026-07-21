@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-07-21T12:46:04.230012",
+  "timestamp": "2026-07-21T12:56:08.156674",
   "task": "solo12-v0",
   "checkpoint": "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\checkpoints_iri\\real_walk_crouch_hindsight.pt",
   "checkpoint_sha256": "7975FE63FDFB5526A8E4613951C6337742CD95A043E1272A2DF98F4CC7CAB553",
@@ -101,19 +101,19 @@
     1.0
   ],
   "reference_replay_dataset": null,
-  "overall_survival_rate": 0.7733333333333333,
+  "overall_survival_rate": 0.84,
   "survival_by_path": {
-    "circle": 0.9333333333333333,
+    "circle": 0.8666666666666667,
     "random_polyline": 0.8,
-    "right_angle": 0.6666666666666666,
-    "s_curve": 0.6666666666666666,
-    "straight": 0.8
+    "right_angle": 0.8666666666666667,
+    "s_curve": 0.8,
+    "straight": 0.8666666666666667
   },
   "mean_xy_rmse_by_path": {
-    "circle": 0.08789767521670357,
-    "random_polyline": 0.05527635920392815,
-    "right_angle": 0.0633693411307642,
-    "s_curve": 0.05676182950892193,
-    "straight": 0.05532185973680903
+    "circle": 0.035563484316861814,
+    "random_polyline": 0.02836765416104361,
+    "right_angle": 0.045514525141887315,
+    "s_curve": 0.020682438784870777,
+    "straight": 0.020914916028293536
   }
 }

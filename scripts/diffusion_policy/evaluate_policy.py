@@ -45,6 +45,23 @@ parser.add_argument("--repeats", type=int, default=3, help="Stochastic repeats p
 parser.add_argument("--duration_s", type=float, default=50.0)
 parser.add_argument("--path_height", type=float, default=None,
                     help="Route height in metres. Defaults to the checkpoint dataset's desired_base_height.")
+parser.add_argument(
+    "--transition_fractions", type=float, nargs="+", default=None,
+    help="Evaluate walk->crouch transitions at these route fractions (e.g. 0.25 0.5 0.75). "
+         "Uses 0.2932 m walk and 0.1705 m crouch heights.",
+)
+parser.add_argument(
+    "--height_profile", choices=("constant", "interleaved", "random"), default="constant",
+    help="constant uses one route height; interleaved repeats a schedule; random samples a reproducible schedule.",
+)
+parser.add_argument(
+    "--height_segment_m", type=float, default=1.0,
+    help="Length in metres of each interleaved height segment.",
+)
+parser.add_argument(
+    "--height_cycle", type=float, nargs="+", default=(0.2932, 0.25, 0.21, 0.1705, 0.21, 0.25),
+    help="Ordered base-height requirements [m] repeated by --height_profile interleaved.",
+)
 parser.add_argument("--warmup_steps", type=int, default=25)
 parser.add_argument("--num_inference_steps", type=int, default=None)
 parser.add_argument("--exec_horizon", type=int, default=8)
@@ -98,6 +115,7 @@ class PathPlan:
     guidance_w: np.ndarray | None = None
     guidance_cumulative: np.ndarray | None = None
     terminal_step: int | None = None
+    height_schedule: tuple[float, ...] | None = None
 
 
 @dataclass
@@ -107,6 +125,7 @@ class Scenario:
     path_shape: str
     speed: float
     demo_name: str | None = None
+    transition_fraction: float | None = None
 
 
 def load_reference_fragments(
@@ -492,10 +511,15 @@ def make_scenarios() -> list[Scenario]:
         ]
     scenarios = []
     shapes = list(args_cli.path_shapes)
+    transitions = [None] if args_cli.transition_fractions is None else list(args_cli.transition_fractions)
+    for fraction in transitions:
+        if fraction is not None and not 0.0 < fraction < 1.0:
+            raise ValueError(f"Transition fractions must be in (0, 1), got {fraction}.")
     for shape in shapes:
         for speed in args_cli.speeds:
-            for r in range(args_cli.repeats):
-                scenarios.append(Scenario(len(scenarios), r, shape, speed))
+            for fraction in transitions:
+                for r in range(args_cli.repeats):
+                    scenarios.append(Scenario(len(scenarios), r, shape, speed, None, fraction))
     return scenarios
 
 
@@ -546,7 +570,17 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         path_height = float(args_cli.path_height)
     if not 0.10 <= path_height <= 0.40:
         raise ValueError(f"--path_height must be in [0.10, 0.40], got {path_height}.")
+    if args_cli.height_profile in {"interleaved", "random"}:
+        if args_cli.transition_fractions is not None:
+            raise ValueError("Use either --height_profile interleaved or --transition_fractions, not both.")
+        if args_cli.height_segment_m <= 0.0:
+            raise ValueError("--height_segment_m must be positive.")
+        if len(args_cli.height_cycle) < 2 or any(not 0.10 <= value <= 0.40 for value in args_cli.height_cycle):
+            raise ValueError("--height_cycle needs at least two physical heights in [0.10, 0.40].")
     print(f"[INFO] Evaluation route height: {path_height:.4f} m")
+    if args_cli.height_profile in {"interleaved", "random"}:
+        print(f"[INFO] {args_cli.height_profile.capitalize()} height schedule: cycle={list(args_cli.height_cycle)}, "
+              f"segment={args_cli.height_segment_m:.2f} m")
     inference_steps = resolve_inference_steps(args_cli.num_inference_steps, config["diffusion"])
     policy_cfg = _model_cfg_from_checkpoint(config)
     policy_cfg.num_inference_steps = inference_steps
@@ -581,6 +615,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     waypoint_time_offsets_s = tuple(config["dataset"]["waypoint_time_offsets_s"])
     v_req_clip = config["dataset"].get("v_req_clip", 2.0)
     goal_representation = config["dataset"].get("goal_representation", "path11")
+    if args_cli.height_profile in {"interleaved", "random"} and goal_representation not in {"path11", "hindsight_geom_avg12"}:
+        raise ValueError(
+            "The selected height profile requires a goal schema with a terminal height "
+            f"(got {goal_representation!r})."
+        )
     if goal_representation in {"holonomic_se2_32", "path_guidance_se2_36"} and not args_cli.reference_replay_dataset:
         raise ValueError(
             "The primary SE(2) route evaluation must use --reference_replay_dataset from a separate "
@@ -623,9 +662,31 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             pts, yaws = build_random_polyline_path(start_pos[i], start_quat[i])
         else:
             raise ValueError(f"Unknown shape: {s.path_shape}")
-        # Analytic route builders use walk height by default. Match the
-        # posture support of the checkpoint unless explicitly overridden.
-        pts[:, 2] = path_height
+        # Analytic route builders use walk height by default. For transition
+        # studies, introduce a deliberate walk->crouch height change at the
+        # requested fraction of travelled arc length.
+        height_schedule = None
+        if args_cli.height_profile in {"interleaved", "random"}:
+            arc = cumulative_xy_lengths(pts)
+            segment_index = np.floor(arc / args_cli.height_segment_m).astype(np.int64)
+            cycle = np.asarray(args_cli.height_cycle, dtype=np.float32)
+            num_segments = int(segment_index.max()) + 1
+            if args_cli.height_profile == "interleaved":
+                height_schedule = tuple(float(cycle[index % len(cycle)]) for index in range(num_segments))
+            else:
+                rng = np.random.default_rng(args_cli.seed)
+                sampled: list[float] = []
+                for _ in range(num_segments):
+                    candidates = cycle if not sampled else cycle[~np.isclose(cycle, sampled[-1])]
+                    sampled.append(float(rng.choice(candidates)))
+                height_schedule = tuple(sampled)
+            pts[:, 2] = np.asarray(height_schedule, dtype=np.float32)[segment_index]
+        elif s.transition_fraction is None:
+            pts[:, 2] = path_height
+        else:
+            arc = cumulative_xy_lengths(pts)
+            transition_arc = float(arc[-1] * s.transition_fraction)
+            pts[:, 2] = np.where(arc < transition_arc, 0.2932, 0.1705)
         
         path_plans.append(
             PathPlan(
@@ -649,6 +710,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                     and np.any(np.linalg.norm(stored_command, axis=-1) > 1.0e-4)
                     else 0 if replay_fragments is not None else None
                 ),
+                height_schedule=height_schedule,
             )
         )
 
@@ -682,6 +744,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     achieved_yaws = []
     tilts = []
     action_deltas = []
+    commanded_heights = []
     failures = np.zeros(num_envs, dtype=bool)
     failure_step = np.full(num_envs, -1, dtype=np.int64)
 
@@ -712,6 +775,10 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 goal_representation,
                 reference_step=step,
             )
+            if goal_representation == "hindsight_geom_avg12":
+                commanded_heights.append(goals[:, 10].detach().cpu().numpy())
+            elif goal_representation == "path11":
+                commanded_heights.append(goals[:, 8].detach().cpu().numpy())
             _, _, dones, _ = vec_env.step(action)
             update_history(proprio_buffer, action_buffer, goal_buffer, proprio, previous_action, goals)
             previous_action = action.clone()
@@ -778,6 +845,13 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     tilts = np.stack(tilts, axis=0)
     action_deltas = np.stack(action_deltas, axis=0)
 
+    # Use the terminal height actually supplied to the policy at every step.
+    # This is the appropriate target for path11 and hindsight_geom_avg12;
+    # both schemas condition height only through their rolling terminal pose.
+    if len(commanded_heights) != duration_steps:
+        raise RuntimeError(f"No terminal-height command available for goal representation {goal_representation!r}.")
+    target_heights = np.stack(commanded_heights, axis=0)
+
     # Save summary table
     summary_rows = []
     for i, s in enumerate(scenarios):
@@ -796,8 +870,10 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
         xy_rmse = float(np.sqrt(np.mean(np.square(xy_errs)))) if xy_errs.size else math.nan
         plan = path_plans[i]
-        target_height = float(plan.path_w[-1, 2])
-        h_rmse = float(np.sqrt(np.mean(np.square(hgts - target_height)))) if hgts.size else math.nan
+        target_h = target_heights[:, i][mask]
+        h_rmse = float(np.sqrt(np.mean(np.square(hgts - target_h)))) if hgts.size else math.nan
+        target_change_steps = np.flatnonzero(np.abs(np.diff(target_heights[:, i])) > 1.0e-5) + 1
+        valid_steps = int(np.count_nonzero(mask))
         survived = not bool(failures[i])
         if plan.time_indexed and plan.terminal_step is not None:
             terminal_index = int(plan.terminal_step)
@@ -830,11 +906,21 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             "path_shape": s.path_shape,
             "reference_demo": s.demo_name or "",
             "requested_speed": s.speed,
+            "transition_fraction": s.transition_fraction,
+            "height_profile": args_cli.height_profile,
+            "height_segment_m": args_cli.height_segment_m if args_cli.height_profile in {"interleaved", "random"} else math.nan,
+            "height_schedule": (
+                ";".join(f"{height:.4f}" for height in plan.height_schedule)
+                if plan.height_schedule is not None else ""
+            ),
+            "target_height_changes": int(target_change_steps.size),
+            "target_height_changes_before_failure": int(np.count_nonzero(target_change_steps < valid_steps)),
             "reference_curvature_abs_mean": mean_abs_path_curvature(path_plans[i].path_w),
             "survived": survived,
             "time_to_failure_s": float(failure_step[i] * dt) if failures[i] else args_cli.duration_s,
             "xy_rmse": xy_rmse,
             "height_rmse": h_rmse,
+            "height_abs_error_mean": float(np.mean(np.abs(hgts - target_h))) if hgts.size else math.nan,
             "target_progress_m": target_progress_m,
             "target_path_index": terminal_index,
             "terminal_position_error_m": terminal_position_error,
@@ -960,7 +1046,75 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         fig.savefig(output_dir / "trajectories.png", dpi=200)
         plt.close(fig)
 
-    # 2. Tracking error and speed plot
+    # 2. Height command and tracking. The first panel shows the commanded
+    # walk/crouch profile and the measured base height; the second summarizes
+    # absolute height error by transition location and requested speed.
+    transition_values = sorted({s.transition_fraction for s in scenarios}, key=lambda x: -1.0 if x is None else x)
+    transition_values = [value for value in transition_values if value is not None] or [None]
+    time_axis = np.arange(duration_steps, dtype=np.float32) * dt
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.2), facecolor="white")
+    ax = axes[0]
+    plotted = False
+    reference_shape = "straight" if "straight" in shapes else shapes[0]
+    reference_speed = min(args_cli.speeds, key=lambda value: abs(value - 0.4))
+    for fraction in transition_values:
+        candidates = [
+            (i, s) for i, s in enumerate(scenarios)
+            if s.path_shape == reference_shape and s.repeat == 0
+            and s.speed == reference_speed and s.transition_fraction == fraction
+        ]
+        if not candidates:
+            continue
+        i, scenario = candidates[0]
+        valid = np.ones(duration_steps, dtype=bool)
+        if failures[i]:
+            valid[int(failure_step[i]):] = False
+        measured = achieved_heights[:, i].copy()
+        measured[~valid] = np.nan
+        if args_cli.height_profile in {"interleaved", "random"}:
+            label = f"{args_cli.height_profile} every {args_cli.height_segment_m:.1f} m"
+        else:
+            label = "constant" if fraction is None else f"transition at {fraction:.0%}"
+        ax.plot(time_axis, target_heights[:, i], linestyle="--", linewidth=2.0, label=f"target ({label})")
+        ax.plot(time_axis, measured, linewidth=1.5, alpha=0.9, label=f"actual ({label})")
+        plotted = True
+    if plotted:
+        ax.set_title(f"Height tracking: {reference_shape}, {reference_speed:.1f} m/s")
+        ax.set_xlabel("Time [s]")
+        ax.set_ylabel("Base height [m]")
+        ax.axhline(0.2932, color="#888888", linewidth=0.8, alpha=0.5)
+        ax.axhline(0.1705, color="#888888", linewidth=0.8, alpha=0.5)
+        ax.legend(fontsize=8, ncol=2)
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1]
+    speeds_list = sorted({float(s.speed) for s in scenarios})
+    x = np.arange(len(transition_values), dtype=np.float32)
+    width = 0.8 / max(1, len(speeds_list))
+    for speed_index, speed in enumerate(speeds_list):
+        values = []
+        for fraction in transition_values:
+            rows = [r["height_abs_error_mean"] for r in summary_rows
+                    if r["requested_speed"] == speed and r["transition_fraction"] == fraction]
+            values.append(float(np.nanmean(rows)) if rows else np.nan)
+        ax.bar(x + (speed_index - (len(speeds_list) - 1) / 2) * width, values,
+               width=width, label=f"{speed:.1f} m/s")
+    labels = [
+        f"{args_cli.height_profile}\n{args_cli.height_segment_m:.1f} m" if args_cli.height_profile in {"interleaved", "random"}
+        else "constant" if f is None else f"{f:.0%}"
+        for f in transition_values
+    ]
+    ax.set_xticks(x, labels)
+    ax.set_title("Mean absolute height error")
+    ax.set_xlabel("Height-profile condition")
+    ax.set_ylabel("Absolute error [m]")
+    ax.legend(fontsize=8)
+    ax.grid(True, axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_dir / "height_tracking_and_error.png", dpi=200)
+    plt.close(fig)
+
+    # 3. Tracking error and speed plot
     fig, axes = plt.subplots(1, 2, figsize=(13, 5.5), facecolor="white")
     palette = ("#0052CC", "#FF5A5F", "#00A86B", "#FFB300", "#7B1FA2")
     colors = {shape: palette[index % len(palette)] for index, shape in enumerate(shapes)}
@@ -1098,6 +1252,10 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         "goal_representation": goal_representation,
         "waypoint_time_offsets_s": waypoint_time_offsets_s,
         "speeds_evaluated": list(args_cli.speeds),
+        "transition_fractions": list(args_cli.transition_fractions) if args_cli.transition_fractions is not None else [],
+        "height_profile": args_cli.height_profile,
+        "height_segment_m": args_cli.height_segment_m if args_cli.height_profile in {"interleaved", "random"} else None,
+        "height_cycle": list(args_cli.height_cycle) if args_cli.height_profile in {"interleaved", "random"} else [],
         "reference_replay_dataset": (
             str(Path(args_cli.reference_replay_dataset).resolve()) if args_cli.reference_replay_dataset else None
         ),
