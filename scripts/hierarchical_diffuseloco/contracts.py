@@ -15,7 +15,10 @@ class ActionBounds:
     vx: tuple[float, float] = (-0.75, 0.75)
     vy: tuple[float, float] = (-0.50, 0.50)
     wz: tuple[float, float] = (-0.50, 0.50)
-    height: tuple[float, float] = (0.145, 0.315)
+    # These are the two posture commands present in the current walk+crouch
+    # dataset.  Intermediate values are deliberately allowed as interpolation
+    # probes, but the high-level policy never starts below the collected range.
+    height: tuple[float, float] = (0.1705, 0.2932)
 
     @property
     def low(self) -> np.ndarray:
@@ -36,9 +39,9 @@ class ActionBounds:
 class RouteObservation:
     """Route-local observation presented to the high-level policy.
 
-    ``preview`` is robot-frame ``(x, y, yaw, required_height)`` samples.  The final pose
-    is ``(x, y, yaw)`` in the same frame.  ``remaining_time`` is normalized seconds and
-    ``state`` is a compact proprioceptive summary supplied by the simulator adapter.
+    ``preview`` is robot-frame ``(x, y, sin(yaw), cos(yaw), max_height, valid)``
+    samples. ``max_height`` is a command-space clearance constraint, not a desired
+    posture. The final pose is ``(x, y, sin(yaw), cos(yaw))`` in the same frame.
     """
 
     preview: np.ndarray
@@ -51,12 +54,15 @@ class RouteObservation:
         preview = np.asarray(self.preview, dtype=np.float32)
         final_pose = np.asarray(self.final_pose, dtype=np.float32)
         state = np.asarray(self.state, dtype=np.float32)
-        if preview.ndim != 2 or preview.shape[1] != 4:
-            raise ValueError(f"preview must have shape [N,4], got {preview.shape}.")
-        if final_pose.shape != (3,) or state.ndim != 1:
-            raise ValueError("final_pose must be [3] and state must be a flat vector.")
+        if preview.ndim != 2 or preview.shape[1] != 6:
+            raise ValueError(f"preview must have shape [N,6], got {preview.shape}.")
+        if final_pose.shape != (4,) or state.ndim != 1:
+            raise ValueError("final_pose must be [4] and state must be a flat vector.")
         if not math.isfinite(float(self.remaining_time)) or not math.isfinite(float(self.clearance)):
             raise ValueError("Route observation contains a non-finite scalar.")
+        # ``clearance`` is already present in every preview point as
+        # ``max_height``.  Keeping it out of the flat vector prevents a stale
+        # duplicate feature when preview construction changes.
         return np.concatenate(
-            (preview.reshape(-1), final_pose, np.asarray([self.remaining_time, self.clearance]), state)
+            (preview.reshape(-1), final_pose, np.asarray([self.remaining_time]), state)
         ).astype(np.float32)

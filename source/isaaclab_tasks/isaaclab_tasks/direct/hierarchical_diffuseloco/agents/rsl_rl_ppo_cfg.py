@@ -4,6 +4,7 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, R
 
 @configclass
 class HierarchicalPPOCfg(RslRlOnPolicyRunnerCfg):
+    clip_actions = 1.0
     num_steps_per_env = 64
     max_iterations = 20_000
     save_interval = 500

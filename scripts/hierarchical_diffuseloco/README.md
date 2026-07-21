@@ -17,13 +17,17 @@ There is deliberately no command ramp, EMA, slew-rate limiter or interpolation. 
 descent into a crouch is therefore learned because the return contains first- and second-order
 command-change penalties.  `rewards.py` exposes every component for logging and ablations.
 
-The observation is a versioned 42-vector: eight route-preview samples `(x,y,yaw,clearance)`,
-final `(x,y,yaw)`, remaining time, required height, and five proprioceptive state values.
-`route.py` makes clearance explicit: the central section of the benchmark route requires the
-lower body height.  This avoids the degenerate solution of crouching for the whole episode.
-For turns and multi-section studies, set `route_file` to an `.npy` file with columns
-`x,y[,yaw[,required_height]]`; this keeps geometry and clearance labels versioned with each
-evaluation seed.
+The policy emits a normalized four-vector in `[-1,1]`, which is mapped affinely to the frozen
+policy's observed command bounds.  Its 70-dimensional observation is eight robot-frame preview
+samples `(x,y,sin(yaw),cos(yaw),max_height,valid)`, final `(x,y,sin(yaw),cos(yaw))`, remaining
+time, base state and the two previous normalized commands.  The command history makes the
+smoothness objective Markov; it does not impose smoothing. `max_height` is a command-space
+clearance proxy (not physical collision geometry): the central section only permits the crouch
+range, avoiding the degenerate solution of crouching throughout.  Routes use continuous arc
+projection and are resampled when loaded from `.npy` files with columns
+`x,y[,yaw[,max_command_height]]`.
+For turns and multi-section studies, set `route_file`; keeping those files with the evaluation
+seed versions geometry and clearance labels together.
 
 ## Task registration and training
 
@@ -44,15 +48,15 @@ Hydra may require an absolute checkpoint path on Windows.  Before long runs, use
 1. Classical path tracker (`baselines.py`).
 2. Discrete walk/crouch selector (`DiscreteSkillSelector`).
 3. Continuous PPO over the frozen policy.
-4. Continuous PPO plus the support-risk term.
-5. The same PPO with `smooth_first=smooth_second=0`.
-6. Direct joint-action PPO only as a capacity/control baseline.
+4. The same PPO with `smooth_first=smooth_second=0`.
+5. Direct joint-action PPO only as a capacity/control baseline.
 
 Report route success, survival, final-pose error, deadline miss, command total variation,
-height-transition overshoot, and the fraction of commands outside the empirical support envelope.
+height-transition overshoot, and the fraction of clearance violations.
 Keep route seeds, checkpoint, inference steps, execution horizon and simulator randomization fixed
-across the table.  Do not call diffusion denoising error an OOD detector without a separate
-calibration study; `support_risk` is intentionally an empirical, auditable proxy.
+across the table.  The task deliberately does not claim an OOD penalty from a rectangular command
+envelope: the walk/crouch data has only endpoint heights, so a capability map must be measured
+before adding such a term.
 
 ## Offline tests
 

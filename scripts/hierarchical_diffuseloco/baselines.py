@@ -17,8 +17,9 @@ class ClassicalPathTracker:
 
     def __call__(self, observation: RouteObservation) -> np.ndarray:
         target = observation.preview[0]
-        command = np.asarray((self.cruise_speed, self.lateral_gain * target[1], self.yaw_gain * target[2],
-                              target[3]), dtype=np.float32)
+        yaw_error = float(np.arctan2(target[2], target[3]))
+        command = np.asarray((self.cruise_speed, self.lateral_gain * target[1], self.yaw_gain * yaw_error,
+                              target[4]), dtype=np.float32)
         return self.bounds.clip(command)
 
 
@@ -32,6 +33,6 @@ class DiscreteSkillSelector:
         self.bounds = bounds
 
     def __call__(self, observation: RouteObservation) -> np.ndarray:
-        required = float(observation.clearance)
-        feasible = [(abs(float(cmd[3]) - required), cmd) for cmd in self.skills.values() if cmd[3] >= required]
+        maximum = float(observation.clearance)
+        feasible = [(maximum - float(cmd[3]), cmd) for cmd in self.skills.values() if cmd[3] <= maximum]
         return min(feasible or [(float("inf"), cmd) for cmd in self.skills.values()], key=lambda item: item[0])[1].copy()

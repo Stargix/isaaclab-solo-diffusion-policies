@@ -6,32 +6,11 @@ interpolates the high-level command, preserving the causal research question.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 import sys
 from typing import Any
 
 import torch
-
-
-@dataclass(frozen=True)
-class SupportEnvelope:
-    """Empirical command support used as a measurable risk feature, not a hard action mask."""
-
-    vx: tuple[float, float] = (-0.65, 0.65)
-    vy: tuple[float, float] = (-0.35, 0.35)
-    wz: tuple[float, float] = (-0.40, 0.40)
-    height: tuple[float, float] = (0.1705, 0.2932)
-
-
-def support_risk(command: torch.Tensor, envelope: SupportEnvelope = SupportEnvelope()) -> torch.Tensor:
-    """Distance outside the validated data envelope; zero inside it."""
-    low = torch.as_tensor([envelope.vx[0], envelope.vy[0], envelope.wz[0], envelope.height[0]],
-                          device=command.device, dtype=command.dtype)
-    high = torch.as_tensor([envelope.vx[1], envelope.vy[1], envelope.wz[1], envelope.height[1]],
-                           device=command.device, dtype=command.dtype)
-    span = (high - low).clamp_min(1e-6)
-    return torch.sum((torch.relu(low - command) + torch.relu(command - high)) / span, dim=-1)
 
 
 class FrozenDiffuseLoco:
