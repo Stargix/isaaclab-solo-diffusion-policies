@@ -93,6 +93,7 @@ class HierarchicalSolo12Env(Solo12Env):  # type: ignore[misc]
         self._last_progress = torch.zeros_like(self._progress)
         self._cross_track = torch.zeros(self.num_envs, device=self.device)
         self._high_observation = torch.zeros(self.num_envs, cfg.observation_space, device=self.device)
+        self._previous_actions = torch.zeros(self.num_envs, len(self._joint_ids), device=self.device)
 
     def _cache_route_tensors(self) -> None:
         self._route_xy = torch.as_tensor(self._route.xy, device=self.device)
