@@ -13,6 +13,30 @@ path geometry and intermediate height goals, but its failures increase when
 route curvature and height transitions are composed out of distribution. B1
 tests correction of that learned action manifold through interaction.
 
+## Relation to the original TFG proposal
+
+The original proposal is not a selector between independently deployed skills.
+It uses `walk`, `crouch` and later `sprint` experts only to measure capability,
+generate stable transitions and produce capability-aware demonstrations. The
+final student removes skill IDs, velocity commands and the teacher schedule and
+receives only robot state, future path, terminal pose and remaining time. Its
+main question is whether one direct policy can infer the useful locomotion mode
+and transition timing from those constraints.
+
+Phase A already provides the first reduced instance of that idea: the
+walk/crouch hindsight diffusion policy has demonstrated interpolation between
+the endpoint behaviours. Therefore “skill interpolation is pending” would be
+incorrect. What remains untested is the larger original claim: whether a direct
+policy can choose when to exploit that interpolation (and, eventually, sprint)
+from path geometry and deadline, without being given a speed/skill schedule.
+
+B1 is an online-correction extension, not the original main contribution. Its
+current route sampler supplies an average-speed value in `goal12`, so it tests
+local robustness of an already conditioned prior rather than pure implicit
+mode selection. This makes B1 a controlled adaptation study; it must not be
+reported as evidence that the original path/deadline student has already been
+solved.
+
 ## Why this interface
 
 [Skill-Nav](https://arxiv.org/abs/2506.21853) motivates a waypoint interface:
@@ -84,8 +108,8 @@ online layer regresses original walk/crouch performance.
 
 B1 contains no perception, obstacle map, physical ceiling/clearance model,
 terrain-conditioned planning, discrete skill selector, or learned OOD
-estimator. It does not yet combine several independently trained checkpoints.
-Those belong to the later high-level planner: pose/path/time conditioning over
-pre-existing policies, with continuous diffusion interpolation compared
-against discrete skill selection. Keeping them out of B1 makes the causal
-result—whether local online correction fixes Phase-A composition errors—clear.
+estimator. It does not yet contain the original capability-aware expert data
+generation, bridge transitions, deadline oracle or final direct
+path/time-conditioned student. Those are the next main-TFG steps. Keeping them
+out of B1 makes the causal result—whether local online correction fixes Phase-A
+composition errors—clear.
