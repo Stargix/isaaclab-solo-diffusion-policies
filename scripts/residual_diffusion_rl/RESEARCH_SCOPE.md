@@ -16,12 +16,11 @@ tests correction of that learned action manifold through interaction.
 ## Relation to the original TFG proposal
 
 The original proposal is not a selector between independently deployed skills.
-It uses `walk`, `crouch` and later `sprint` experts only to measure capability,
-generate stable transitions and produce capability-aware demonstrations. The
-final student removes skill IDs, velocity commands and the teacher schedule and
-receives only robot state, future path, terminal pose and remaining time. Its
-main question is whether one direct policy can infer the useful locomotion mode
-and transition timing from those constraints.
+It uses `walk`, `crouch` and later `sprint` experts as data sources, but the
+experts, a schedule and an oracle are not required at deployment. The final
+student removes skill IDs and receives only robot state, future path, terminal
+pose and remaining time. Its main question is whether one policy can infer the
+useful locomotion behaviour and transition timing from those constraints.
 
 Phase A already provides the first reduced instance of that idea: the
 walk/crouch hindsight diffusion policy has demonstrated interpolation between
@@ -33,9 +32,13 @@ from path geometry and deadline, without being given a speed/skill schedule.
 B1 is an online-correction extension, not the original main contribution. Its
 current route sampler supplies an average-speed value in `goal12`, so it tests
 local robustness of an already conditioned prior rather than pure implicit
-mode selection. This makes B1 a controlled adaptation study; it must not be
-reported as evidence that the original path/deadline student has already been
-solved.
+mode selection. The important research premise is deliberately data-light:
+Phase A uses randomized hindsight conditions rather than a hand-designed
+schedule, yet already generalizes to most tested path compositions and
+transitions. A capability oracle may be used later as an evaluation upper
+bound, but it should not be a required training component unless random data
+fails on a clearly identified case. B1 must not be reported as evidence that
+the original path/deadline student has already been solved.
 
 ## Why this interface
 
@@ -108,8 +111,11 @@ online layer regresses original walk/crouch performance.
 
 B1 contains no perception, obstacle map, physical ceiling/clearance model,
 terrain-conditioned planning, discrete skill selector, or learned OOD
-estimator. It does not yet contain the original capability-aware expert data
-generation, bridge transitions, deadline oracle or final direct
-path/time-conditioned student. Those are the next main-TFG steps. Keeping them
-out of B1 makes the causal result—whether local online correction fixes Phase-A
+estimator. It also does not claim to solve the complete direct
+path/time-conditioned student. Crucially, it does not depend on a capability
+oracle: the main comparison is sparse randomized hindsight data versus the
+same prior with online correction. Extra experts and harder transitions can be
+added incrementally, testing whether the learned manifold and the residual
+layer scale without redesigning the planner. Keeping these factors separate
+makes the causal result—whether local online correction fixes Phase-A
 composition errors—clear.
