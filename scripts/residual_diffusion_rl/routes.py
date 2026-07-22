@@ -1,0 +1,201 @@
+"""GPU-vectorized route bank for Phase B1.
+
+Routes are local to each IsaacLab environment origin.  The bank deliberately
+uses a small, auditable family: it tests geometric transfer without turning B1
+into a general navigation benchmark.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import torch
+
+
+@dataclass
+class RouteState:
+    progress: torch.Tensor
+    progress_delta: torch.Tensor
+    cross_track: torch.Tensor
+    tangent_yaw: torch.Tensor
+    target_height: torch.Tensor
+    remaining_fraction: torch.Tensor
+    success: torch.Tensor
+
+
+class RouteBank:
+    """Per-environment paths with batched projection and sampling."""
+
+    def __init__(
+        self,
+        num_envs: int,
+        device: torch.device | str,
+        *,
+        points: int = 101,
+        length_m: float = 4.0,
+        height_segment_m: float = 0.8,
+        walk_height: float = 0.2932,
+        crouch_height: float = 0.1705,
+    ):
+        if points < 16:
+            raise ValueError("routes need at least 16 points")
+        if length_m <= 0.0 or height_segment_m <= 0.0:
+            raise ValueError("route and height segment lengths must be positive")
+        self.num_envs = num_envs
+        self.device = torch.device(device)
+        self.points = points
+        self.length_m = float(length_m)
+        self.height_segment_m = float(height_segment_m)
+        self.height_values = torch.tensor(
+            [walk_height, 0.25, 0.21, crouch_height], device=self.device
+        )
+        self.xy = torch.zeros(num_envs, points, 2, device=self.device)
+        self.yaw = torch.zeros(num_envs, points, device=self.device)
+        self.height = torch.full((num_envs, points), walk_height, device=self.device)
+        self.arc = torch.zeros(num_envs, points, device=self.device)
+        self.length = torch.ones(num_envs, device=self.device)
+        self.speed = torch.full((num_envs,), 0.3, device=self.device)
+        self.progress_idx = torch.zeros(num_envs, dtype=torch.long, device=self.device)
+        self.progress = torch.zeros(num_envs, device=self.device)
+        self._last_progress = torch.zeros_like(self.progress)
+        self.cross_track = torch.zeros_like(self.progress)
+        self.route_kind = torch.zeros(num_envs, dtype=torch.long, device=self.device)
+
+    def reset(self, env_ids: torch.Tensor, stage: int) -> None:
+        """Sample routes; stages implement fixed-to-random curriculum."""
+
+        count = len(env_ids)
+        if count == 0:
+            return
+        u = torch.linspace(0.0, 1.0, self.points, device=self.device).expand(count, -1)
+        max_kind = 0 if stage <= 0 else 2 if stage == 1 else 3
+        kind = torch.randint(0, max_kind + 1, (count,), device=self.device)
+        x = self.length_m * u
+        y = torch.zeros_like(x)
+
+        s_curve = kind == 1
+        y[s_curve] = 0.42 * torch.sin(2.0 * torch.pi * u[s_curve])
+
+        right_angle = kind == 2
+        if torch.any(right_angle):
+            ur = u[right_angle]
+            x[right_angle] = torch.where(ur <= 0.5, self.length_m * ur, 0.5 * self.length_m)
+            y[right_angle] = torch.where(ur <= 0.5, torch.zeros_like(ur), self.length_m * (ur - 0.5))
+
+        random_curve = kind == 3
+        if torch.any(random_curve):
+            ur = u[random_curve]
+            amp1 = torch.empty((int(random_curve.sum()), 1), device=self.device).uniform_(-0.45, 0.45)
+            amp2 = torch.empty_like(amp1).uniform_(-0.22, 0.22)
+            y[random_curve] = amp1 * torch.sin(torch.pi * ur) + amp2 * torch.sin(3.0 * torch.pi * ur)
+
+        xy = torch.stack((x, y), dim=-1)
+        delta = xy[:, 1:] - xy[:, :-1]
+        segment = torch.linalg.vector_norm(delta, dim=-1).clamp_min(1.0e-6)
+        arc = torch.cat((torch.zeros(count, 1, device=self.device), torch.cumsum(segment, dim=1)), dim=1)
+        tangent = torch.cat((delta, delta[:, -1:]), dim=1)
+        yaw = torch.atan2(tangent[..., 1], tangent[..., 0])
+
+        if stage <= 0:
+            values = torch.randint(0, 2, (count, 1), device=self.device) * 3
+            height = self.height_values[values].expand(-1, self.points)
+        else:
+            section = torch.floor(arc / self.height_segment_m).long()
+            num_sections = int(torch.ceil(arc.max() / self.height_segment_m).item()) + 1
+            if stage == 1:
+                choices = torch.randint(0, 2, (count, num_sections), device=self.device) * 3
+            else:
+                choices = torch.randint(0, len(self.height_values), (count, num_sections), device=self.device)
+            height = torch.gather(choices, 1, section.clamp_max(num_sections - 1))
+            height = self.height_values[height]
+
+        self.xy[env_ids] = xy
+        self.yaw[env_ids] = yaw
+        self.height[env_ids] = height
+        self.arc[env_ids] = arc
+        self.length[env_ids] = arc[:, -1]
+        speed_hi = 0.4 if stage <= 0 else 0.5 if stage == 1 else 0.6
+        self.speed[env_ids] = torch.empty(count, device=self.device).uniform_(0.2, speed_hi)
+        self.route_kind[env_ids] = kind
+        self.progress_idx[env_ids] = 0
+        self.progress[env_ids] = 0.0
+        self._last_progress[env_ids] = 0.0
+        self.cross_track[env_ids] = 0.0
+
+    def update(self, position_local: torch.Tensor) -> RouteState:
+        """Project robot positions while preventing jumps to distant branches."""
+
+        index = torch.arange(self.points, device=self.device)[None, :]
+        low = (self.progress_idx - 5).clamp_min(0)[:, None]
+        high = (self.progress_idx + 35).clamp_max(self.points - 1)[:, None]
+        allowed = (index >= low) & (index <= high)
+        distance_sq = torch.sum((self.xy - position_local[:, None, :]) ** 2, dim=-1)
+        distance_sq = torch.where(allowed, distance_sq, torch.full_like(distance_sq, torch.inf))
+        nearest = distance_sq.argmin(dim=1)
+        self.progress_idx = torch.maximum(self.progress_idx, nearest)
+        rows = torch.arange(self.num_envs, device=self.device)
+        projection = self.xy[rows, self.progress_idx]
+        tangent_yaw = self.yaw[rows, self.progress_idx]
+        error = position_local - projection
+        signed = torch.cos(tangent_yaw) * error[:, 1] - torch.sin(tangent_yaw) * error[:, 0]
+        new_progress = self.arc[rows, self.progress_idx]
+        delta_progress = (new_progress - self.progress).clamp_min(0.0)
+        self._last_progress.copy_(self.progress)
+        self.progress.copy_(new_progress)
+        self.cross_track.copy_(signed)
+        remaining = (1.0 - new_progress / self.length.clamp_min(1.0e-6)).clamp(0.0, 1.0)
+        success = remaining <= (0.12 / self.length).clamp_max(0.05)
+        return RouteState(
+            progress=new_progress,
+            progress_delta=delta_progress,
+            cross_track=signed,
+            tangent_yaw=tangent_yaw,
+            target_height=self.height[rows, self.progress_idx],
+            remaining_fraction=remaining,
+            success=success,
+        )
+
+    def geometric_goal(
+        self,
+        position_local: torch.Tensor,
+        robot_yaw: torch.Tensor,
+        *,
+        horizon_s: float,
+        v_clip: float,
+    ) -> torch.Tensor:
+        """Torch equivalent of the checkpoint's geometric hindsight goal12."""
+
+        start_s = self.progress
+        end_s = torch.minimum(start_s + self.speed * horizon_s, self.length)
+        fractions = torch.tensor((0.25, 0.5, 0.75), device=self.device)
+        target_s = start_s[:, None] + fractions[None, :] * (end_s - start_s)[:, None]
+        # Float32 cumulative sums can place an exact grid target a few ulps
+        # below its route point. NumPy's training builder resolves that point,
+        # so use a tiny left tolerance instead of advancing one full sample.
+        preview_idx = torch.searchsorted(
+            self.arc.contiguous(), (target_s - 1.0e-6).clamp_min(0.0).contiguous()
+        ).clamp_max(self.points - 1)
+        end_idx = torch.searchsorted(
+            self.arc.contiguous(), (end_s[:, None] - 1.0e-6).clamp_min(0.0).contiguous()
+        ).squeeze(1).clamp_max(self.points - 1)
+        rows = torch.arange(self.num_envs, device=self.device)
+        preview_xy = self.xy[rows[:, None], preview_idx]
+        terminal_xy = self.xy[rows, end_idx]
+        c, s = torch.cos(robot_yaw), torch.sin(robot_yaw)
+
+        def to_body(points: torch.Tensor) -> torch.Tensor:
+            delta = points - position_local[:, None, :] if points.ndim == 3 else points - position_local
+            return torch.stack((c[:, None] * delta[..., 0] + s[:, None] * delta[..., 1],
+                                -s[:, None] * delta[..., 0] + c[:, None] * delta[..., 1]), dim=-1) if points.ndim == 3 else torch.stack((c * delta[:, 0] + s * delta[:, 1], -s * delta[:, 0] + c * delta[:, 1]), dim=-1)
+
+        preview_b = to_body(preview_xy).reshape(self.num_envs, 6)
+        terminal_b = to_body(terminal_xy)
+        dyaw = torch.atan2(torch.sin(self.yaw[rows, end_idx] - robot_yaw), torch.cos(self.yaw[rows, end_idx] - robot_yaw))
+        return torch.cat((
+            preview_b,
+            terminal_b,
+            torch.sin(dyaw)[:, None],
+            torch.cos(dyaw)[:, None],
+            self.height[rows, end_idx, None],
+            self.speed.clamp(0.0, v_clip)[:, None],
+        ), dim=1)
