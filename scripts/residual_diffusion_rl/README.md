@@ -67,3 +67,10 @@ Useful ablations need no code fork:
 
 The environment logs progress, cross-track, speed/height error, survival,
 success and residual RMS to RSL-RL/W&B.
+
+## Paired checkpoint evaluation
+
+`evaluate_residual.py` executes the deterministic actor mean and writes a
+`summary.json` with route success, true base contact, corridor failure, timeout,
+episode reward and duration. Run each checkpoint with the same `--seed`,
+`--stage` and frozen diffusion checkpoint before comparing them.
