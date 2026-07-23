@@ -14,6 +14,10 @@ import json
 from pathlib import Path
 import sys
 
+import numpy as np
+import torch
+from rsl_rl.runners import OnPolicyRunner
+
 from isaaclab.app import AppLauncher
 
 
@@ -36,9 +40,8 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 import gymnasium as gym  # noqa: E402
-import numpy as np  # noqa: E402
-import torch  # noqa: E402
-from rsl_rl.runners import OnPolicyRunner  # noqa: E402
+import isaaclab.terrains as terrain_gen  # noqa: E402
+from isaaclab.terrains import TerrainGeneratorCfg  # noqa: E402
 
 from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent  # noqa: E402
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper  # noqa: E402
@@ -210,6 +213,22 @@ def main(env_cfg, agent_cfg) -> None:
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     agent_cfg.device = env_cfg.sim.device
     env_cfg.spatial_diffusion_checkpoint = str(Path(args_cli.diffusion_checkpoint).resolve())
+
+    # The benchmark is defined on a flat plane.  IsaacLab's default plane
+    # references the remote Grid USD, which makes evaluation depend on network
+    # access and can fail before the policy is even loaded.  Generate the
+    # physically equivalent plane locally for a reproducible evaluator; this
+    # does not alter the training environment or the learned checkpoint.
+    env_cfg.terrain.terrain_type = "generator"
+    env_cfg.terrain.terrain_generator = TerrainGeneratorCfg(
+        seed=args_cli.seed,
+        curriculum=False,
+        size=(20.0, 20.0),
+        border_width=0.0,
+        num_rows=1,
+        num_cols=1,
+        sub_terrains={"flat": terrain_gen.MeshPlaneTerrainCfg(proportion=1.0)},
+    )
 
     # RouteBank selects its stage from this common control-step counter.  Keep
     # the MDP fixed for all evaluated episodes rather than allowing an
