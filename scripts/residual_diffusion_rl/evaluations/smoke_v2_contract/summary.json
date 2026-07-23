@@ -1,0 +1,94 @@
+{
+  "checkpoint": "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\logs\\rsl_rl\\solo12_residual_diffusion_rl\\2026-07-23_21-24-37_phase_b1_local_residual\\model_0.pt",
+  "diffusion_checkpoint": "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\checkpoints_iri\\real_walk_crouch_hindsight.pt",
+  "seed": 42,
+  "stage": 2,
+  "episodes_requested": 1,
+  "episodes_completed": 1,
+  "vectorized_control_steps": 4,
+  "outcomes": {
+    "route_success": 0,
+    "base_contact": 0,
+    "corridor_failure": 0,
+    "time_out": 1
+  },
+  "rates": {
+    "route_success": 0.0,
+    "base_contact": 0.0,
+    "corridor_failure": 0.0,
+    "time_out": 1.0
+  },
+  "mean_episode_reward": -10.526418685913086,
+  "mean_episode_length_s": 0.08,
+  "mean_terminal_speed_error_abs_mps": 0.49711331725120544,
+  "mean_terminal_distance_m": 4.000502586364746,
+  "mean_state_metrics": {
+    "cross_track_abs_m": 0.00013458769899443723,
+    "height_error_abs_m": 0.16773825883865356,
+    "speed_error_abs_mps": 0.49891354888677597,
+    "residual_rms": 0.18060436472296715
+  },
+  "per_route": {
+    "straight": {
+      "episodes": 0,
+      "outcomes": {
+        "route_success": 0,
+        "base_contact": 0,
+        "corridor_failure": 0,
+        "time_out": 0
+      },
+      "rates": {
+        "route_success": null,
+        "base_contact": null,
+        "corridor_failure": null,
+        "time_out": null
+      }
+    },
+    "s_curve": {
+      "episodes": 1,
+      "outcomes": {
+        "route_success": 0,
+        "base_contact": 0,
+        "corridor_failure": 0,
+        "time_out": 1
+      },
+      "rates": {
+        "route_success": 0.0,
+        "base_contact": 0.0,
+        "corridor_failure": 0.0,
+        "time_out": 1.0
+      }
+    },
+    "right_angle": {
+      "episodes": 0,
+      "outcomes": {
+        "route_success": 0,
+        "base_contact": 0,
+        "corridor_failure": 0,
+        "time_out": 0
+      },
+      "rates": {
+        "route_success": null,
+        "base_contact": null,
+        "corridor_failure": null,
+        "time_out": null
+      }
+    },
+    "random_curve": {
+      "episodes": 0,
+      "outcomes": {
+        "route_success": 0,
+        "base_contact": 0,
+        "corridor_failure": 0,
+        "time_out": 0
+      },
+      "rates": {
+        "route_success": null,
+        "base_contact": null,
+        "corridor_failure": null,
+        "time_out": null
+      }
+    }
+  },
+  "qualitative_trace_envs": 0
+}

@@ -1,0 +1,30 @@
+{
+  "checkpoint": "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\checkpoints_iri\\checkpoints_residual\\residual_rl_1st_150.pt",
+  "diffusion_checkpoint": "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\checkpoints_iri\\real_walk_crouch_hindsight.pt",
+  "seed": 42,
+  "stage": 0,
+  "episodes_requested": 256,
+  "episodes_completed": 2053,
+  "vectorized_control_steps": 1199,
+  "outcomes": {
+    "route_success": 0,
+    "base_contact": 76,
+    "corridor_failure": 10,
+    "time_out": 1968
+  },
+  "rates": {
+    "route_success": 0.0,
+    "base_contact": 0.037018996590355575,
+    "corridor_failure": 0.004870920603994155,
+    "time_out": 0.9585971748660497
+  },
+  "mean_episode_reward": -29.318502317099703,
+  "mean_episode_length_s": 23.133658061522247,
+  "mean_state_metrics": {
+    "cross_track_abs_m": 0.035913780922086844,
+    "height_error_abs_m": 0.05046186514130426,
+    "speed_error_abs_mps": 0.22249599978066764,
+    "residual_rms": 0.3278784414844974
+  },
+  "qualitative_trace_envs": 6
+}
