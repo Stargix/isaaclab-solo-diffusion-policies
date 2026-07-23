@@ -16,5 +16,5 @@ ROUTE_STATE_DIM = 11
 OBSERVATION_DIM = PROPRIO_DIM + GOAL_DIM + RESIDUAL_ACTION_DIM * 2 + ROUTE_STATE_DIM
 
 GOAL_SCHEMA = "hindsight_geometric_average12_v1"
-OBSERVATION_SCHEMA = "residual_route_state77_average_speed_v2"
+OBSERVATION_SCHEMA = "residual_route_state77_absolute_proprio_v3"
 POLICY_KIND = "spatial_hindsight_geometry_ddpm"

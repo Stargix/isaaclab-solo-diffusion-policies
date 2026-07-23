@@ -21,10 +21,12 @@ The target height is piecewise constant. There is no command ramp, filter, or
 hand-written transition controller. Smooth transitions can only emerge from
 task reward, vertical-motion cost, and residual-rate regularization.
 
-The task reward is average-speed-aware. Progress is rewarded only while
-tangential speed is close to the request. Path, speed, schedule, yaw and height
-use zero-centred Huber costs: they are quadratic near the target and keep
-growing linearly for large errors instead of saturating. There is no alive
+The task reward is average-speed-aware. Arc-length progress is a bounded
+potential difference, while the progress schedule penalizes both running ahead
+and falling behind. Path, speed, schedule, yaw and height use zero-centred
+Huber costs. In the final 0.6 m, cruise-speed tracking fades smoothly into
+terminal-position and stopped-speed objectives, so the dense reward and the
+success condition do not issue contradictory commands. There is no alive
 bonus, time cost or separate deadline command.
 
 At elapsed time `t`, the schedule error is
@@ -33,7 +35,8 @@ At elapsed time `t`, the schedule error is
 defines traversal time without adding a second, redundant timing objective.
 Success also requires Euclidean final-position, yaw, final-height and stopped
 velocity tolerances held for five control steps. Passing through or beyond the
-last route sample is not success.
+last route sample is not success; a 0.5 m longitudinal overshoot terminates as
+an explicit task failure instead of accumulating an uninformative timeout.
 Termination logs distinguish `route_success`, true `base_contact`, corridor
 failure and timeout; the inherited Solo12 `base_contact` aggregate is not used.
 
@@ -64,7 +67,8 @@ Linux/Slurm:
 ```
 
 For the strict frozen-prior control, use the same environment with
-`env.residual_scale=0.0`. Logs are written below
+`evaluate_residual.py --prior_only`; it sends an exactly zero residual without
+constructing or loading a PPO actor. Logs are written below
 `logs/rsl_rl/solo12_residual_diffusion_rl`.
 
 ## Play a trained residual
@@ -99,6 +103,12 @@ Evaluation route sampling is stratified, so stage 2 covers straight, S-curve,
 right-angle and random-curve episodes instead of relying on a lucky random
 draw; training sampling remains random.
 
-The observation contract is now 77D (`residual_route_state77_average_speed_v2`).
-Old 75D residual checkpoints are historical baselines and must not be resumed
-under this MDP.
+The observation contract is 77D
+(`residual_route_state77_absolute_proprio_v3`). The frozen policy receives the
+same absolute joint positions used by the Phase-A collector and evaluator.
+All earlier B1 checkpoints, including the former 77D v2 checkpoints, are
+historical baselines and must not be resumed under this MDP.
+
+The residual actor's deterministic mean is initialized exactly to zero. Its
+Gaussian exploration remains active (`std=0.10`), but iteration zero therefore
+preserves the frozen prior instead of applying a random mean correction.

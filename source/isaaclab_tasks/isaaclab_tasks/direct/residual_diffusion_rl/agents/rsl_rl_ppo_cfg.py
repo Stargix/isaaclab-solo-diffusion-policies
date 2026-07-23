@@ -2,6 +2,17 @@
 
 from isaaclab.utils import configclass
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
+import rsl_rl.runners.on_policy_runner as rsl_rl_on_policy_runner
+
+from .residual_actor_critic import ResidualActorCritic
+
+
+rsl_rl_on_policy_runner.ResidualActorCritic = ResidualActorCritic
+
+
+@configclass
+class ResidualActorCriticCfg(RslRlPpoActorCriticCfg):
+    class_name: str = "ResidualActorCritic"
 
 
 @configclass
@@ -16,9 +27,9 @@ class ResidualDiffusionPPOCfg(RslRlOnPolicyRunnerCfg):
     # a valid route-success criterion.
     save_interval = 50
     experiment_name = "solo12_residual_diffusion_rl"
-    run_name = "phase_b1_local_residual"
+    run_name = "phase_b1_contract_v3"
     obs_groups = {"policy": ["policy"], "critic": ["policy"]}
-    policy = RslRlPpoActorCriticCfg(
+    policy = ResidualActorCriticCfg(
         init_noise_std=0.10,
         noise_std_type="log",
         actor_obs_normalization=True,

@@ -23,7 +23,7 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="Evaluate one residual-diffusion PPO checkpoint.")
 parser.add_argument("--task", default="solo12-residual-diffusion-rl-v0")
-parser.add_argument("--checkpoint", required=True, help="RSL-RL residual PPO checkpoint.")
+parser.add_argument("--checkpoint", help="RSL-RL residual PPO checkpoint.")
 parser.add_argument("--diffusion_checkpoint", required=True, help="Frozen Phase-A diffusion checkpoint.")
 parser.add_argument("--output_dir", required=True, help="Directory in which to write summary.json.")
 parser.add_argument("--episodes", type=int, default=256, help="Minimum number of completed episodes.")
@@ -34,8 +34,15 @@ parser.add_argument(
 )
 parser.add_argument("--max_steps", type=int, default=20_000, help="Safety bound on vectorized control steps.")
 parser.add_argument("--trace_envs", type=int, default=6, help="Number of initial episodes to save as qualitative traces.")
+parser.add_argument(
+    "--prior_only",
+    action="store_true",
+    help="Execute an exactly zero residual; --checkpoint is then unnecessary.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+if not args_cli.prior_only and not args_cli.checkpoint:
+    parser.error("--checkpoint is required unless --prior_only is selected")
 sys.argv = [sys.argv[0]] + hydra_args
 
 app_launcher = AppLauncher(args_cli)
@@ -179,10 +186,20 @@ def _write_diagnostics(output_dir: Path, traces: list[dict], summary: dict) -> N
         figure.savefig(output_dir / "speed_and_tracking.png", dpi=200)
         plt.close(figure)
 
-    outcome_order = ("route_success", "base_contact", "corridor_failure", "time_out")
+    outcome_order = (
+        "route_success",
+        "base_contact",
+        "corridor_failure",
+        "terminal_overshoot",
+        "time_out",
+    )
     values = [100.0 * summary["rates"].get(name, 0.0) for name in outcome_order]
     figure, axis = plt.subplots(figsize=(8.0, 4.4))
-    bars = axis.bar(outcome_order, values, color=("#00A86B", "#FF5A5F", "#FFB300", "#7B1FA2"))
+    bars = axis.bar(
+        outcome_order,
+        values,
+        color=("#00A86B", "#FF5A5F", "#FFB300", "#0052CC", "#7B1FA2"),
+    )
     axis.set_ylim(0.0, max(100.0, max(values, default=0.0) * 1.15))
     axis.set_ylabel("Completed episodes [%]")
     axis.set_title("Terminal outcomes")
@@ -237,14 +254,25 @@ def main(env_cfg, agent_cfg) -> None:
         env = multi_agent_to_single_agent(env)
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
-    runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    checkpoint_path = Path(args_cli.checkpoint).resolve()
-    runner.load(str(checkpoint_path), load_optimizer=False)
-    policy = runner.get_inference_policy(device=env.unwrapped.device)
-
-    policy_nn = runner.alg.policy
     observations = env.get_observations()
     raw_env = env.unwrapped
+    checkpoint_path = None if args_cli.prior_only else Path(args_cli.checkpoint).resolve()
+    if args_cli.prior_only:
+        policy_nn = None
+
+        def policy(_observations):
+            return torch.zeros(
+                raw_env.num_envs,
+                raw_env.cfg.action_space,
+                device=raw_env.device,
+            )
+
+    else:
+        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+        runner.load(str(checkpoint_path), load_optimizer=False)
+        policy = runner.get_inference_policy(device=raw_env.device)
+        policy_nn = runner.alg.policy
+
     trace_count = min(args_cli.trace_envs, args_cli.num_envs)
     route_names = ("straight", "s_curve", "right_angle", "random_curve")
     traces: list[dict] = []
@@ -263,7 +291,13 @@ def main(env_cfg, agent_cfg) -> None:
             "residual_rms": [],
         })
     trace_active = torch.ones(trace_count, dtype=torch.bool, device=raw_env.device)
-    outcomes = {"route_success": 0, "base_contact": 0, "corridor_failure": 0, "time_out": 0}
+    outcomes = {
+        "route_success": 0,
+        "base_contact": 0,
+        "corridor_failure": 0,
+        "time_out": 0,
+        "terminal_overshoot": 0,
+    }
     outcome_names = tuple(outcomes)
     per_route_outcomes = {
         name: {outcome: 0 for outcome in outcome_names} for name in route_names
@@ -276,6 +310,9 @@ def main(env_cfg, agent_cfg) -> None:
     state_samples = 0
     terminal_mean_speed_error_sum = 0.0
     terminal_distance_sum = 0.0
+    terminal_along_error_sum = 0.0
+    terminal_progress_fraction_sum = 0.0
+    terminal_height_error_sum = 0.0
 
     with torch.inference_mode():
         while completed < args_cli.episodes and steps < args_cli.max_steps:
@@ -297,7 +334,8 @@ def main(env_cfg, agent_cfg) -> None:
             state_samples += raw_env.num_envs
             actions = policy(observations)
             observations, _, dones, extras = env.step(actions)
-            policy_nn.reset(dones)
+            if policy_nn is not None:
+                policy_nn.reset(dones)
             steps += 1
 
             if trace_count:
@@ -320,6 +358,15 @@ def main(env_cfg, agent_cfg) -> None:
                 raw_env._last_episode_mean_speed_error[done_ids].abs().sum()
             )
             terminal_distance_sum += float(raw_env._last_episode_terminal_distance[done_ids].sum())
+            terminal_along_error_sum += float(
+                raw_env._last_episode_terminal_along_error[done_ids].sum()
+            )
+            terminal_progress_fraction_sum += float(
+                raw_env._last_episode_progress_fraction[done_ids].sum()
+            )
+            terminal_height_error_sum += float(
+                raw_env._last_episode_height_error[done_ids].abs().sum()
+            )
             reward_sum += float(log.get("Episode_Reward/total", 0.0)) * done_count
             length_sum_s += float(log.get("Episode/length_seconds", 0.0)) * done_count
 
@@ -330,7 +377,8 @@ def main(env_cfg, agent_cfg) -> None:
     output_dir = Path(args_cli.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     summary = {
-        "checkpoint": str(checkpoint_path),
+        "checkpoint": None if checkpoint_path is None else str(checkpoint_path),
+        "prior_only": args_cli.prior_only,
         "diffusion_checkpoint": str(Path(args_cli.diffusion_checkpoint).resolve()),
         "seed": args_cli.seed,
         "stage": args_cli.stage,
@@ -343,6 +391,9 @@ def main(env_cfg, agent_cfg) -> None:
         "mean_episode_length_s": length_sum_s / completed,
         "mean_terminal_speed_error_abs_mps": terminal_mean_speed_error_sum / completed,
         "mean_terminal_distance_m": terminal_distance_sum / completed,
+        "mean_terminal_along_error_m": terminal_along_error_sum / completed,
+        "mean_terminal_progress_fraction": terminal_progress_fraction_sum / completed,
+        "mean_terminal_height_error_abs_m": terminal_height_error_sum / completed,
         "mean_state_metrics": {name: value / state_samples for name, value in state_sums.items()},
         "per_route": {},
         "qualitative_trace_envs": trace_count,

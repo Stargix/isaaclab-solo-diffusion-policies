@@ -19,9 +19,11 @@ class RouteState:
     cross_track: torch.Tensor
     tangent_yaw: torch.Tensor
     target_height: torch.Tensor
+    remaining_distance: torch.Tensor
     remaining_fraction: torch.Tensor
     terminal_distance: torch.Tensor
-    success: torch.Tensor
+    terminal_along_error: torch.Tensor
+    near_terminal: torch.Tensor
 
 
 class RouteBank:
@@ -151,18 +153,27 @@ class RouteBank:
         self._last_progress.copy_(self.progress)
         self.progress.copy_(new_progress)
         self.cross_track.copy_(signed)
-        remaining = (1.0 - new_progress / self.length.clamp_min(1.0e-6)).clamp(0.0, 1.0)
-        terminal_distance = torch.linalg.vector_norm(position_local - self.xy[:, -1], dim=1)
-        success = remaining <= (0.12 / self.length).clamp_max(0.05)
+        remaining_distance = (self.length - new_progress).clamp_min(0.0)
+        remaining = (remaining_distance / self.length.clamp_min(1.0e-6)).clamp(0.0, 1.0)
+        terminal_error = position_local - self.xy[:, -1]
+        terminal_distance = torch.linalg.vector_norm(terminal_error, dim=1)
+        terminal_yaw = self.yaw[:, -1]
+        terminal_along_error = (
+            torch.cos(terminal_yaw) * terminal_error[:, 0]
+            + torch.sin(terminal_yaw) * terminal_error[:, 1]
+        )
+        near_terminal = remaining <= (0.12 / self.length).clamp_max(0.05)
         return RouteState(
             progress=new_progress,
             progress_delta=delta_progress,
             cross_track=signed,
             tangent_yaw=tangent_yaw,
             target_height=self.height[rows, self.progress_idx],
+            remaining_distance=remaining_distance,
             remaining_fraction=remaining,
             terminal_distance=terminal_distance,
-            success=success,
+            terminal_along_error=terminal_along_error,
+            near_terminal=near_terminal,
         )
 
     def geometric_goal(
@@ -175,6 +186,8 @@ class RouteBank:
     ) -> torch.Tensor:
         """Torch equivalent of the checkpoint's geometric hindsight goal12."""
 
+        if horizon_s <= 0.0:
+            raise ValueError("horizon_s must be positive")
         start_s = self.progress
         end_s = torch.minimum(start_s + self.speed * horizon_s, self.length)
         fractions = torch.tensor((0.25, 0.5, 0.75), device=self.device)
@@ -191,6 +204,13 @@ class RouteBank:
         rows = torch.arange(self.num_envs, device=self.device)
         preview_xy = self.xy[rows[:, None], preview_idx]
         terminal_xy = self.xy[rows, end_idx]
+        # The Phase-A goal contract stores the average speed of the selected
+        # local segment, not the route-level command.  Once the lookahead is
+        # clipped by the route end this value must taper to zero.
+        local_segment_length = (
+            self.arc[rows, end_idx] - self.arc[rows, self.progress_idx]
+        ).clamp_min(0.0)
+        local_average_speed = (local_segment_length / horizon_s).clamp(0.0, v_clip)
         c, s = torch.cos(robot_yaw), torch.sin(robot_yaw)
 
         def to_body(points: torch.Tensor) -> torch.Tensor:
@@ -207,5 +227,5 @@ class RouteBank:
             torch.sin(dyaw)[:, None],
             torch.cos(dyaw)[:, None],
             self.height[rows, end_idx, None],
-            self.speed.clamp(0.0, v_clip)[:, None],
+            local_average_speed[:, None],
         ), dim=1)

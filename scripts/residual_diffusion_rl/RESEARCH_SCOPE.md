@@ -72,8 +72,10 @@ compute. It is Phase B2, not silently mixed into B1.
 ## B1 MDP
 
 - **Frozen base policy:** Phase-A `spatial_hindsight_geometry_ddpm`; exact
-  delayed proprio/action/goal histories are preserved. Its action history uses
-  the action actually executed after residual correction.
+  delayed proprio/action/goal histories are preserved, including absolute
+  measured joint positions and the local-segment average speed in `goal12`.
+  Its action history uses the action actually executed after residual
+  correction.
 - **Observation:** proprioception (30), geometric goal12, proposed diffusion
   action (12), previous residual (12), body velocity and route errors (9), plus
   schedule and mean-progress-speed errors (2): 77D. The two timing features
@@ -83,11 +85,12 @@ compute. It is Phase B2, not silently mixed into B1.
   joint's demonstrated action half-range, added to the diffusion action and
   finally clipped to the demonstration action range. The conservative default
   reflects that the prior already solves most trajectories.
-- **Objective:** speed-gated progress and terminal success, with
+- **Objective:** potential-based progress and terminal success, with
   non-saturating Huber costs for path, instantaneous tangent speed, progress
-  schedule, yaw and height; fall/corridor/timeout failure; small residual
-  magnitude, residual-rate, tilt and vertical-velocity costs. There is no
-  alive reward or independent time cost.
+  schedule, yaw and height; a smooth final-region blend to endpoint position
+  and stopped velocity; fall/corridor/overshoot/timeout failure; small
+  residual magnitude, residual-rate, tilt and vertical-velocity costs. There
+  is no alive reward or independent time cost.
 - **Terminal contract:** the robot must be within 0.12 m of the actual final
   point, satisfy final yaw/height, be nearly stopped, and have final
   `progress / elapsed_time` within 0.05 m/s of requested average speed for five
@@ -122,8 +125,9 @@ hard terminal condition. It is not a second time/deadline command.
 The step objective is:
 
 ```text
-+ progress_delta * Gaussian(tangent_speed_error)
-- Huber(cross_track, tangent_speed, schedule, yaw, height)
++ progress_delta
+- Huber(cross_track, cruise_speed, schedule, yaw, height)
+- terminal_gate * Huber(final_position, planar_stop_speed)
 - L2(residual, residual_rate, tilt, vertical_velocity)
 + terminal_success
 - task_failure
@@ -133,11 +137,11 @@ The step objective is:
 Huber losses are zero at the target, quadratic for small errors and linear for
 large errors. The old bounded exponential error cost saturated at exactly the
 point where sprinting should become increasingly undesirable. Schedule error
-has weight 0.1 because it persists throughout an episode; this keeps a fully
-failed route on the same return scale as the other task terms without removing
-its non-saturating gradient. Speed-gating progress also makes a metre travelled
-at the requested speed more valuable than a metre obtained by exploiting route
-projection at excessive speed.
+has weight 0.1 because it persists throughout an episode. Progress is a
+potential difference and therefore totals at most its weight times route
+length; it cannot reward surviving longer. Schedule error assigns the timing,
+while the final-region blend removes the former contradiction between
+maintaining cruise speed and satisfying the stopped terminal condition.
 
 There is no per-step survival reward and no time penalty. A correct trajectory
 therefore does not score more merely because it lasts longer; route duration is
@@ -145,8 +149,9 @@ fixed by `L / v*`. Height commands remain piecewise constant. Smooth lowering
 must emerge from future-goal anticipation, the height objective,
 vertical-velocity cost and residual-rate cost, not a hand-written ramp.
 
-The PPO defaults are deliberately local: residual authority 0.10, initial
-action standard deviation 0.10, clipping 0.10 and fixed learning rate `1e-4`.
+The PPO defaults are deliberately local: residual authority 0.10, zero-initial
+actor mean, initial action standard deviation 0.10, clipping 0.10 and fixed
+learning rate `1e-4`.
 The fixed rate prevents the adaptive scheduler from increasing step size while
 the target distribution changes. `gamma=0.999` retains terminal information
 over a 10--22 second route at 50 Hz; `gamma=0.99` discounts that horizon almost
