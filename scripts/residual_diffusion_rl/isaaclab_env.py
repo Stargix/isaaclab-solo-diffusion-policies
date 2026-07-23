@@ -195,6 +195,8 @@ class ResidualDiffusionEnv(Solo12Env):
             "Metrics/height_error_abs_m": float((base_height - state.target_height).abs().mean()),
             "Metrics/speed_error_abs_mps": float((self._robot.data.root_lin_vel_b[:, 0] - self._routes.speed).abs().mean()),
             "Metrics/residual_rms": float(torch.sqrt(self._residual.square().mean())),
+            "Metrics/residual_abs_mean": float(self._residual.abs().mean()),
+            "Metrics/residual_saturation_frac": float((self._residual.abs() >= 0.95).float().mean()),
             "Metrics/success": float(self._success.float().mean()),
             "Curriculum/stage": float(self._curriculum_stage()),
         }

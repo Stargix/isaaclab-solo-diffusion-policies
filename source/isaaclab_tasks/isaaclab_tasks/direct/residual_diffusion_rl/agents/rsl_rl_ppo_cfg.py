@@ -9,7 +9,9 @@ class ResidualDiffusionPPOCfg(RslRlOnPolicyRunnerCfg):
     clip_actions = 1.0
     num_steps_per_env = 32
     max_iterations = 12_000
-    save_interval = 250
+    # B1 can improve before a later residual-policy collapse.  Saving more
+    # frequently preserves the useful early checkpoints for fixed evaluation.
+    save_interval = 50
     experiment_name = "solo12_residual_diffusion_rl"
     run_name = "phase_b1_local_residual"
     obs_groups = {"policy": ["policy"], "critic": ["policy"]}
@@ -25,15 +27,20 @@ class ResidualDiffusionPPOCfg(RslRlOnPolicyRunnerCfg):
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=0.5,
         use_clipped_value_loss=True,
-        clip_param=0.15,
-        entropy_coef=0.001,
-        num_learning_epochs=4,
+        # Keep PPO updates inside a smaller trust region: the actor controls a
+        # residual around a competent frozen policy, not the full locomotion
+        # action.
+        clip_param=0.10,
+        entropy_coef=0.003,
+        num_learning_epochs=2,
         num_mini_batches=4,
-        learning_rate=2.0e-4,
-        schedule="adaptive",
+        learning_rate=5.0e-5,
+        # Adaptive RSL-RL scheduling can multiply the learning rate when the
+        # measured KL is small.  That is useful for unconstrained PPO but can
+        # destabilize a bounded residual after it has found a good solution.
+        schedule="fixed",
         gamma=0.99,
         lam=0.95,
         desired_kl=0.008,
-        max_grad_norm=1.0,
+        max_grad_norm=0.5,
     )
-
