@@ -12,7 +12,10 @@ class RewardWeights:
     progress: float = 2.0
     path: float = 1.5
     speed: float = 1.0
-    schedule: float = 1.0
+    # Schedule error persists over the whole route.  A tenth-scale weight keeps
+    # a fully failed 24 s episode in the same return range as the other task
+    # terms while retaining the non-saturating gradient against sprinting.
+    schedule: float = 0.1
     yaw: float = 0.4
     height: float = 0.8
     residual: float = 0.15

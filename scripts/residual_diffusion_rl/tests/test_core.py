@@ -110,6 +110,21 @@ class PhaseB1CoreTests(unittest.TestCase):
         self.assertGreater(float(on_schedule), float(ahead))
         torch.testing.assert_close(ahead, behind)
 
+    def test_schedule_cost_has_episode_compatible_scale(self):
+        common = dict(
+            progress_delta=torch.zeros(1), cross_track=torch.zeros(1),
+            speed_error=torch.zeros(1), yaw_error=torch.zeros(1), height_error=torch.zeros(1),
+            residual=torch.zeros(1, 12), previous_residual=torch.zeros(1, 12),
+            projected_gravity_xy=torch.zeros(1, 2), vertical_velocity=torch.zeros(1),
+            success=torch.zeros(1, dtype=torch.bool), failed=torch.zeros(1, dtype=torch.bool),
+            fell=torch.zeros(1, dtype=torch.bool), dt=0.02,
+        )
+        _, terms = residual_reward(**common, schedule_error=torch.full((1,), 4.0))
+        # Even the maximum route-scale error remains below 0.05 per step. It is
+        # still strictly negative and therefore never becomes reward-neutral.
+        self.assertLess(float(terms["schedule"]), 0.0)
+        self.assertGreater(float(terms["schedule"]), -0.05)
+
     def test_average_speed_command_defines_schedule_and_final_time(self):
         schedule_error, mean_speed_error = progress_timing_errors(
             progress=torch.tensor([2.0, 4.0, 4.0]),

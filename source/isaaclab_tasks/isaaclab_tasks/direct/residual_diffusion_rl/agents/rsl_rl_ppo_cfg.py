@@ -6,10 +6,9 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, R
 
 @configclass
 class ResidualDiffusionPPOCfg(RslRlOnPolicyRunnerCfg):
-    # The average-speed objective uses the environment episode clock.  RSL-RL's
-    # usual randomized initial episode length would start that clock at an
-    # arbitrary time without advancing the route, corrupting schedule error.
-    init_at_random_ep_len = False
+    # The environment maintains a separate zero-based task clock, so RSL-RL may
+    # safely stagger the first timeout wave without corrupting average speed.
+    init_at_random_ep_len = True
     clip_actions = 1.0
     num_steps_per_env = 32
     max_iterations = 12_000

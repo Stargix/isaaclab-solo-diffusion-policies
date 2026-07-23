@@ -132,9 +132,12 @@ The step objective is:
 
 Huber losses are zero at the target, quadratic for small errors and linear for
 large errors. The old bounded exponential error cost saturated at exactly the
-point where sprinting should become increasingly undesirable. Speed-gating
-progress also makes a metre travelled at the requested speed more valuable
-than a metre obtained by exploiting route projection at excessive speed.
+point where sprinting should become increasingly undesirable. Schedule error
+has weight 0.1 because it persists throughout an episode; this keeps a fully
+failed route on the same return scale as the other task terms without removing
+its non-saturating gradient. Speed-gating progress also makes a metre travelled
+at the requested speed more valuable than a metre obtained by exploiting route
+projection at excessive speed.
 
 There is no per-step survival reward and no time penalty. A correct trajectory
 therefore does not score more merely because it lasts longer; route duration is
@@ -147,9 +150,10 @@ action standard deviation 0.10, clipping 0.10 and fixed learning rate `1e-4`.
 The fixed rate prevents the adaptive scheduler from increasing step size while
 the target distribution changes. `gamma=0.999` retains terminal information
 over a 10--22 second route at 50 Hz; `gamma=0.99` discounts that horizon almost
-completely. RSL-RL initial episode-length randomization is disabled because
-randomizing the clock without advancing route state corrupts both timing
-errors.
+completely. The environment uses a separate zero-based task clock for timing
+errors. RSL-RL may therefore randomize its internal initial episode length to
+desynchronize timeout/reset waves without changing route time; shortened
+startup rollouts are treated as neutral truncations rather than task failures.
 
 ## Required comparisons and metrics
 

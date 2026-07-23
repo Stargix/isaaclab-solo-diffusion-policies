@@ -84,6 +84,10 @@ The environment logs progress, cross-track, instantaneous and final mean-speed
 error, schedule error, terminal distance, height error, outcome rates and
 residual RMS to RSL-RL/W&B.
 
+RSL-RL's randomized initial episode length is used only to stagger reset waves.
+The environment maintains an independent zero-based task clock for schedule and
+mean-speed errors, so this desynchronization cannot alter the objective.
+
 ## Paired checkpoint evaluation
 
 `evaluate_residual.py` executes the deterministic actor mean and writes a

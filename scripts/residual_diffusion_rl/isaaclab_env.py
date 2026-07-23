@@ -114,6 +114,12 @@ class ResidualDiffusionEnv(Solo12Env):
         )
         self._last_episode_mean_speed_error = torch.zeros(self.num_envs, device=self.device)
         self._last_episode_terminal_distance = torch.zeros(self.num_envs, device=self.device)
+        self._last_episode_task_steps = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        # RSL-RL may offset episode_length_buf once at training startup to
+        # stagger resets.  Task time must remain zero-based for average speed.
+        self._task_step_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
 
     def _curriculum_stage(self) -> int:
         if not self.cfg.use_route_curriculum:
@@ -147,7 +153,7 @@ class ResidualDiffusionEnv(Solo12Env):
     def _timing_errors(self, state: RouteState) -> tuple[torch.Tensor, torch.Tensor]:
         """Return schedule and mean progress-speed errors without a time command."""
 
-        elapsed = self.episode_length_buf.float() * self.step_dt
+        elapsed = self._task_step_buf.float() * self.step_dt
         return progress_timing_errors(
             progress=state.progress,
             route_length=self._routes.length,
@@ -228,7 +234,15 @@ class ResidualDiffusionEnv(Solo12Env):
         # penalty, an agent can avoid the completion bonus by lingering until
         # the horizon.  RSL-RL still receives the timeout flag separately for
         # correct value bootstrapping.
-        failed = (self.reset_terminated | self.reset_time_outs) & ~self._success
+        # The runner randomizes only episode_length_buf at startup to stagger
+        # reset times.  Those shortened first rollouts are neutral truncations,
+        # not failures of the route policy.
+        startup_truncation = self.reset_time_outs & (
+            self.episode_length_buf > self._task_step_buf
+        )
+        failed = (
+            self.reset_terminated | (self.reset_time_outs & ~startup_truncation)
+        ) & ~self._success
         reward, terms = residual_reward(
             progress_delta=state.progress_delta,
             cross_track=state.cross_track,
@@ -265,6 +279,7 @@ class ResidualDiffusionEnv(Solo12Env):
         return reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        self._task_step_buf += 1
         contact_terminated, time_out = super()._get_dones()
         state = self._update_route()
         corridor_failure = state.cross_track.abs() > self.cfg.corridor_half_width_m
@@ -311,6 +326,7 @@ class ResidualDiffusionEnv(Solo12Env):
                 self._last_episode_route_kind[capture_ids] = self._routes.route_kind[capture_ids]
                 self._last_episode_mean_speed_error[capture_ids] = mean_speed_error[capture_ids]
                 self._last_episode_terminal_distance[capture_ids] = self._route_state.terminal_distance[capture_ids]
+                self._last_episode_task_steps[capture_ids] = self._task_step_buf[capture_ids]
                 outcome = torch.full_like(capture_ids, 3)
                 outcome = torch.where(self._success[capture_ids], 0, outcome)
                 outcome = torch.where(self._corridor_termination[capture_ids], 2, outcome)
@@ -344,6 +360,12 @@ class ResidualDiffusionEnv(Solo12Env):
         episode_log["Episode_Metrics/final_position_error_m"] = float(
             self._last_episode_terminal_distance[env_ids].mean()
         )
+        episode_log["Episode/length_steps"] = float(
+            self._last_episode_task_steps[env_ids].float().mean()
+        )
+        episode_log["Episode/length_seconds"] = (
+            episode_log["Episode/length_steps"] * self.step_dt
+        )
         self._routes.reset(
             env_ids,
             self._curriculum_stage(),
@@ -356,5 +378,6 @@ class ResidualDiffusionEnv(Solo12Env):
         self._base_contact_termination[env_ids] = False
         self._corridor_termination[env_ids] = False
         self._terminal_hold_counter[env_ids] = 0
+        self._task_step_buf[env_ids] = 0
         self._route_state = None
         self._base_action_ready = False
