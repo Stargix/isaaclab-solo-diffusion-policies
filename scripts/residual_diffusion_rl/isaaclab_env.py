@@ -10,7 +10,7 @@ from scripts.diffusion_policy.train.data.obs_utils import proprio_from_env_tenso
 
 from .contracts import OBSERVATION_DIM, RESIDUAL_ACTION_DIM
 from .frozen_policy import FrozenSpatialDiffusion
-from .rewards import RewardWeights, residual_reward
+from .rewards import RewardWeights, progress_timing_errors, residual_reward
 from .routes import RouteBank, RouteState
 
 
@@ -23,7 +23,9 @@ class ResidualDiffusionEnvCfg(Solo12EnvCfg):
     spatial_diffusion_checkpoint: str = ""
     diffusion_inference_steps: int | None = 10
     diffusion_exec_horizon: int = 4
-    residual_scale: float = 0.20
+    # The prior already solves most of the task.  Ten percent leaves PPO enough
+    # authority to correct it without cheaply replacing the learned gait.
+    residual_scale: float = 0.10
     residual_action_clip: float = 1.0
     route_points: int = 101
     route_length_m: float = 4.0
@@ -31,10 +33,16 @@ class ResidualDiffusionEnvCfg(Solo12EnvCfg):
     corridor_half_width_m: float = 0.45
     route_goal_tolerance_m: float = 0.12
     terminal_height_tolerance_m: float = 0.04
-    # DirectRLEnv's common_step_counter counts vector control steps (not the
-    # number of environment samples). These thresholds fit a 12k x 32 rollout.
-    curriculum_stage1_steps: int = 80_000
-    curriculum_stage2_steps: int = 200_000
+    terminal_mean_speed_tolerance_mps: float = 0.05
+    terminal_stop_speed_mps: float = 0.15
+    terminal_hold_steps: int = 5
+    # B1 starts on its actual target distribution because the frozen prior is
+    # already competent there.  The staged option remains an explicit ablation.
+    route_stage: int = 2
+    use_route_curriculum: bool = False
+    stratified_route_sampling: bool = False
+    curriculum_stage1_steps: int = 6_400
+    curriculum_stage2_steps: int = 12_800
     reset_x_pos = 0.0
     reset_y_pos = 0.0
     reset_yaw = 0.0
@@ -61,6 +69,12 @@ class ResidualDiffusionEnv(Solo12Env):
             raise ValueError("env.spatial_diffusion_checkpoint is required")
         if not 0.0 <= cfg.residual_scale <= 1.0:
             raise ValueError("residual_scale must be in [0, 1]")
+        if cfg.route_stage not in (0, 1, 2):
+            raise ValueError("route_stage must be 0, 1 or 2")
+        if cfg.terminal_hold_steps < 1:
+            raise ValueError("terminal_hold_steps must be positive")
+        if cfg.curriculum_stage1_steps < 0 or cfg.curriculum_stage2_steps < cfg.curriculum_stage1_steps:
+            raise ValueError("curriculum step thresholds must be ordered and non-negative")
         super().__init__(cfg, render_mode, **kwargs)
         self._routes = RouteBank(
             self.num_envs,
@@ -77,7 +91,11 @@ class ResidualDiffusionEnv(Solo12Env):
             exec_horizon=cfg.diffusion_exec_horizon,
         )
         all_ids = torch.arange(self.num_envs, device=self.device)
-        self._routes.reset(all_ids, stage=0)
+        self._routes.reset(
+            all_ids,
+            stage=self._curriculum_stage(),
+            stratified=self.cfg.stratified_route_sampling,
+        )
         self._prior.reset(all_ids)
         self._residual = torch.zeros(self.num_envs, RESIDUAL_ACTION_DIM, device=self.device)
         self._previous_residual = torch.zeros_like(self._residual)
@@ -89,8 +107,17 @@ class ResidualDiffusionEnv(Solo12Env):
         self._success = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._base_contact_termination = torch.zeros_like(self._success)
         self._corridor_termination = torch.zeros_like(self._success)
+        self._terminal_hold_counter = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._last_episode_route_kind = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._last_episode_outcome = torch.full(
+            (self.num_envs,), -1, dtype=torch.long, device=self.device
+        )
+        self._last_episode_mean_speed_error = torch.zeros(self.num_envs, device=self.device)
+        self._last_episode_terminal_distance = torch.zeros(self.num_envs, device=self.device)
 
     def _curriculum_stage(self) -> int:
+        if not self.cfg.use_route_curriculum:
+            return self.cfg.route_stage
         if self.common_step_counter >= self.cfg.curriculum_stage2_steps:
             return 2
         if self.common_step_counter >= self.cfg.curriculum_stage1_steps:
@@ -116,6 +143,24 @@ class ResidualDiffusionEnv(Solo12Env):
     def _update_route(self) -> RouteState:
         self._route_state = self._routes.update(self._local_position())
         return self._route_state
+
+    def _timing_errors(self, state: RouteState) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return schedule and mean progress-speed errors without a time command."""
+
+        elapsed = self.episode_length_buf.float() * self.step_dt
+        return progress_timing_errors(
+            progress=state.progress,
+            route_length=self._routes.length,
+            commanded_speed=self._routes.speed,
+            elapsed_s=elapsed,
+            min_dt=self.step_dt,
+        )
+
+    def _tangent_speed(self, state: RouteState) -> torch.Tensor:
+        velocity_w = self._robot.data.root_lin_vel_w[:, :2]
+        return velocity_w[:, 0] * torch.cos(state.tangent_yaw) + velocity_w[:, 1] * torch.sin(
+            state.tangent_yaw
+        )
 
     def _prepare_base_action(self) -> None:
         if self._base_action_ready:
@@ -150,7 +195,8 @@ class ResidualDiffusionEnv(Solo12Env):
         yaw_error = torch.atan2(torch.sin(state.tangent_yaw - self._robot_yaw()),
                                 torch.cos(state.tangent_yaw - self._robot_yaw()))
         base_height = self._robot.data.root_pos_w[:, 2] - self._terrain.env_origins[:, 2]
-        tangent_speed = self._robot.data.root_lin_vel_b[:, 0]
+        tangent_speed = self._tangent_speed(state)
+        schedule_error, mean_speed_error = self._timing_errors(state)
         route_features = torch.cat((
             self._robot.data.root_lin_vel_b[:, :2],
             self._robot.data.root_ang_vel_b[:, 2:3],
@@ -160,6 +206,8 @@ class ResidualDiffusionEnv(Solo12Env):
             (tangent_speed - self._routes.speed)[:, None],
             torch.sin(yaw_error)[:, None],
             torch.cos(yaw_error)[:, None],
+            schedule_error[:, None],
+            mean_speed_error[:, None],
         ), dim=1)
         obs = torch.cat((self._proprio(), self._goal, self._base_action,
                          self._residual, route_features), dim=1)
@@ -174,6 +222,8 @@ class ResidualDiffusionEnv(Solo12Env):
         yaw_error = torch.atan2(torch.sin(state.tangent_yaw - self._robot_yaw()),
                                 torch.cos(state.tangent_yaw - self._robot_yaw()))
         base_height = self._robot.data.root_pos_w[:, 2] - self._terrain.env_origins[:, 2]
+        tangent_speed = self._tangent_speed(state)
+        schedule_error, mean_speed_error = self._timing_errors(state)
         # A route timeout is a task failure as well: without this terminal
         # penalty, an agent can avoid the completion bonus by lingering until
         # the horizon.  RSL-RL still receives the timeout flag separately for
@@ -182,7 +232,8 @@ class ResidualDiffusionEnv(Solo12Env):
         reward, terms = residual_reward(
             progress_delta=state.progress_delta,
             cross_track=state.cross_track,
-            speed_error=self._robot.data.root_lin_vel_b[:, 0] - self._routes.speed,
+            speed_error=tangent_speed - self._routes.speed,
+            schedule_error=schedule_error,
             yaw_error=yaw_error,
             height_error=base_height - state.target_height,
             residual=self._residual,
@@ -191,6 +242,7 @@ class ResidualDiffusionEnv(Solo12Env):
             vertical_velocity=self._robot.data.root_lin_vel_b[:, 2],
             success=self._success,
             failed=failed,
+            fell=self._base_contact_termination,
             dt=self.step_dt,
             weights=self._reward_weights,
         )
@@ -200,7 +252,10 @@ class ResidualDiffusionEnv(Solo12Env):
             "Metrics/progress_m": float(state.progress.mean()),
             "Metrics/cross_track_abs_m": float(state.cross_track.abs().mean()),
             "Metrics/height_error_abs_m": float((base_height - state.target_height).abs().mean()),
-            "Metrics/speed_error_abs_mps": float((self._robot.data.root_lin_vel_b[:, 0] - self._routes.speed).abs().mean()),
+            "Metrics/speed_error_abs_mps": float((tangent_speed - self._routes.speed).abs().mean()),
+            "Metrics/schedule_error_abs_m": float(schedule_error.abs().mean()),
+            "Metrics/mean_speed_error_abs_mps": float(mean_speed_error.abs().mean()),
+            "Metrics/terminal_distance_m": float(state.terminal_distance.mean()),
             "Metrics/residual_rms": float(torch.sqrt(self._residual.square().mean())),
             "Metrics/residual_abs_mean": float(self._residual.abs().mean()),
             "Metrics/residual_saturation_frac": float((self._residual.abs() >= 0.95).float().mean()),
@@ -216,17 +271,51 @@ class ResidualDiffusionEnv(Solo12Env):
         yaw_error = torch.atan2(torch.sin(state.tangent_yaw - self._robot_yaw()),
                                 torch.cos(state.tangent_yaw - self._robot_yaw()))
         base_height = self._robot.data.root_pos_w[:, 2] - self._terrain.env_origins[:, 2]
-        reached_terminal_pose = state.success & (state.cross_track.abs() <= self.cfg.route_goal_tolerance_m) & (
-            yaw_error.abs() <= 0.35
-        ) & ((base_height - state.target_height).abs() <= self.cfg.terminal_height_tolerance_m)
+        _, mean_speed_error = self._timing_errors(state)
+        planar_speed = torch.linalg.vector_norm(self._robot.data.root_lin_vel_w[:, :2], dim=1)
+        reached_terminal_pose = (
+            state.success
+            & (state.terminal_distance <= self.cfg.route_goal_tolerance_m)
+            & (yaw_error.abs() <= 0.35)
+            & ((base_height - state.target_height).abs() <= self.cfg.terminal_height_tolerance_m)
+            & (mean_speed_error.abs() <= self.cfg.terminal_mean_speed_tolerance_mps)
+            & (planar_speed <= self.cfg.terminal_stop_speed_mps)
+        )
+        self._terminal_hold_counter = torch.where(
+            reached_terminal_pose,
+            self._terminal_hold_counter + 1,
+            torch.zeros_like(self._terminal_hold_counter),
+        )
         # A contact or corridor failure on the terminal step is a failure, not
         # a successful completion.
-        self._success = reached_terminal_pose & ~contact_terminated & ~corridor_failure
+        self._success = (
+            (self._terminal_hold_counter >= self.cfg.terminal_hold_steps)
+            & ~contact_terminated
+            & ~corridor_failure
+        )
         self._base_contact_termination.copy_(contact_terminated)
         self._corridor_termination.copy_(corridor_failure)
-        return contact_terminated | corridor_failure | self._success, time_out
+        terminated = contact_terminated | corridor_failure | self._success
+        # Terminal outcomes are mutually exclusive.  Only a genuine horizon
+        # truncation receives RSL-RL's timeout bootstrapping treatment.
+        return terminated, time_out & ~terminated
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
+        if hasattr(self, "_prior") and self._route_state is not None:
+            capture_ids = (
+                torch.arange(self.num_envs, device=self.device) if env_ids is None else env_ids
+            )
+            capture_ids = capture_ids[self.episode_length_buf[capture_ids] > 0]
+            if len(capture_ids) > 0:
+                _, mean_speed_error = self._timing_errors(self._route_state)
+                self._last_episode_route_kind[capture_ids] = self._routes.route_kind[capture_ids]
+                self._last_episode_mean_speed_error[capture_ids] = mean_speed_error[capture_ids]
+                self._last_episode_terminal_distance[capture_ids] = self._route_state.terminal_distance[capture_ids]
+                outcome = torch.full_like(capture_ids, 3)
+                outcome = torch.where(self._success[capture_ids], 0, outcome)
+                outcome = torch.where(self._corridor_termination[capture_ids], 2, outcome)
+                outcome = torch.where(self._base_contact_termination[capture_ids], 1, outcome)
+                self._last_episode_outcome[capture_ids] = outcome
         super()._reset_idx(env_ids)
         if not hasattr(self, "_prior"):
             return
@@ -236,18 +325,36 @@ class ResidualDiffusionEnv(Solo12Env):
         # introduces route success and corridor exits, so overwrite that
         # inherited aggregate with the mutually interpretable event counts.
         episode_log = self.extras.setdefault("log", {})
-        episode_log["Episode_Termination/base_contact"] = torch.count_nonzero(
-            self._base_contact_termination[env_ids]
-        ).item()
-        episode_log["Episode_Termination/corridor_failure"] = torch.count_nonzero(
-            self._corridor_termination[env_ids]
-        ).item()
-        episode_log["Episode_Termination/route_success"] = torch.count_nonzero(self._success[env_ids]).item()
-        self._routes.reset(env_ids, self._curriculum_stage())
+        base_count = torch.count_nonzero(self._base_contact_termination[env_ids]).item()
+        corridor_count = torch.count_nonzero(self._corridor_termination[env_ids]).item()
+        success_count = torch.count_nonzero(self._success[env_ids]).item()
+        completed_count = max(len(env_ids), 1)
+        episode_log["Episode_Termination/base_contact"] = base_count
+        episode_log["Episode_Termination/corridor_failure"] = corridor_count
+        episode_log["Episode_Termination/route_success"] = success_count
+        episode_log["Episode_TerminationRate/base_contact"] = base_count / completed_count
+        episode_log["Episode_TerminationRate/corridor_failure"] = corridor_count / completed_count
+        episode_log["Episode_TerminationRate/route_success"] = success_count / completed_count
+        episode_log["Episode_TerminationRate/time_out"] = (
+            torch.count_nonzero(self.reset_time_outs[env_ids]).item() / completed_count
+        )
+        episode_log["Episode_Metrics/final_mean_speed_error_abs_mps"] = float(
+            self._last_episode_mean_speed_error[env_ids].abs().mean()
+        )
+        episode_log["Episode_Metrics/final_position_error_m"] = float(
+            self._last_episode_terminal_distance[env_ids].mean()
+        )
+        self._routes.reset(
+            env_ids,
+            self._curriculum_stage(),
+            stratified=self.cfg.stratified_route_sampling,
+        )
         self._prior.reset(env_ids)
         self._residual[env_ids] = 0.0
         self._previous_residual[env_ids] = 0.0
         self._success[env_ids] = False
         self._base_contact_termination[env_ids] = False
         self._corridor_termination[env_ids] = False
+        self._terminal_hold_counter[env_ids] = 0
+        self._route_state = None
         self._base_action_ready = False

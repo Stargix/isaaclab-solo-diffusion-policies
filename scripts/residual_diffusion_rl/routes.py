@@ -20,6 +20,7 @@ class RouteState:
     tangent_yaw: torch.Tensor
     target_height: torch.Tensor
     remaining_fraction: torch.Tensor
+    terminal_distance: torch.Tensor
     success: torch.Tensor
 
 
@@ -60,8 +61,9 @@ class RouteBank:
         self._last_progress = torch.zeros_like(self.progress)
         self.cross_track = torch.zeros_like(self.progress)
         self.route_kind = torch.zeros(num_envs, dtype=torch.long, device=self.device)
+        self._kind_sample_counter = 0
 
-    def reset(self, env_ids: torch.Tensor, stage: int) -> None:
+    def reset(self, env_ids: torch.Tensor, stage: int, *, stratified: bool = False) -> None:
         """Sample routes; stages implement fixed-to-random curriculum."""
 
         count = len(env_ids)
@@ -69,7 +71,13 @@ class RouteBank:
             return
         u = torch.linspace(0.0, 1.0, self.points, device=self.device).expand(count, -1)
         max_kind = 0 if stage <= 0 else 2 if stage == 1 else 3
-        kind = torch.randint(0, max_kind + 1, (count,), device=self.device)
+        if stratified:
+            kind = (
+                torch.arange(count, device=self.device) + self._kind_sample_counter
+            ) % (max_kind + 1)
+            self._kind_sample_counter = (self._kind_sample_counter + count) % (max_kind + 1)
+        else:
+            kind = torch.randint(0, max_kind + 1, (count,), device=self.device)
         x = self.length_m * u
         y = torch.zeros_like(x)
 
@@ -144,6 +152,7 @@ class RouteBank:
         self.progress.copy_(new_progress)
         self.cross_track.copy_(signed)
         remaining = (1.0 - new_progress / self.length.clamp_min(1.0e-6)).clamp(0.0, 1.0)
+        terminal_distance = torch.linalg.vector_norm(position_local - self.xy[:, -1], dim=1)
         success = remaining <= (0.12 / self.length).clamp_max(0.05)
         return RouteState(
             progress=new_progress,
@@ -152,6 +161,7 @@ class RouteBank:
             tangent_yaw=tangent_yaw,
             target_height=self.height[rows, self.progress_idx],
             remaining_fraction=remaining,
+            terminal_distance=terminal_distance,
             success=success,
         )
 

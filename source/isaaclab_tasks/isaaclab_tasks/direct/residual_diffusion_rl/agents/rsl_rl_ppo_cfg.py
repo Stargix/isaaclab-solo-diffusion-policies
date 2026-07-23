@@ -6,6 +6,10 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, R
 
 @configclass
 class ResidualDiffusionPPOCfg(RslRlOnPolicyRunnerCfg):
+    # The average-speed objective uses the environment episode clock.  RSL-RL's
+    # usual randomized initial episode length would start that clock at an
+    # arbitrary time without advancing the route, corrupting schedule error.
+    init_at_random_ep_len = False
     clip_actions = 1.0
     num_steps_per_env = 32
     max_iterations = 12_000
@@ -16,7 +20,7 @@ class ResidualDiffusionPPOCfg(RslRlOnPolicyRunnerCfg):
     run_name = "phase_b1_local_residual"
     obs_groups = {"policy": ["policy"], "critic": ["policy"]}
     policy = RslRlPpoActorCriticCfg(
-        init_noise_std=0.15,
+        init_noise_std=0.10,
         noise_std_type="log",
         actor_obs_normalization=True,
         critic_obs_normalization=True,
@@ -27,14 +31,14 @@ class ResidualDiffusionPPOCfg(RslRlOnPolicyRunnerCfg):
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=0.5,
         use_clipped_value_loss=True,
-        clip_param=0.15,
-        entropy_coef=0.001,
+        clip_param=0.10,
+        entropy_coef=0.0005,
         num_learning_epochs=4,
         num_mini_batches=4,
-        learning_rate=2.0e-4,
-        schedule="adaptive",
-        gamma=0.99,
+        learning_rate=1.0e-4,
+        schedule="fixed",
+        gamma=0.999,
         lam=0.95,
-        desired_kl=0.008,
+        desired_kl=0.006,
         max_grad_norm=1.0,
     )

@@ -33,10 +33,10 @@ def main() -> None:
     env = gym.make(task, cfg=cfg)
     try:
         observation, _ = env.reset()
-        assert observation["policy"].shape == (1, 75)
+        assert observation["policy"].shape == (1, 77)
         action = torch.zeros((1, 12), device=env.unwrapped.device)
         observation, reward, terminated, truncated, _ = env.step(action)
-        assert observation["policy"].shape == (1, 75)
+        assert observation["policy"].shape == (1, 77)
         assert torch.isfinite(observation["policy"]).all()
         assert torch.isfinite(reward).all()
         # stderr remains visible after Kit replaces its stdout logger.

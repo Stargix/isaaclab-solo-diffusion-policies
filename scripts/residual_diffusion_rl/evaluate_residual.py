@@ -29,7 +29,9 @@ parser.add_argument("--output_dir", required=True, help="Directory in which to w
 parser.add_argument("--episodes", type=int, default=256, help="Minimum number of completed episodes.")
 parser.add_argument("--num_envs", type=int, default=64, help="Parallel environments.")
 parser.add_argument("--seed", type=int, default=42, help="Shared route RNG seed for paired comparison.")
-parser.add_argument("--stage", type=int, choices=(0, 1, 2), default=0, help="RouteBank curriculum stage.")
+parser.add_argument(
+    "--stage", type=int, choices=(0, 1, 2), default=2, help="Fixed RouteBank benchmark stage."
+)
 parser.add_argument("--max_steps", type=int, default=20_000, help="Safety bound on vectorized control steps.")
 parser.add_argument("--trace_envs", type=int, default=6, help="Number of initial episodes to save as qualitative traces.")
 AppLauncher.add_app_launcher_args(parser)
@@ -47,13 +49,6 @@ from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent  # noqa: E4
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper  # noqa: E402
 import isaaclab_tasks  # noqa: F401, E402
 from isaaclab_tasks.utils.hydra import hydra_task_config  # noqa: E402
-
-
-def _count(log: dict, key: str) -> int:
-    """Return a reset-event count logged by ResidualDiffusionEnv."""
-
-    value = log.get(key, 0)
-    return int(value.item()) if isinstance(value, torch.Tensor) else int(value)
 
 
 def _capture_traces(raw_env, traces: list[dict], active: torch.Tensor, time_s: float) -> None:
@@ -233,15 +228,9 @@ def main(env_cfg, agent_cfg) -> None:
     # RouteBank selects its stage from this common control-step counter.  Keep
     # the MDP fixed for all evaluated episodes rather than allowing an
     # evaluation run to change difficulty halfway through.
-    if args_cli.stage == 0:
-        env_cfg.curriculum_stage1_steps = args_cli.max_steps + 1
-        env_cfg.curriculum_stage2_steps = args_cli.max_steps + 2
-    elif args_cli.stage == 1:
-        env_cfg.curriculum_stage1_steps = 0
-        env_cfg.curriculum_stage2_steps = args_cli.max_steps + 1
-    else:
-        env_cfg.curriculum_stage1_steps = 0
-        env_cfg.curriculum_stage2_steps = 0
+    env_cfg.use_route_curriculum = False
+    env_cfg.route_stage = args_cli.stage
+    env_cfg.stratified_route_sampling = True
 
     env = gym.make(args_cli.task, cfg=env_cfg)
     if isinstance(env.unwrapped, DirectMARLEnv):
@@ -275,12 +264,18 @@ def main(env_cfg, agent_cfg) -> None:
         })
     trace_active = torch.ones(trace_count, dtype=torch.bool, device=raw_env.device)
     outcomes = {"route_success": 0, "base_contact": 0, "corridor_failure": 0, "time_out": 0}
+    outcome_names = tuple(outcomes)
+    per_route_outcomes = {
+        name: {outcome: 0 for outcome in outcome_names} for name in route_names
+    }
     completed = 0
     reward_sum = 0.0
     length_sum_s = 0.0
     steps = 0
     state_sums = {"cross_track_abs_m": 0.0, "height_error_abs_m": 0.0, "speed_error_abs_mps": 0.0, "residual_rms": 0.0}
     state_samples = 0
+    terminal_mean_speed_error_sum = 0.0
+    terminal_distance_sum = 0.0
 
     with torch.inference_mode():
         while completed < args_cli.episodes and steps < args_cli.max_steps:
@@ -292,7 +287,12 @@ def main(env_cfg, agent_cfg) -> None:
             base_height = robot.root_pos_w[:, 2] - raw_env._terrain.env_origins[:, 2]
             state_sums["cross_track_abs_m"] += float(route.cross_track.abs().sum())
             state_sums["height_error_abs_m"] += float((base_height - target_height).abs().sum())
-            state_sums["speed_error_abs_mps"] += float((robot.root_lin_vel_b[:, 0] - route.speed).abs().sum())
+            tangent_yaw = route.yaw[route_rows, route.progress_idx]
+            tangent_speed = (
+                robot.root_lin_vel_w[:, 0] * torch.cos(tangent_yaw)
+                + robot.root_lin_vel_w[:, 1] * torch.sin(tangent_yaw)
+            )
+            state_sums["speed_error_abs_mps"] += float((tangent_speed - route.speed).abs().sum())
             state_sums["residual_rms"] += float(torch.sqrt(raw_env._residual.square().mean(dim=1)).sum())
             state_samples += raw_env.num_envs
             actions = policy(observations)
@@ -308,8 +308,18 @@ def main(env_cfg, agent_cfg) -> None:
                 continue
             completed += done_count
             log = extras.get("log", {})
-            for name in outcomes:
-                outcomes[name] += _count(log, f"Episode_Termination/{name}")
+            done_ids = torch.nonzero(dones, as_tuple=False).squeeze(-1)
+            episode_kinds = raw_env._last_episode_route_kind[done_ids].detach().cpu().tolist()
+            episode_outcomes = raw_env._last_episode_outcome[done_ids].detach().cpu().tolist()
+            for route_kind, outcome_code in zip(episode_kinds, episode_outcomes):
+                outcome_name = outcome_names[outcome_code]
+                route_name = route_names[route_kind]
+                outcomes[outcome_name] += 1
+                per_route_outcomes[route_name][outcome_name] += 1
+            terminal_mean_speed_error_sum += float(
+                raw_env._last_episode_mean_speed_error[done_ids].abs().sum()
+            )
+            terminal_distance_sum += float(raw_env._last_episode_terminal_distance[done_ids].sum())
             reward_sum += float(log.get("Episode_Reward/total", 0.0)) * done_count
             length_sum_s += float(log.get("Episode/length_seconds", 0.0)) * done_count
 
@@ -331,9 +341,21 @@ def main(env_cfg, agent_cfg) -> None:
         "rates": {name: count / completed for name, count in outcomes.items()},
         "mean_episode_reward": reward_sum / completed,
         "mean_episode_length_s": length_sum_s / completed,
+        "mean_terminal_speed_error_abs_mps": terminal_mean_speed_error_sum / completed,
+        "mean_terminal_distance_m": terminal_distance_sum / completed,
         "mean_state_metrics": {name: value / state_samples for name, value in state_sums.items()},
+        "per_route": {},
         "qualitative_trace_envs": trace_count,
     }
+    for route_name, counts in per_route_outcomes.items():
+        route_total = sum(counts.values())
+        summary["per_route"][route_name] = {
+            "episodes": route_total,
+            "outcomes": counts,
+            "rates": {
+                name: count / route_total if route_total else None for name, count in counts.items()
+            },
+        }
     output_path = output_dir / "summary.json"
     output_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     _write_diagnostics(output_dir, traces, summary)

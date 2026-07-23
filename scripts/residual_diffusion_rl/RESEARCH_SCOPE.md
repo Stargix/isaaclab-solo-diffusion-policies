@@ -75,22 +75,81 @@ compute. It is Phase B2, not silently mixed into B1.
   delayed proprio/action/goal histories are preserved. Its action history uses
   the action actually executed after residual correction.
 - **Observation:** proprioception (30), geometric goal12, proposed diffusion
-  action (12), previous residual (12), body velocity and route errors (9): 75D.
-- **Action:** 12D PPO residual clipped to `[-1,1]`, scaled by 0.20 of each
+  action (12), previous residual (12), body velocity and route errors (9), plus
+  schedule and mean-progress-speed errors (2): 77D. The two timing features
+  are required because PPO is feed-forward; omitting them makes an
+  average-speed objective partially observable.
+- **Action:** 12D PPO residual clipped to `[-1,1]`, scaled by 0.10 of each
   joint's demonstrated action half-range, added to the diffusion action and
-  finally clipped to the demonstration action range.
-- **Objective:** progress and terminal success, with smooth path, tangent-speed,
-  yaw and height *error costs* (zero under perfect tracking) plus a small time
-  cost; fall/corridor failure; small residual magnitude, residual-rate, tilt
-  and vertical-velocity costs. Success also requires the terminal height.
-- **Curriculum:** (0) straight and constant endpoint heights; (1) straight,
-  S-curve and right-angle paths with binary height sections; (2) random smooth
-  curves and intermediate heights. Difficulty expands, but the MDP contract
-  does not change.
+  finally clipped to the demonstration action range. The conservative default
+  reflects that the prior already solves most trajectories.
+- **Objective:** speed-gated progress and terminal success, with
+  non-saturating Huber costs for path, instantaneous tangent speed, progress
+  schedule, yaw and height; fall/corridor/timeout failure; small residual
+  magnitude, residual-rate, tilt and vertical-velocity costs. There is no
+  alive reward or independent time cost.
+- **Terminal contract:** the robot must be within 0.12 m of the actual final
+  point, satisfy final yaw/height, be nearly stopped, and have final
+  `progress / elapsed_time` within 0.05 m/s of requested average speed for five
+  consecutive control steps. Projection onto the last route sample alone is
+  insufficient.
+- **Route distribution:** the default trains directly on stage 2 (straight,
+  S-curve, right-angle and random smooth paths with endpoint/intermediate
+  heights). A staged curriculum is retained only as an ablation because the
+  frozen prior is already competent on the target distribution.
 
 No controller smooths height commands. The future terminal height is visible
 in `goal12`, while the current section height is rewarded. Thus anticipation
 and smoothness must be learned.
+
+## Average-speed objective and reward
+
+Let `s_t` be monotone arc-length progress, `L` route length, `v*` requested
+average speed and `t` elapsed episode time. B1 derives timing from the speed
+command:
+
+```text
+expected_progress(t) = min(v* t, L)
+schedule_error(t)    = s_t - expected_progress(t)
+mean_speed_error(t)  = s_t / t - v*
+```
+
+`schedule_error` is the dense learning signal. It rules out both sprinting
+ahead and lagging behind while remaining symmetric around the requested
+schedule. `mean_speed_error` is observed by the feed-forward actor and is a
+hard terminal condition. It is not a second time/deadline command.
+
+The step objective is:
+
+```text
++ progress_delta * Gaussian(tangent_speed_error)
+- Huber(cross_track, tangent_speed, schedule, yaw, height)
+- L2(residual, residual_rate, tilt, vertical_velocity)
++ terminal_success
+- task_failure
+- extra_fall_cost
+```
+
+Huber losses are zero at the target, quadratic for small errors and linear for
+large errors. The old bounded exponential error cost saturated at exactly the
+point where sprinting should become increasingly undesirable. Speed-gating
+progress also makes a metre travelled at the requested speed more valuable
+than a metre obtained by exploiting route projection at excessive speed.
+
+There is no per-step survival reward and no time penalty. A correct trajectory
+therefore does not score more merely because it lasts longer; route duration is
+fixed by `L / v*`. Height commands remain piecewise constant. Smooth lowering
+must emerge from future-goal anticipation, the height objective,
+vertical-velocity cost and residual-rate cost, not a hand-written ramp.
+
+The PPO defaults are deliberately local: residual authority 0.10, initial
+action standard deviation 0.10, clipping 0.10 and fixed learning rate `1e-4`.
+The fixed rate prevents the adaptive scheduler from increasing step size while
+the target distribution changes. `gamma=0.999` retains terminal information
+over a 10--22 second route at 50 Hz; `gamma=0.99` discounts that horizon almost
+completely. RSL-RL initial episode-length randomization is disabled because
+randomizing the clock without advancing route state corrupts both timing
+errors.
 
 ## Required comparisons and metrics
 
@@ -104,7 +163,8 @@ Use identical seeds and route suites for:
    baseline.
 
 Report route success, survival, normalized progress, cross-track RMSE, tangent
-speed MAE, height MAE/RMSE, terminal yaw error and residual RMS. Also rerun the
+speed MAE, final mean-speed MAE, height MAE/RMSE, terminal position/yaw error
+and residual RMS, globally and by route family. Also rerun the
 Phase-A in-distribution suite: improvement on OOD routes is not success if the
 online layer regresses original walk/crouch performance.
 

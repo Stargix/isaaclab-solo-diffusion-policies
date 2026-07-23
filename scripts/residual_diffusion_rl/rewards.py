@@ -9,21 +9,58 @@ import torch
 
 @dataclass(frozen=True)
 class RewardWeights:
-    progress: float = 3.0
-    path: float = 1.0
+    progress: float = 2.0
+    path: float = 1.5
     speed: float = 1.0
-    yaw: float = 0.6
-    height: float = 1.0
-    # A route-completion task must not pay the agent merely for keeping an
-    # episode alive.  This small time cost breaks ties between equally accurate
-    # trajectories without overriding the nominal-speed objective.
-    time: float = 0.05
-    residual: float = 0.08
-    residual_rate: float = 0.04
-    tilt: float = 0.15
-    vertical_velocity: float = 0.03
-    success: float = 6.0
-    failure: float = 4.0
+    schedule: float = 1.0
+    yaw: float = 0.4
+    height: float = 0.8
+    residual: float = 0.15
+    residual_rate: float = 0.08
+    tilt: float = 0.25
+    vertical_velocity: float = 0.05
+    success: float = 10.0
+    failure: float = 10.0
+    fall_extra: float = 5.0
+
+
+@dataclass(frozen=True)
+class RewardScales:
+    """Physical error scales at which the normalized Huber loss changes slope."""
+
+    path_m: float = 0.10
+    speed_mps: float = 0.15
+    schedule_m: float = 0.20
+    yaw_rad: float = 0.35
+    height_m: float = 0.035
+    progress_speed_mps: float = 0.20
+
+
+def _normalized_huber(error: torch.Tensor, scale: float) -> torch.Tensor:
+    """Quadratic near zero and linear, rather than saturated, for large errors."""
+
+    normalized = error.abs() / scale
+    return torch.where(normalized <= 1.0, 0.5 * normalized.square(), normalized - 0.5)
+
+
+def progress_timing_errors(
+    *,
+    progress: torch.Tensor,
+    route_length: torch.Tensor,
+    commanded_speed: torch.Tensor,
+    elapsed_s: torch.Tensor,
+    min_dt: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute schedule and mean-speed errors from one average-speed command."""
+
+    expected_progress = torch.minimum(commanded_speed * elapsed_s, route_length)
+    schedule_error = progress - expected_progress
+    mean_speed = torch.where(
+        elapsed_s > 0.0,
+        progress / elapsed_s.clamp_min(min_dt),
+        commanded_speed,
+    )
+    return schedule_error, mean_speed - commanded_speed
 
 
 def residual_reward(
@@ -31,6 +68,7 @@ def residual_reward(
     progress_delta: torch.Tensor,
     cross_track: torch.Tensor,
     speed_error: torch.Tensor,
+    schedule_error: torch.Tensor,
     yaw_error: torch.Tensor,
     height_error: torch.Tensor,
     residual: torch.Tensor,
@@ -39,29 +77,33 @@ def residual_reward(
     vertical_velocity: torch.Tensor,
     success: torch.Tensor,
     failed: torch.Tensor,
+    fell: torch.Tensor,
     dt: float,
     weights: RewardWeights = RewardWeights(),
+    scales: RewardScales = RewardScales(),
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """Progress-first route reward with error costs and bounded residuals.
+    """Average-speed-aware route reward for a competent frozen prior.
 
-    The exponential tracking terms are centred at zero.  Thus perfect tracking
-    has no per-second reward, whereas tracking error is a smooth negative cost.
-    This prevents longer episodes from receiving a larger return simply for
-    remaining alive.
+    Progress is only valuable while instantaneous tangential speed agrees with
+    the command.  Non-saturating Huber costs make large speed or schedule
+    violations strictly worse, closing the former sprint-to-goal exploit.
+    There is deliberately no alive bonus or independent time penalty.
     """
 
+    progress_gate = torch.exp(-0.5 * torch.square(speed_error / scales.progress_speed_mps))
     terms = {
-        "progress": weights.progress * progress_delta,
-        "path": weights.path * (torch.exp(-torch.square(cross_track / 0.20)) - 1.0) * dt,
-        "speed": weights.speed * (torch.exp(-torch.square(speed_error / 0.25)) - 1.0) * dt,
-        "yaw": weights.yaw * (torch.exp(-torch.square(yaw_error / 0.45)) - 1.0) * dt,
-        "height": weights.height * (torch.exp(-torch.square(height_error / 0.035)) - 1.0) * dt,
-        "time": torch.full_like(progress_delta, -weights.time * dt),
+        "progress": weights.progress * progress_delta * progress_gate,
+        "path": -weights.path * _normalized_huber(cross_track, scales.path_m) * dt,
+        "speed": -weights.speed * _normalized_huber(speed_error, scales.speed_mps) * dt,
+        "schedule": -weights.schedule * _normalized_huber(schedule_error, scales.schedule_m) * dt,
+        "yaw": -weights.yaw * _normalized_huber(yaw_error, scales.yaw_rad) * dt,
+        "height": -weights.height * _normalized_huber(height_error, scales.height_m) * dt,
         "residual": -weights.residual * residual.square().mean(dim=1) * dt,
         "residual_rate": -weights.residual_rate * (residual - previous_residual).square().mean(dim=1) * dt,
         "tilt": -weights.tilt * projected_gravity_xy.square().sum(dim=1) * dt,
         "vertical_velocity": -weights.vertical_velocity * vertical_velocity.square() * dt,
         "success": weights.success * success.float(),
         "failure": -weights.failure * failed.float(),
+        "fall_extra": -weights.fall_extra * fell.float(),
     }
     return torch.stack(tuple(terms.values())).sum(dim=0), terms

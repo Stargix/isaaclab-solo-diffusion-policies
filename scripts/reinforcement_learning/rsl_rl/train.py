@@ -10,6 +10,12 @@
 import argparse
 import sys
 
+# Load RSL-RL (and its tensordict native extension) before Kit starts.  On
+# Windows, importing tensordict after AppLauncher can crash inside CPython
+# module initialization before the environment is even created.  The residual
+# evaluator follows the same safe import order.
+from rsl_rl.runners import DistillationRunner, OnPolicyRunner
+
 from isaaclab.app import AppLauncher
 
 # local imports
@@ -82,7 +88,6 @@ from datetime import datetime
 
 import gymnasium as gym
 import torch
-from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
 from isaaclab.envs import (
     DirectMARLEnv,
@@ -214,7 +219,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
 
     # run training
-    runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
+    # Stationary locomotion tasks benefit from desynchronized initial timeouts,
+    # but time-aware tasks must be able to opt out: randomizing only the episode
+    # counter corrupts elapsed-time observations without advancing their state.
+    runner.learn(
+        num_learning_iterations=agent_cfg.max_iterations,
+        init_at_random_ep_len=getattr(agent_cfg, "init_at_random_ep_len", True),
+    )
 
     print(f"Training time: {round(time.time() - start_time, 2)} seconds")
 

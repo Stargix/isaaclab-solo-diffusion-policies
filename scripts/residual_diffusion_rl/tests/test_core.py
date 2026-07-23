@@ -5,13 +5,13 @@ import unittest
 import torch
 
 from scripts.residual_diffusion_rl.contracts import OBSERVATION_DIM
-from scripts.residual_diffusion_rl.rewards import residual_reward
+from scripts.residual_diffusion_rl.rewards import progress_timing_errors, residual_reward
 from scripts.residual_diffusion_rl.routes import RouteBank
 
 
 class PhaseB1CoreTests(unittest.TestCase):
     def test_observation_contract_is_versioned(self):
-        self.assertEqual(OBSERVATION_DIM, 75)
+        self.assertEqual(OBSERVATION_DIM, 77)
 
     def test_straight_route_builds_checkpoint_goal12(self):
         bank = RouteBank(1, "cpu", points=101, length_m=4.0)
@@ -37,13 +37,20 @@ class PhaseB1CoreTests(unittest.TestCase):
             self.assertTrue(torch.all(state.progress >= previous))
             previous = state.progress.clone()
 
+    def test_stratified_stage2_sampling_covers_every_route_family(self):
+        bank = RouteBank(8, "cpu")
+        ids = torch.arange(8)
+        bank.reset(ids, stage=2, stratified=True)
+        self.assertEqual(bank.route_kind.tolist(), [0, 1, 2, 3, 0, 1, 2, 3])
+
     def test_residual_regularizer_prefers_local_correction(self):
         common = dict(
             progress_delta=torch.zeros(1), cross_track=torch.zeros(1),
-            speed_error=torch.zeros(1), yaw_error=torch.zeros(1),
+            speed_error=torch.zeros(1), schedule_error=torch.zeros(1), yaw_error=torch.zeros(1),
             height_error=torch.zeros(1), previous_residual=torch.zeros(1, 12),
             projected_gravity_xy=torch.zeros(1, 2), vertical_velocity=torch.zeros(1),
             success=torch.zeros(1, dtype=torch.bool), failed=torch.zeros(1, dtype=torch.bool),
+            fell=torch.zeros(1, dtype=torch.bool),
             dt=0.02,
         )
         local, _ = residual_reward(**common, residual=torch.zeros(1, 12))
@@ -55,7 +62,8 @@ class PhaseB1CoreTests(unittest.TestCase):
             progress_delta=torch.zeros(1), residual=torch.zeros(1, 12),
             previous_residual=torch.zeros(1, 12), projected_gravity_xy=torch.zeros(1, 2),
             vertical_velocity=torch.zeros(1), success=torch.zeros(1, dtype=torch.bool),
-            failed=torch.zeros(1, dtype=torch.bool), dt=0.02,
+            failed=torch.zeros(1, dtype=torch.bool), fell=torch.zeros(1, dtype=torch.bool), dt=0.02,
+            schedule_error=torch.zeros(1),
         )
         perfect, perfect_terms = residual_reward(
             **common,
@@ -69,20 +77,84 @@ class PhaseB1CoreTests(unittest.TestCase):
         )
         for name in ("path", "speed", "yaw", "height"):
             torch.testing.assert_close(perfect_terms[name], torch.zeros(1))
-        self.assertLess(float(perfect_terms["time"]), 0.0)
+        torch.testing.assert_close(perfect, torch.zeros(1))
         self.assertGreater(float(perfect), float(inaccurate))
+
+    def test_large_speed_error_does_not_saturate(self):
+        common = dict(
+            progress_delta=torch.full((1,), 0.04), cross_track=torch.zeros(1),
+            schedule_error=torch.zeros(1), yaw_error=torch.zeros(1), height_error=torch.zeros(1),
+            residual=torch.zeros(1, 12), previous_residual=torch.zeros(1, 12),
+            projected_gravity_xy=torch.zeros(1, 2), vertical_velocity=torch.zeros(1),
+            success=torch.zeros(1, dtype=torch.bool), failed=torch.zeros(1, dtype=torch.bool),
+            fell=torch.zeros(1, dtype=torch.bool), dt=0.02,
+        )
+        nominal, nominal_terms = residual_reward(**common, speed_error=torch.zeros(1))
+        fast, fast_terms = residual_reward(**common, speed_error=torch.full((1,), 0.8))
+        very_fast, very_fast_terms = residual_reward(**common, speed_error=torch.full((1,), 1.6))
+        self.assertGreater(float(nominal), float(fast))
+        self.assertGreater(float(fast_terms["speed"]), float(very_fast_terms["speed"]))
+        self.assertGreater(float(nominal_terms["progress"]), float(fast_terms["progress"]))
+
+    def test_schedule_error_penalizes_sprint_then_wait(self):
+        common = dict(
+            progress_delta=torch.zeros(1), cross_track=torch.zeros(1), speed_error=torch.zeros(1),
+            yaw_error=torch.zeros(1), height_error=torch.zeros(1), residual=torch.zeros(1, 12),
+            previous_residual=torch.zeros(1, 12), projected_gravity_xy=torch.zeros(1, 2),
+            vertical_velocity=torch.zeros(1), success=torch.zeros(1, dtype=torch.bool),
+            failed=torch.zeros(1, dtype=torch.bool), fell=torch.zeros(1, dtype=torch.bool), dt=0.02,
+        )
+        on_schedule, _ = residual_reward(**common, schedule_error=torch.zeros(1))
+        ahead, _ = residual_reward(**common, schedule_error=torch.ones(1))
+        behind, _ = residual_reward(**common, schedule_error=-torch.ones(1))
+        self.assertGreater(float(on_schedule), float(ahead))
+        torch.testing.assert_close(ahead, behind)
+
+    def test_average_speed_command_defines_schedule_and_final_time(self):
+        schedule_error, mean_speed_error = progress_timing_errors(
+            progress=torch.tensor([2.0, 4.0, 4.0]),
+            route_length=torch.full((3,), 4.0),
+            commanded_speed=torch.full((3,), 0.4),
+            elapsed_s=torch.tensor([5.0, 10.0, 5.0]),
+            min_dt=0.02,
+        )
+        torch.testing.assert_close(schedule_error, torch.tensor([0.0, 0.0, 2.0]))
+        torch.testing.assert_close(mean_speed_error, torch.tensor([0.0, 0.0, 0.4]))
 
     def test_terminal_failure_is_penalized(self):
         common = dict(
             progress_delta=torch.zeros(1), cross_track=torch.zeros(1),
-            speed_error=torch.zeros(1), yaw_error=torch.zeros(1), height_error=torch.zeros(1),
+            speed_error=torch.zeros(1), schedule_error=torch.zeros(1),
+            yaw_error=torch.zeros(1), height_error=torch.zeros(1),
             residual=torch.zeros(1, 12), previous_residual=torch.zeros(1, 12),
             projected_gravity_xy=torch.zeros(1, 2), vertical_velocity=torch.zeros(1),
-            success=torch.zeros(1, dtype=torch.bool), dt=0.02,
+            success=torch.zeros(1, dtype=torch.bool), fell=torch.zeros(1, dtype=torch.bool), dt=0.02,
         )
         continuing, _ = residual_reward(**common, failed=torch.zeros(1, dtype=torch.bool))
         failed, _ = residual_reward(**common, failed=torch.ones(1, dtype=torch.bool))
         self.assertGreater(float(continuing), float(failed))
+
+    def test_fall_costs_more_than_other_failure(self):
+        common = dict(
+            progress_delta=torch.zeros(1), cross_track=torch.zeros(1), speed_error=torch.zeros(1),
+            schedule_error=torch.zeros(1), yaw_error=torch.zeros(1), height_error=torch.zeros(1),
+            residual=torch.zeros(1, 12), previous_residual=torch.zeros(1, 12),
+            projected_gravity_xy=torch.zeros(1, 2), vertical_velocity=torch.zeros(1),
+            success=torch.zeros(1, dtype=torch.bool), failed=torch.ones(1, dtype=torch.bool), dt=0.02,
+        )
+        task_failure, _ = residual_reward(**common, fell=torch.zeros(1, dtype=torch.bool))
+        fall, _ = residual_reward(**common, fell=torch.ones(1, dtype=torch.bool))
+        self.assertGreater(float(task_failure), float(fall))
+
+    def test_terminal_distance_rejects_longitudinal_overshoot(self):
+        bank = RouteBank(1, "cpu", points=101, length_m=4.0)
+        bank.reset(torch.tensor([0]), stage=0)
+        for x in torch.linspace(0.0, 4.0, 12):
+            bank.update(torch.tensor([[x, 0.0]]))
+        state = bank.update(torch.tensor([[4.5, 0.0]]))
+        self.assertTrue(bool(state.success))
+        self.assertAlmostEqual(float(state.cross_track), 0.0, places=6)
+        self.assertAlmostEqual(float(state.terminal_distance), 0.5, places=5)
 
 
 if __name__ == "__main__":

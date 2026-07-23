@@ -21,15 +21,30 @@ The target height is piecewise constant. There is no command ramp, filter, or
 hand-written transition controller. Smooth transitions can only emerge from
 task reward, vertical-motion cost, and residual-rate regularization.
 
-The task reward is progress-first: path, speed, yaw and height are smooth
-*error costs* (zero under perfect tracking), not a positive reward accumulated
-per second. A small time cost prevents loitering. Terminal success requires
-route completion, cross-track/yaw tolerances and the requested final height.
+The task reward is average-speed-aware. Progress is rewarded only while
+tangential speed is close to the request. Path, speed, schedule, yaw and height
+use zero-centred Huber costs: they are quadratic near the target and keep
+growing linearly for large errors instead of saturating. There is no alive
+bonus, time cost or separate deadline command.
+
+At elapsed time `t`, the schedule error is
+`route_progress - requested_speed * t`. At the route end, success requires
+`route_progress / t` to match requested speed. Thus requested average speed
+defines traversal time without adding a second, redundant timing objective.
+Success also requires Euclidean final-position, yaw, final-height and stopped
+velocity tolerances held for five control steps. Passing through or beyond the
+last route sample is not success.
 Termination logs distinguish `route_success`, true `base_contact`, corridor
 failure and timeout; the inherited Solo12 `base_contact` aggregate is not used.
 
-`residual_scale=0.20` means at most 20% of each joint's demonstrated action
+`residual_scale=0.10` means at most 10% of each joint's demonstrated action
 half-range; it is not a fixed radian offset shared by unequal joints.
+
+The default samples the complete stage-2 route distribution from the start.
+This is intentional: B1 refines an already competent frozen prior, so an
+easy-only curriculum changes the training distribution without being needed
+for exploration. The former three-stage curriculum remains available as an
+ablation with `env.use_route_curriculum=true`.
 
 ## Train
 
@@ -61,16 +76,25 @@ For the strict frozen-prior control, use the same environment with
 Useful ablations need no code fork:
 
 - prior only: `env.residual_scale=0.0`
-- smaller correction: `env.residual_scale=0.10`
-- no intermediate-height curriculum: set
-  `env.curriculum_stage2_steps` above the total training steps.
+- larger correction ablation: `env.residual_scale=0.20`
+- fixed straight/constant-height suite: `env.route_stage=0`
+- staged route curriculum: `env.use_route_curriculum=true`
 
-The environment logs progress, cross-track, speed/height error, survival,
-success and residual RMS to RSL-RL/W&B.
+The environment logs progress, cross-track, instantaneous and final mean-speed
+error, schedule error, terminal distance, height error, outcome rates and
+residual RMS to RSL-RL/W&B.
 
 ## Paired checkpoint evaluation
 
 `evaluate_residual.py` executes the deterministic actor mean and writes a
 `summary.json` with route success, true base contact, corridor failure, timeout,
-episode reward and duration. Run each checkpoint with the same `--seed`,
-`--stage` and frozen diffusion checkpoint before comparing them.
+terminal mean-speed error, terminal distance, episode reward and duration,
+both globally and separated by route family. Run each checkpoint with the same
+`--seed`, `--stage` and frozen diffusion checkpoint before comparing them.
+Evaluation route sampling is stratified, so stage 2 covers straight, S-curve,
+right-angle and random-curve episodes instead of relying on a lucky random
+draw; training sampling remains random.
+
+The observation contract is now 77D (`residual_route_state77_average_speed_v2`).
+Old 75D residual checkpoints are historical baselines and must not be resumed
+under this MDP.
