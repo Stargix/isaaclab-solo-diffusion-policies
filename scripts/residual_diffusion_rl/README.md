@@ -21,6 +21,11 @@ The target height is piecewise constant. There is no command ramp, filter, or
 hand-written transition controller. Smooth transitions can only emerge from
 task reward, vertical-motion cost, and residual-rate regularization.
 
+The task reward is progress-first: path, speed, yaw and height are smooth
+*error costs* (zero under perfect tracking), not a positive reward accumulated
+per second. A small time cost prevents loitering. Terminal success requires
+route completion, cross-track/yaw tolerances and the requested final height.
+
 `residual_scale=0.20` means at most 20% of each joint's demonstrated action
 half-range; it is not a fixed radian offset shared by unequal joints.
 

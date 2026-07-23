@@ -30,6 +30,7 @@ class ResidualDiffusionEnvCfg(Solo12EnvCfg):
     height_segment_m: float = 0.8
     corridor_half_width_m: float = 0.45
     route_goal_tolerance_m: float = 0.12
+    terminal_height_tolerance_m: float = 0.04
     # DirectRLEnv's common_step_counter counts vector control steps (not the
     # number of environment samples). These thresholds fit a 12k x 32 rollout.
     curriculum_stage1_steps: int = 80_000
@@ -171,7 +172,7 @@ class ResidualDiffusionEnv(Solo12Env):
         yaw_error = torch.atan2(torch.sin(state.tangent_yaw - self._robot_yaw()),
                                 torch.cos(state.tangent_yaw - self._robot_yaw()))
         base_height = self._robot.data.root_pos_w[:, 2] - self._terrain.env_origins[:, 2]
-        failed = self.reset_terminated & ~state.success
+        failed = self.reset_terminated & ~self._success
         reward, terms = residual_reward(
             progress_delta=state.progress_delta,
             cross_track=state.cross_track,
@@ -208,9 +209,10 @@ class ResidualDiffusionEnv(Solo12Env):
         corridor_failure = state.cross_track.abs() > self.cfg.corridor_half_width_m
         yaw_error = torch.atan2(torch.sin(state.tangent_yaw - self._robot_yaw()),
                                 torch.cos(state.tangent_yaw - self._robot_yaw()))
+        base_height = self._robot.data.root_pos_w[:, 2] - self._terrain.env_origins[:, 2]
         self._success = state.success & (state.cross_track.abs() <= self.cfg.route_goal_tolerance_m) & (
             yaw_error.abs() <= 0.35
-        )
+        ) & ((base_height - state.target_height).abs() <= self.cfg.terminal_height_tolerance_m)
         return contact_terminated | corridor_failure | self._success, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):

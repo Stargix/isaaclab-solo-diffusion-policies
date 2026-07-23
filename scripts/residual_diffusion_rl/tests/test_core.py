@@ -50,7 +50,28 @@ class PhaseB1CoreTests(unittest.TestCase):
         large, _ = residual_reward(**common, residual=torch.ones(1, 12))
         self.assertGreater(float(local), float(large))
 
+    def test_tracking_is_an_error_cost_not_an_alive_bonus(self):
+        common = dict(
+            progress_delta=torch.zeros(1), residual=torch.zeros(1, 12),
+            previous_residual=torch.zeros(1, 12), projected_gravity_xy=torch.zeros(1, 2),
+            vertical_velocity=torch.zeros(1), success=torch.zeros(1, dtype=torch.bool),
+            failed=torch.zeros(1, dtype=torch.bool), dt=0.02,
+        )
+        perfect, perfect_terms = residual_reward(
+            **common,
+            cross_track=torch.zeros(1), speed_error=torch.zeros(1),
+            yaw_error=torch.zeros(1), height_error=torch.zeros(1),
+        )
+        inaccurate, _ = residual_reward(
+            **common,
+            cross_track=torch.full((1,), 0.20), speed_error=torch.full((1,), 0.25),
+            yaw_error=torch.full((1,), 0.45), height_error=torch.full((1,), 0.035),
+        )
+        for name in ("path", "speed", "yaw", "height"):
+            torch.testing.assert_close(perfect_terms[name], torch.zeros(1))
+        self.assertLess(float(perfect_terms["time"]), 0.0)
+        self.assertGreater(float(perfect), float(inaccurate))
+
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -79,9 +79,10 @@ compute. It is Phase B2, not silently mixed into B1.
 - **Action:** 12D PPO residual clipped to `[-1,1]`, scaled by 0.20 of each
   joint's demonstrated action half-range, added to the diffusion action and
   finally clipped to the demonstration action range.
-- **Objective:** progress plus bounded rewards for path, tangent speed, yaw and
-  height; fall/corridor failure and terminal success; small residual magnitude,
-  residual-rate, tilt and vertical-velocity costs.
+- **Objective:** progress and terminal success, with smooth path, tangent-speed,
+  yaw and height *error costs* (zero under perfect tracking) plus a small time
+  cost; fall/corridor failure; small residual magnitude, residual-rate, tilt
+  and vertical-velocity costs. Success also requires the terminal height.
 - **Curriculum:** (0) straight and constant endpoint heights; (1) straight,
   S-curve and right-angle paths with binary height sections; (2) random smooth
   curves and intermediate heights. Difficulty expands, but the MDP contract
