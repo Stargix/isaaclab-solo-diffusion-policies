@@ -23,6 +23,7 @@ EOF
 JOBID=""
 WORKDIR="${HOME}/i2r/isaaclab-solo-diffusion-policies"
 CONDA_ENV="isaaclab"
+TMPDIR="${TMPDIR:-${HOME}/i2r/tmp}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -92,7 +93,8 @@ export NCCL_P2P_DISABLE=1
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:1024
 export MALLOC_ARENA_MAX=1
 export PYTHONUNBUFFERED=1
-export HYDRA_FULL_ERROR=1
+export TMPDIR=\"\${HOME}/i2r/tmp\"
+mkdir -p \"\${TMPDIR}\"
 
 export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 export SSL_CERT_DIR=/etc/ssl/certs
