@@ -72,6 +72,18 @@ class PhaseB1CoreTests(unittest.TestCase):
         self.assertLess(float(perfect_terms["time"]), 0.0)
         self.assertGreater(float(perfect), float(inaccurate))
 
+    def test_terminal_failure_is_penalized(self):
+        common = dict(
+            progress_delta=torch.zeros(1), cross_track=torch.zeros(1),
+            speed_error=torch.zeros(1), yaw_error=torch.zeros(1), height_error=torch.zeros(1),
+            residual=torch.zeros(1, 12), previous_residual=torch.zeros(1, 12),
+            projected_gravity_xy=torch.zeros(1, 2), vertical_velocity=torch.zeros(1),
+            success=torch.zeros(1, dtype=torch.bool), dt=0.02,
+        )
+        continuing, _ = residual_reward(**common, failed=torch.zeros(1, dtype=torch.bool))
+        failed, _ = residual_reward(**common, failed=torch.ones(1, dtype=torch.bool))
+        self.assertGreater(float(continuing), float(failed))
+
 
 if __name__ == "__main__":
     unittest.main()

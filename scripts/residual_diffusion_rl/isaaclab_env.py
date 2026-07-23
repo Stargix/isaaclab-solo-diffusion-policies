@@ -87,6 +87,8 @@ class ResidualDiffusionEnv(Solo12Env):
         self._goal = torch.zeros(self.num_envs, 12, device=self.device)
         self._reward_weights = RewardWeights()
         self._success = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._base_contact_termination = torch.zeros_like(self._success)
+        self._corridor_termination = torch.zeros_like(self._success)
 
     def _curriculum_stage(self) -> int:
         if self.common_step_counter >= self.cfg.curriculum_stage2_steps:
@@ -172,7 +174,11 @@ class ResidualDiffusionEnv(Solo12Env):
         yaw_error = torch.atan2(torch.sin(state.tangent_yaw - self._robot_yaw()),
                                 torch.cos(state.tangent_yaw - self._robot_yaw()))
         base_height = self._robot.data.root_pos_w[:, 2] - self._terrain.env_origins[:, 2]
-        failed = self.reset_terminated & ~self._success
+        # A route timeout is a task failure as well: without this terminal
+        # penalty, an agent can avoid the completion bonus by lingering until
+        # the horizon.  RSL-RL still receives the timeout flag separately for
+        # correct value bootstrapping.
+        failed = (self.reset_terminated | self.reset_time_outs) & ~self._success
         reward, terms = residual_reward(
             progress_delta=state.progress_delta,
             cross_track=state.cross_track,
@@ -210,9 +216,14 @@ class ResidualDiffusionEnv(Solo12Env):
         yaw_error = torch.atan2(torch.sin(state.tangent_yaw - self._robot_yaw()),
                                 torch.cos(state.tangent_yaw - self._robot_yaw()))
         base_height = self._robot.data.root_pos_w[:, 2] - self._terrain.env_origins[:, 2]
-        self._success = state.success & (state.cross_track.abs() <= self.cfg.route_goal_tolerance_m) & (
+        reached_terminal_pose = state.success & (state.cross_track.abs() <= self.cfg.route_goal_tolerance_m) & (
             yaw_error.abs() <= 0.35
         ) & ((base_height - state.target_height).abs() <= self.cfg.terminal_height_tolerance_m)
+        # A contact or corridor failure on the terminal step is a failure, not
+        # a successful completion.
+        self._success = reached_terminal_pose & ~contact_terminated & ~corridor_failure
+        self._base_contact_termination.copy_(contact_terminated)
+        self._corridor_termination.copy_(corridor_failure)
         return contact_terminated | corridor_failure | self._success, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
@@ -221,8 +232,22 @@ class ResidualDiffusionEnv(Solo12Env):
             return
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device)
+        # Solo12Env labels every non-timeout reset as ``base_contact``.  B1
+        # introduces route success and corridor exits, so overwrite that
+        # inherited aggregate with the mutually interpretable event counts.
+        episode_log = self.extras.setdefault("log", {})
+        episode_log["Episode_Termination/base_contact"] = torch.count_nonzero(
+            self._base_contact_termination[env_ids]
+        ).item()
+        episode_log["Episode_Termination/corridor_failure"] = torch.count_nonzero(
+            self._corridor_termination[env_ids]
+        ).item()
+        episode_log["Episode_Termination/route_success"] = torch.count_nonzero(self._success[env_ids]).item()
         self._routes.reset(env_ids, self._curriculum_stage())
         self._prior.reset(env_ids)
         self._residual[env_ids] = 0.0
         self._previous_residual[env_ids] = 0.0
+        self._success[env_ids] = False
+        self._base_contact_termination[env_ids] = False
+        self._corridor_termination[env_ids] = False
         self._base_action_ready = False

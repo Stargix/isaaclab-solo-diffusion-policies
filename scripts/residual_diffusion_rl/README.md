@@ -25,6 +25,8 @@ The task reward is progress-first: path, speed, yaw and height are smooth
 *error costs* (zero under perfect tracking), not a positive reward accumulated
 per second. A small time cost prevents loitering. Terminal success requires
 route completion, cross-track/yaw tolerances and the requested final height.
+Termination logs distinguish `route_success`, true `base_contact`, corridor
+failure and timeout; the inherited Solo12 `base_contact` aggregate is not used.
 
 `residual_scale=0.20` means at most 20% of each joint's demonstrated action
 half-range; it is not a fixed radian offset shared by unequal joints.

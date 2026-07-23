@@ -108,6 +108,10 @@ speed MAE, height MAE/RMSE, terminal yaw error and residual RMS. Also rerun the
 Phase-A in-distribution suite: improvement on OOD routes is not success if the
 online layer regresses original walk/crouch performance.
 
+The termination report separates route success, physical base contact, corridor
+exit and timeout. The upstream Solo12 aggregate labels all non-timeout resets
+as base contact, which is not valid once route success is also terminal.
+
 ## What B1 does not claim
 
 B1 contains no perception, obstacle map, physical ceiling/clearance model,
