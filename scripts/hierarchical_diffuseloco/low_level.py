@@ -37,9 +37,12 @@ class FrozenDiffuseLoco:
         if inference_steps is not None:
             kwargs["num_inference_steps"] = int(inference_steps)
         self.policy = Solo12DiffusionPolicy(Solo12DiffusionPolicyConfig(**kwargs))
+        if self.policy.cfg.goal_dim != 4:
+            raise ValueError(f"Frozen velocity-height policy must have goal_dim=4, got {self.policy.cfg.goal_dim}.")
         self.policy.load_state_dict(checkpoint["ema_model_state_dict"])
         self.policy.set_normalizer_stats(checkpoint["normalizer_stats"])
         self.policy.to(self.device).eval()
+        self.policy.requires_grad_(False)
         self.exec_horizon = int(exec_horizon)
         future = self.policy.cfg.prediction_horizon - self.policy.cfg.execution_offset
         if not 1 <= self.exec_horizon <= future:

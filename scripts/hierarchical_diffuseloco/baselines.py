@@ -33,6 +33,5 @@ class DiscreteSkillSelector:
         self.bounds = bounds
 
     def __call__(self, observation: RouteObservation) -> np.ndarray:
-        maximum = float(observation.clearance)
-        feasible = [(maximum - float(cmd[3]), cmd) for cmd in self.skills.values() if cmd[3] <= maximum]
-        return min(feasible or [(float("inf"), cmd) for cmd in self.skills.values()], key=lambda item: item[0])[1].copy()
+        target = float(observation.target_height)
+        return min(self.skills.values(), key=lambda cmd: abs(float(cmd[3]) - target)).copy()

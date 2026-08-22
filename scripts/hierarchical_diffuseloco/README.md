@@ -1,66 +1,96 @@
-# Hierarchical DiffuseLoco experiment
+# High-level PPO over frozen DiffuseLoco
 
-This is an isolated research line on branch `hierarchical-diffuseloco`.  It tests whether a
-high-level policy can exploit the continuous command manifold of a frozen, command-plus-height
-DiffuseLoco policy for route, final-pose, clearance and deadline objectives.
-
-## What is learned
-
-The high-level action is the absolute target
+This branch contains only experiment **H1**:
 
 ```text
-[vx, vy, wz, desired_base_height]
+route preview + final pose + progress schedule + robot state
+                              |
+                         PPO (4-D)
+                              |
+                  [vx, vy, wz, target height]
+                              |
+                  frozen velocity-height DiffuseLoco
+                              |
+                       12 joint actions
 ```
 
-and is passed directly to the frozen diffusion policy.  Only a physical safety clip is applied.
-There is deliberately no command ramp, EMA, slew-rate limiter or interpolation.  Gradual
-descent into a crouch is therefore learned because the return contains first- and second-order
-command-change penalties.  `rewards.py` exposes every component for logging and ablations.
+The frozen checkpoint must be `diffuseloco_velocity_height_ddpm` with `goal_dim=4`.
+The intended prerequisite is:
 
-The policy emits a normalized four-vector in `[-1,1]`, which is mapped affinely to the frozen
-policy's observed command bounds.  Its 70-dimensional observation is eight robot-frame preview
-samples `(x,y,sin(yaw),cos(yaw),max_height,valid)`, final `(x,y,sin(yaw),cos(yaw))`, remaining
-time, base state and the two previous normalized commands.  The command history makes the
-smoothness objective Markov; it does not impose smoothing. `max_height` is a command-space
-clearance proxy (not physical collision geometry): the central section only permits the crouch
-range, avoiding the degenerate solution of crouching throughout.  Routes use continuous arc
-projection and are resampled when loaded from `.npy` files with columns
-`x,y[,yaw[,max_command_height]]`.
-For turns and multi-section studies, set `route_file`; keeping those files with the evaluation
-seed versions geometry and clearance labels together.
-
-## Task registration and training
-
-The task is registered automatically when `isaaclab_tasks` imports the new direct package.  Use a
-validated walk+crouch checkpoint (the current sprint policy is not a valid prerequisite):
-
-```powershell
-.\isaaclab.bat -p scripts/reinforcement_learning/rsl_rl/train.py `
-  --task solo12-hierarchical-diffuseloco-v0 --num_envs 1024 `
-  env_cfg.diffuseloco_checkpoint="scripts/baseline_diffuseloco/runs/walk_crouch_posture_conditioned/best.pt"
+```text
+checkpoints_iri/diffuseloco_robust_walk_crouch.pt
+sha256 2C41034B8ACF7E92AC28EF157F9F483F54C5EDA6B32976B8FBCCEA6E321676C0
 ```
 
-Hydra may require an absolute checkpoint path on Windows.  Before long runs, use
-`--max_iterations 2 --num_envs 8` to validate the simulator/checkpoint integration.
+The high-level action is absolute and is sent directly to the low-level policy. There is
+no EMA, ramp, slew limiter or hand-written interpolation. A small action-difference cost
+makes smooth commands preferable only when the learned return supports them.
 
-## Required ablations
+## Task distribution
 
-1. Classical path tracker (`baselines.py`).
-2. Discrete walk/crouch selector (`DiscreteSkillSelector`).
-3. Continuous PPO over the frozen policy.
-4. The same PPO with `smooth_first=smooth_second=0`.
-5. Direct joint-action PPO only as a capacity/control baseline.
+- Fixed horizon: 8 s.
+- Families: straight, S-curve and rounded 90-degree turn.
+- Desired mean speed: 0.30--0.42 m/s.
+- Route length is exactly `desired_mean_speed * 8 s`.
+- Interleaved high, intermediate and crouched target-height sections.
+- No inherited velocity/force curriculum, pushes, action delay or terrain randomization.
 
-Report route success, survival, final-pose error, deadline miss, command total variation,
-height-transition overshoot, and the fraction of clearance violations.
-Keep route seeds, checkpoint, inference steps, execution horizon and simulator randomization fixed
-across the table.  The task deliberately does not claim an OOD penalty from a rectangular command
-envelope: the walk/crouch data has only endpoint heights, so a capability map must be measured
-before adding such a term.
+The action envelope is deliberately forward-only in H1 (`vx in [0, 0.65]`) because all
+routes are forward. Consequently the initial zero-mean actor maps to a useful 0.325 m/s
+command rather than the trivial standing solution. Reverse navigation is out of scope for
+this first falsifiable experiment.
 
-## Offline tests
+## Reward
+
+`rewards.py` uses normalized Huber costs and potential-based scheduled-progress shaping:
+
+```text
+s*(t) = min(v_desired * t, route_length)
+Phi = -Huber((s - s*) / 0.30 m)
+r_schedule = 4 * (gamma * Phi_next - Phi_previous)
+```
+
+The remaining terms penalize cross-track error, heading error, physical base-height error,
+command variation, terminal pose error and falls. There is no alive reward, raw progress
+bonus, per-step time penalty, instantaneous-speed reward or early success termination.
+Final position over the fixed horizon is therefore the primary measurement of mean-speed
+tracking, while scheduled progress supplies its dense learning signal.
+
+## Train
+
+PowerShell, local smoke (one optimizer update):
 
 ```powershell
-conda run --no-capture-output -n env_isaaclab python -m compileall -q scripts/hierarchical_diffuseloco
+conda run --no-capture-output -n env_isaaclab cmd /c isaaclab.bat -p scripts/reinforcement_learning/rsl_rl/train.py --task solo12-hierarchical-diffuseloco-v0 --num_envs 2 --max_iterations 1 --headless env.diffuseloco_checkpoint=checkpoints_iri/diffuseloco_robust_walk_crouch.pt env.diffuseloco_inference_steps=2
+```
+
+Cluster training:
+
+```bash
+./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \
+  --task solo12-hierarchical-diffuseloco-v0 \
+  --num_envs 4096 \
+  --headless \
+  env.diffuseloco_checkpoint=checkpoints_iri/diffuseloco_robust_walk_crouch.pt
+```
+
+RSL-RL uses PPO with Adam, observation normalization, learning rate `1e-4`, initial action
+noise `0.35` and checkpoints every 50 iterations. Do not enable a reward curriculum for H1.
+
+Inference on a held-out route bank (single PowerShell line):
+
+```powershell
+conda run --no-capture-output -n env_isaaclab cmd /c isaaclab.bat -p scripts/reinforcement_learning/rsl_rl/play.py --task solo12-hierarchical-diffuseloco-v0 --checkpoint logs/rsl_rl/solo12_hierarchical_diffuseloco/RUN/model_N.pt --num_envs 1 env.diffuseloco_checkpoint=checkpoints_iri/diffuseloco_robust_walk_crouch.pt env.route_seed=10017
+```
+
+## Offline verification
+
+```powershell
+conda run --no-capture-output -n env_isaaclab python -m compileall -q scripts/hierarchical_diffuseloco source/isaaclab_tasks/isaaclab_tasks/direct/hierarchical_diffuseloco
 conda run --no-capture-output -n env_isaaclab python -m unittest scripts.hierarchical_diffuseloco.tests.test_core
+conda run --no-capture-output -n env_isaaclab cmd /c isaaclab.bat -p scripts/hierarchical_diffuseloco/registration_smoke.py --headless
+conda run --no-capture-output -n env_isaaclab cmd /c isaaclab.bat -p scripts/hierarchical_diffuseloco/smoke_env.py --checkpoint checkpoints_iri/diffuseloco_robust_walk_crouch.pt --headless
 ```
+
+The full research decision, evaluation gate and future DPPO line are documented in
+[`RESEARCH_DECISION.md`](RESEARCH_DECISION.md).

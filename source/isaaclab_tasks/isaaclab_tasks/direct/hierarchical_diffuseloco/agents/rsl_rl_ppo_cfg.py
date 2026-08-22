@@ -6,13 +6,15 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, R
 class HierarchicalPPOCfg(RslRlOnPolicyRunnerCfg):
     clip_actions = 1.0
     num_steps_per_env = 64
-    max_iterations = 20_000
-    save_interval = 500
+    max_iterations = 1_500
+    save_interval = 50
     experiment_name = "solo12_hierarchical_diffuseloco"
-    run_name = "continuous-command-route-pose-time"
+    run_name = "h1-frozen-command-diffusion"
+    logger = "wandb"
+    wandb_project = "solo12-hierarchical-diffuseloco"
     obs_groups = {"policy": ["policy"], "critic": ["policy"]}
     policy = RslRlPpoActorCriticCfg(
-        init_noise_std=0.5,
+        init_noise_std=0.35,
         noise_std_type="log",
         actor_obs_normalization=True,
         critic_obs_normalization=True,
@@ -24,10 +26,10 @@ class HierarchicalPPOCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=0.5,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.005,
+        entropy_coef=0.003,
         num_learning_epochs=4,
         num_mini_batches=4,
-        learning_rate=3.0e-4,
+        learning_rate=1.0e-4,
         schedule="adaptive",
         gamma=0.99,
         lam=0.95,

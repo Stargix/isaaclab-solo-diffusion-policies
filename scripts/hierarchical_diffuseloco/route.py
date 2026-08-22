@@ -1,4 +1,4 @@
-"""Deterministic route geometry and clearance profiles for reproducible experiments."""
+"""Deterministic route geometry and seeded training banks."""
 
 from __future__ import annotations
 
@@ -14,10 +14,10 @@ def wrap_angle(angle: np.ndarray | float) -> np.ndarray | float:
 
 @dataclass(frozen=True)
 class PolylineRoute:
-    """A route with an explicit maximum allowed command height along arc length.
+    """A route with a desired base-height profile along arc length.
 
-    ``max_command_height`` is a clearance proxy in the coordinate system used by
-    DiffuseLoco's height command. A lower value means a lower ceiling.
+    The field keeps its historical name so existing ``.npy`` route files remain
+    loadable; new code accesses it through :attr:`target_height`.
     """
 
     xy: np.ndarray
@@ -46,6 +46,11 @@ class PolylineRoute:
     @property
     def length(self) -> float:
         return float(self.arc_length[-1])
+
+    @property
+    def target_height(self) -> np.ndarray:
+        """Desired base-height profile (compatibility alias for old route files)."""
+        return self.max_command_height
 
     def project(self, position_xy: np.ndarray) -> tuple[float, float, int]:
         """Return continuous arc progress, signed cross-track error and segment index."""
@@ -97,7 +102,7 @@ class PolylineRoute:
 
     @classmethod
     def from_file(cls, path: str, *, spacing: float = 0.10, default_height: float = 0.2932) -> "PolylineRoute":
-        """Load ``x,y[,yaw[,max_command_height]]`` and resample it by arc length."""
+        """Load ``x,y[,yaw[,target_height]]`` and resample it by arc length."""
         values = np.asarray(np.load(path), dtype=np.float32)
         if values.ndim != 2 or values.shape[1] not in (2, 3, 4):
             raise ValueError("Route file must have shape [N,2], [N,3] or [N,4].")
@@ -113,14 +118,154 @@ class PolylineRoute:
         return cls(sampled_xy, sampled_yaw, sampled_height, spacing)
 
 
-def clearance_route(length: float = 5.0, spacing: float = 0.10, *, low_height: float = 0.1705,
-                    high_height: float = 0.2932) -> PolylineRoute:
-    """Straight benchmark route with a central low-ceiling section."""
+@dataclass(frozen=True)
+class RouteBank:
+    """Dense, equal-resolution routes that can be gathered by environment id."""
 
-    if length <= 1.0:
-        raise ValueError("length must exceed 1m for the clearance benchmark.")
-    x = np.arange(0.0, length + 0.5 * spacing, spacing, dtype=np.float32)
-    xy = np.stack((x, np.zeros_like(x)), axis=1)
-    h = np.full_like(x, high_height)
-    h[(x >= 0.40 * length) & (x <= 0.60 * length)] = low_height
-    return PolylineRoute(xy, np.zeros_like(x), h, spacing)
+    xy: np.ndarray
+    yaw: np.ndarray
+    target_height: np.ndarray
+    arc_length: np.ndarray
+    length: np.ndarray
+    desired_mean_speed: np.ndarray
+    family: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        arrays = tuple(np.asarray(value, dtype=np.float32) for value in (
+            self.xy, self.yaw, self.target_height, self.arc_length,
+            self.length, self.desired_mean_speed,
+        ))
+        xy, yaw, height, arc, length, speed = arrays
+        count, points = xy.shape[:2]
+        if xy.shape != (count, points, 2) or yaw.shape != (count, points):
+            raise ValueError("RouteBank xy/yaw dimensions are inconsistent.")
+        if height.shape != yaw.shape or arc.shape != yaw.shape:
+            raise ValueError("RouteBank height/arc dimensions are inconsistent.")
+        if length.shape != (count,) or speed.shape != (count,) or len(self.family) != count:
+            raise ValueError("RouteBank scalar metadata dimensions are inconsistent.")
+        if points < 2 or np.any(np.diff(arc, axis=1) <= 0.0):
+            raise ValueError("Every route must contain strictly increasing arc samples.")
+        if not all(np.all(np.isfinite(value)) for value in arrays):
+            raise ValueError("RouteBank contains non-finite values.")
+        for name, value in zip(
+            ("xy", "yaw", "target_height", "arc_length", "length", "desired_mean_speed"), arrays
+        ):
+            object.__setattr__(self, name, value)
+
+    @property
+    def size(self) -> int:
+        return int(self.xy.shape[0])
+
+
+def _resample_xy_by_arc(raw_xy: np.ndarray, length: float, points: int) -> tuple[np.ndarray, np.ndarray]:
+    raw_arc = np.concatenate((
+        np.zeros(1, dtype=np.float32),
+        np.cumsum(np.linalg.norm(np.diff(raw_xy, axis=0), axis=1), dtype=np.float32),
+    ))
+    if raw_arc[-1] <= 1e-6:
+        raise ValueError("Degenerate procedural route.")
+    scale = length / float(raw_arc[-1])
+    raw_xy = raw_xy * scale
+    raw_arc = raw_arc * scale
+    arc = np.linspace(0.0, length, points, dtype=np.float32)
+    xy = np.stack([np.interp(arc, raw_arc, raw_xy[:, axis]) for axis in range(2)], axis=-1).astype(np.float32)
+    delta = np.gradient(xy, axis=0)
+    yaw = np.arctan2(delta[:, 1], delta[:, 0]).astype(np.float32)
+    return xy, yaw
+
+
+def _procedural_xy(family: str, length: float, points: int, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+    if family == "straight":
+        arc = np.linspace(0.0, length, points, dtype=np.float32)
+        return np.stack((arc, np.zeros_like(arc)), axis=-1), np.zeros_like(arc)
+    if family == "s_curve":
+        u = np.linspace(0.0, 1.0, 513, dtype=np.float32)
+        amplitude = float(rng.uniform(0.20, 0.38))
+        raw = np.stack((u, amplitude * np.sin(2.0 * np.pi * u) * np.sin(np.pi * u)), axis=-1)
+        return _resample_xy_by_arc(raw, length, points)
+    if family == "right_angle":
+        turn_sign = float(rng.choice((-1.0, 1.0)))
+        radius = float(rng.uniform(0.28, 0.40))
+        turn_length = 0.5 * np.pi * radius
+        straight_length = 0.5 * (length - turn_length)
+        if straight_length <= 0.20:
+            raise ValueError("Route is too short for the requested right-angle radius.")
+        arc = np.linspace(0.0, length, points, dtype=np.float32)
+        xy = np.empty((points, 2), dtype=np.float32)
+        yaw = np.empty(points, dtype=np.float32)
+        before = arc <= straight_length
+        during = (arc > straight_length) & (arc < straight_length + turn_length)
+        after = ~(before | during)
+        xy[before, 0], xy[before, 1], yaw[before] = arc[before], 0.0, 0.0
+        angle = (arc[during] - straight_length) / radius
+        xy[during, 0] = straight_length + radius * np.sin(angle)
+        xy[during, 1] = turn_sign * radius * (1.0 - np.cos(angle))
+        yaw[during] = turn_sign * angle
+        tail = arc[after] - straight_length - turn_length
+        xy[after, 0] = straight_length + radius
+        xy[after, 1] = turn_sign * (radius + tail)
+        yaw[after] = turn_sign * 0.5 * np.pi
+        return xy, yaw
+    raise ValueError(f"Unknown route family: {family!r}.")
+
+
+def _height_profile(u: np.ndarray, mode: int, rng: np.random.Generator,
+                    low: float, high: float) -> np.ndarray:
+    """Interleave posture targets without filtering the policy command."""
+    height = np.full_like(u, high, dtype=np.float32)
+    if mode == 0:
+        start = float(rng.uniform(0.28, 0.40))
+        end = float(rng.uniform(0.60, 0.72))
+        height[(u >= start) & (u <= end)] = low
+    elif mode == 1:
+        mid = 0.5 * (low + high)
+        height[(u >= 0.20) & (u < 0.36)] = mid
+        height[(u >= 0.36) & (u < 0.62)] = low
+        height[(u >= 0.62) & (u < 0.78)] = mid
+    else:
+        height[(u >= 0.18) & (u < 0.34)] = low
+        height[(u >= 0.52) & (u < 0.70)] = low
+    return height
+
+
+def build_route_bank(*, count: int = 192, points: int = 65, episode_duration_s: float = 8.0,
+                     speed_range: tuple[float, float] = (0.30, 0.42), seed: int = 17,
+                     families: tuple[str, ...] = ("straight", "s_curve", "right_angle"),
+                     low_height: float = 0.1705, high_height: float = 0.2932) -> RouteBank:
+    """Build the single, seeded training distribution for the first experiment."""
+    if count < len(families) or points < 8 or episode_duration_s <= 0.0:
+        raise ValueError("Route-bank size, resolution and duration must be positive and non-trivial.")
+    if not 0.0 < speed_range[0] <= speed_range[1]:
+        raise ValueError("speed_range must be positive and ordered.")
+    rng = np.random.default_rng(seed)
+    xy_all, yaw_all, height_all, arc_all = [], [], [], []
+    lengths, speeds, names = [], [], []
+    for index in range(count):
+        family = families[index % len(families)]
+        requested_speed = float(rng.uniform(*speed_range))
+        requested_length = requested_speed * episode_duration_s
+        xy, yaw = _procedural_xy(family, requested_length, points, rng)
+        arc = np.concatenate((
+            np.zeros(1, dtype=np.float32),
+            np.cumsum(np.linalg.norm(np.diff(xy, axis=0), axis=1), dtype=np.float32),
+        )).astype(np.float32)
+        height = _height_profile(arc / arc[-1], index % 3, rng, low_height, high_height)
+        xy_all.append(xy)
+        yaw_all.append(yaw)
+        height_all.append(height)
+        arc_all.append(arc)
+        lengths.append(float(arc[-1]))
+        speeds.append(float(arc[-1]) / episode_duration_s)
+        names.append(family)
+    return RouteBank(
+        np.stack(xy_all), np.stack(yaw_all), np.stack(height_all), np.stack(arc_all),
+        np.asarray(lengths), np.asarray(speeds), tuple(names),
+    )
+
+
+def route_bank_from_polyline(route: PolylineRoute, *, episode_duration_s: float) -> RouteBank:
+    """Adapt an explicit evaluation route to the same batched contract."""
+    return RouteBank(
+        route.xy[None], route.yaw[None], route.target_height[None], route.arc_length[None],
+        np.asarray([route.length]), np.asarray([route.length / episode_duration_s]), ("file",),
+    )

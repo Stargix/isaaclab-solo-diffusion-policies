@@ -1,59 +1,71 @@
-"""Research reward: smoothness is learned, not imposed by command interpolation."""
+"""Auditable reward for route, posture and mean-speed tracking.
+
+All dense error terms are bounded/normalized and integrated in seconds.  Scheduled
+progress is potential-shaped, so catching up is rewarded and falling early cannot
+avoid a long stream of arbitrary time penalties.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import torch
 
-from isaaclab.utils import configclass
+try:
+    from isaaclab.utils import configclass
+except ImportError:  # Allows reward tests without launching Isaac Sim's Python runtime.
+    from dataclasses import dataclass
+
+    configclass = dataclass
 
 
 @configclass
 class RewardWeights:
-    progress: float = 2.0
-    cross_track: float = 3.0
-    final_pose: float = 4.0
-    deadline_miss: float = 6.0
-    height_clearance: float = 2.0
-    smooth_first: float = 0.08
-    smooth_second: float = 0.04
-    low_level_risk: float = 0.0
-    fall: float = 10.0
+    schedule_potential: float = 4.0
+    cross_track: float = 0.60
+    heading: float = 0.25
+    height: float = 0.45
+    command_delta: float = 0.015
+    terminal_pose: float = 4.0
+    fall: float = 12.0
 
 
-def hierarchical_reward(*, progress: torch.Tensor, cross_track: torch.Tensor, final_pose_error: torch.Tensor,
-                        terminal_window: torch.Tensor, timed_out: torch.Tensor, goal_reached: torch.Tensor,
-                        command_height: torch.Tensor, max_command_height: torch.Tensor,
-                        command: torch.Tensor, previous_command: torch.Tensor,
-                        previous_previous_command: torch.Tensor, low_level_risk: torch.Tensor,
-                        fallen: torch.Tensor, corridor_half_width: float, per_second_dt: float,
+def smooth_l1(error: torch.Tensor) -> torch.Tensor:
+    """Elementwise Huber loss with unit transition and no hidden reduction."""
+    absolute = torch.abs(error)
+    return torch.where(absolute < 1.0, 0.5 * error.square(), absolute - 0.5)
+
+
+def schedule_potential(progress_error_normalized: torch.Tensor) -> torch.Tensor:
+    """Potential whose maximum is zero at the desired temporal progress."""
+    return -smooth_l1(progress_error_normalized)
+
+
+def hierarchical_reward(*, previous_schedule_potential: torch.Tensor,
+                        current_schedule_potential: torch.Tensor,
+                        cross_track_normalized: torch.Tensor,
+                        heading_error_normalized: torch.Tensor,
+                        height_error_normalized: torch.Tensor,
+                        normalized_command_delta: torch.Tensor,
+                        terminal_pose_error_normalized: torch.Tensor,
+                        terminal: torch.Tensor, fallen: torch.Tensor,
+                        discount: float, macro_dt: float,
                         weights: RewardWeights = RewardWeights()) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """Compute scalar reward and auditable components.
-
-    There is no ramp or action post-processing: the policy must discover gradual changes
-    when they improve return. Hard command limits remain a separate safety envelope.
-    """
-    def sq(x: torch.Tensor) -> torch.Tensor:
-        return torch.sum(torch.square(x), dim=-1)
-
-    # A lower clearance value means a lower ceiling.  Penalize only violations;
-    # the policy is otherwise free to stay high or crouch for its own reasons.
-    clearance = torch.relu(command_height - max_command_height)
-    outside_corridor = torch.relu(torch.abs(cross_track) - corridor_half_width)
-    first = sq(command - previous_command)
-    second = sq(command - 2.0 * previous_command + previous_previous_command)
-    final_error = sq(final_pose_error)
+    """Return reward and components without any action filter or command ramp."""
+    if not 0.0 < discount <= 1.0:
+        raise ValueError("discount must be in (0, 1].")
+    if macro_dt <= 0.0:
+        raise ValueError("macro_dt must be positive.")
+    command_delta_cost = normalized_command_delta.square().mean(dim=-1)
+    terminal_cost = smooth_l1(terminal_pose_error_normalized).sum(dim=-1)
     components = {
-        "progress": weights.progress * progress,
-        "cross_track": -weights.cross_track * torch.square(outside_corridor) * per_second_dt,
-        # The task is evaluated near the deadline, not by greedily minimizing
-        # final distance throughout the route.
-        "final_pose": weights.final_pose * terminal_window.float() * torch.exp(-final_error),
-        "deadline_miss": -weights.deadline_miss * timed_out.float() * (~goal_reached).float(),
-        "height_clearance": -weights.height_clearance * torch.square(clearance) * per_second_dt,
-        "smooth_first": -weights.smooth_first * first,
-        "smooth_second": -weights.smooth_second * second,
-        "low_level_risk": -weights.low_level_risk * low_level_risk * per_second_dt,
+        "schedule_potential": weights.schedule_potential * (
+            discount * current_schedule_potential - previous_schedule_potential
+        ),
+        "cross_track": -weights.cross_track * smooth_l1(cross_track_normalized) * macro_dt,
+        "heading": -weights.heading * smooth_l1(heading_error_normalized) * macro_dt,
+        "height": -weights.height * smooth_l1(height_error_normalized) * macro_dt,
+        # This is a learned preference: the action is still sent directly to DiffuseLoco.
+        "command_delta": -weights.command_delta * command_delta_cost,
+        "terminal_pose": -weights.terminal_pose * terminal.float() * terminal_cost,
         "fall": -weights.fall * fallen.float(),
     }
     return torch.stack(tuple(components.values()), dim=0).sum(dim=0), components
