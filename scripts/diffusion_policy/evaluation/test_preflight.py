@@ -10,6 +10,7 @@ from .summarize_preflight import _height_causality, decide
 def _candidate(exec_horizon: int, *, survival: float, causal: float, speed_error: float) -> dict:
     return {
         "checkpoint_sha256": "ABC",
+        "git_commit": "deadbeef",
         "exec_horizon": exec_horizon,
         "survival_rate": survival,
         "mean_absolute_horizon_speed_ratio_error": speed_error,

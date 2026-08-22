@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Any
 
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+
+
 REQUIRED_COLUMNS = {
     "path_shape",
     "repeat",
@@ -52,6 +55,59 @@ def _load_run(path: Path) -> tuple[dict[str, Any], list[dict[str, str]]]:
     return summary, rows
 
 
+def _expected_checkpoint_hash(protocol: dict[str, Any]) -> str:
+    manifest_path = (REPOSITORY_ROOT / protocol["checkpoint_manifest"]).resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    checkpoints = [
+        artifact for artifact in manifest["artifacts"] if artifact["role"] == "policy_checkpoint"
+    ]
+    if len(checkpoints) != 1:
+        raise ValueError("Checkpoint manifest must declare exactly one policy_checkpoint.")
+    return str(checkpoints[0]["sha256"]).upper()
+
+
+def _validate_protocol_run(
+    metadata: dict[str, Any],
+    rows: list[dict[str, str]],
+    expected: dict[str, Any],
+    checkpoint_hash: str,
+) -> None:
+    expected_count = (
+        len(expected["path_shapes"])
+        * len(expected["speeds"])
+        * len(expected["path_heights"])
+        * int(expected["repeats"])
+    )
+    comparisons = {
+        "checkpoint_sha256": (str(metadata.get("checkpoint_sha256", "")).upper(), checkpoint_hash),
+        "exec_horizon": (int(metadata.get("exec_horizon", -1)), int(expected["exec_horizon"])),
+        "num_inference_steps": (
+            int(metadata.get("num_inference_steps", -1)), int(expected["num_inference_steps"])
+        ),
+        "seed": (int(metadata.get("seed", -1)), int(expected["seed"])),
+        "duration_s": (float(metadata.get("duration_s", math.nan)), float(expected["duration_s"])),
+        "scenario_count": (len(rows), expected_count),
+        "path_shapes": (
+            sorted({row["path_shape"] for row in rows}), sorted(expected["path_shapes"])
+        ),
+        "speeds": (
+            sorted(float(value) for value in metadata.get("speeds_evaluated", [])),
+            sorted(float(value) for value in expected["speeds"]),
+        ),
+        "heights": (
+            sorted(float(value) for value in metadata.get("heights_evaluated", [])),
+            sorted(float(value) for value in expected["path_heights"]),
+        ),
+    }
+    mismatches = {
+        name: {"actual": actual, "expected": expected_value}
+        for name, (actual, expected_value) in comparisons.items()
+        if actual != expected_value
+    }
+    if mismatches:
+        raise ValueError(f"Evaluation does not match the versioned protocol: {mismatches}")
+
+
 def _as_float(row: dict[str, str], key: str) -> float:
     try:
         return float(row[key])
@@ -85,8 +141,9 @@ def _height_causality(rows: list[dict[str, str]]) -> dict[str, float | int]:
     }
 
 
-def summarize(path: Path) -> dict[str, Any]:
+def summarize(path: Path, *, expected: dict[str, Any], checkpoint_hash: str) -> dict[str, Any]:
     metadata, rows = _load_run(path)
+    _validate_protocol_run(metadata, rows, expected, checkpoint_hash)
     survived = [row["survived"].lower() == "true" for row in rows]
     completion = [_as_float(row, "route_completion_ratio") for row in rows]
     speed_error = [abs(_as_float(row, "route_horizon_speed_ratio") - 1.0) for row in rows]
@@ -117,6 +174,10 @@ def summarize(path: Path) -> dict[str, Any]:
 def decide(first: dict[str, Any], second: dict[str, Any]) -> dict[str, Any]:
     if first["checkpoint_sha256"] != second["checkpoint_sha256"]:
         raise ValueError("The two runs use different checkpoints.")
+    if first["git_commit"] != second["git_commit"]:
+        raise ValueError("The two runs use different code commits.")
+    if {first["exec_horizon"], second["exec_horizon"]} != {1, 4}:
+        raise ValueError("Preflight comparison requires exactly exec_horizon 1 and 4.")
     candidates = [first, second]
     viable = [
         row for row in candidates
@@ -147,11 +208,18 @@ def decide(first: dict[str, Any], second: dict[str, Any]) -> dict[str, Any]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--protocol", type=Path, required=True)
     parser.add_argument("--exec1", type=Path, required=True)
     parser.add_argument("--exec4", type=Path, required=True)
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
-    runs = [summarize(args.exec1), summarize(args.exec4)]
+    protocol = json.loads(args.protocol.read_text(encoding="utf-8"))
+    expected_by_id = {run["id"]: run for run in protocol["runs"]}
+    checkpoint_hash = _expected_checkpoint_hash(protocol)
+    runs = [
+        summarize(args.exec1, expected=expected_by_id["preflight_exec1"], checkpoint_hash=checkpoint_hash),
+        summarize(args.exec4, expected=expected_by_id["preflight_exec4"], checkpoint_hash=checkpoint_hash),
+    ]
     report = {"runs": runs, "decision": decide(runs[0], runs[1])}
     rendered = json.dumps(report, indent=2)
     print(rendered)

@@ -35,6 +35,7 @@ because some Isaac/Hydra launcher failures can otherwise return exit code zero.
 
 ```bash
 python scripts/diffusion_policy/evaluation/summarize_preflight.py \
+  --protocol scripts/diffusion_policy/experiments/phase_a_a0/causal_preflight_v1.json \
   --exec1 scripts/diffusion_policy/evaluations/phase_a_causal_audit_v1/preflight_exec1 \
   --exec4 scripts/diffusion_policy/evaluations/phase_a_causal_audit_v1/preflight_exec4 \
   --output scripts/diffusion_policy/evaluations/phase_a_causal_audit_v1/preflight_decision.json
