@@ -120,6 +120,26 @@ def _condition_breakdown(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
     return output
 
 
+def _height_breakdown(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
+    groups: dict[float, list[dict[str, str]]] = defaultdict(list)
+    for row in rows:
+        groups[_as_float(row, "requested_height")].append(row)
+    return [
+        {
+            "requested_height_m": height,
+            "scenarios": len(group),
+            "survival_rate": _survival_rate(group),
+            "mean_achieved_height_m": _mean([
+                _as_float(row, "achieved_height_mean") for row in group
+            ]),
+            "mean_height_absolute_error_m": _mean([
+                _as_float(row, "height_abs_error_mean") for row in group
+            ]),
+        }
+        for height, group in sorted(groups.items())
+    ]
+
+
 def summarize_run(
     path: Path, *, expected: dict[str, Any], checkpoint_hash: str
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
@@ -146,14 +166,20 @@ def summarize_run(
             _as_float(row, "height_abs_error_mean") for row in rows
         ]),
         "height_causality": _height_causality(rows),
+        "by_height": _height_breakdown(rows),
         "by_route_and_speed": _condition_breakdown(rows),
     }
     return summary, rows
 
 
-def decide(core: dict[str, Any], random_height: dict[str, Any], gates: dict[str, float]) -> dict[str, Any]:
+def decide_core(core: dict[str, Any], gates: dict[str, float]) -> dict[str, Any]:
+    """Apply every gate that can be decided before the transition challenge."""
+
     worst_group_survival = min(
         group["survival_rate"] for group in core["by_route_and_speed"]
+    )
+    worst_height_error = max(
+        group["mean_height_absolute_error_m"] for group in core["by_height"]
     )
     checks = {
         "overall_survival": core["survival_rate"] >= gates["minimum_overall_survival_rate"],
@@ -166,6 +192,9 @@ def decide(core: dict[str, Any], random_height: dict[str, Any], gates: dict[str,
         "constant_height_tracking": (
             core["mean_height_absolute_error_m"] <= gates["maximum_mean_height_absolute_error_m"]
         ),
+        "worst_constant_height_tracking": (
+            worst_height_error <= gates["maximum_height_condition_absolute_error_m"]
+        ),
         "height_causality": (
             core["height_causality"]["correct_direction_fraction"]
             >= gates["minimum_height_causal_direction_fraction"]
@@ -175,6 +204,41 @@ def decide(core: dict[str, Any], random_height: dict[str, Any], gates: dict[str,
             <= gates["maximum_mean_absolute_speed_ratio_error"]
         ),
         "finite_route_success": core["route_success_rate"] >= gates["minimum_route_success_rate"],
+    }
+    foundation = all(checks[key] for key in (
+        "overall_survival",
+        "worst_route_speed_survival",
+        "path_tracking",
+        "constant_height_tracking",
+        "worst_constant_height_tracking",
+        "height_causality",
+    ))
+    if not foundation:
+        return {
+            "status": "base_envelope_not_ready",
+            "checks": checks,
+            "worst_route_speed_survival_rate": worst_group_survival,
+            "worst_height_condition_absolute_error_m": worst_height_error,
+            "next_run_required": False,
+            "recommendation": (
+                "Repair or restrict the frozen base envelope before online optimization; "
+                "the random-height challenge cannot change this decision."
+            ),
+        }
+    return {
+        "status": "core_passed_random_height_required",
+        "checks": checks,
+        "worst_route_speed_survival_rate": worst_group_survival,
+        "worst_height_condition_absolute_error_m": worst_height_error,
+        "next_run_required": True,
+        "recommendation": "Run the random-height challenge before selecting an online intervention.",
+    }
+
+
+def decide(core: dict[str, Any], random_height: dict[str, Any], gates: dict[str, float]) -> dict[str, Any]:
+    core_decision = decide_core(core, gates)
+    checks = dict(core_decision["checks"])
+    checks.update({
         "random_height_survival": (
             random_height["survival_rate"] >= gates["minimum_random_height_survival_rate"]
         ),
@@ -182,16 +246,10 @@ def decide(core: dict[str, Any], random_height: dict[str, Any], gates: dict[str,
             random_height["mean_height_absolute_error_m"]
             <= gates["maximum_random_height_absolute_error_m"]
         ),
-    }
-    foundation = all(checks[key] for key in (
-        "overall_survival",
-        "worst_route_speed_survival",
-        "path_tracking",
-        "constant_height_tracking",
-        "height_causality",
-        "random_height_survival",
-        "random_height_tracking",
-    ))
+    })
+    foundation = core_decision["status"] != "base_envelope_not_ready" and all(
+        checks[key] for key in ("random_height_survival", "random_height_tracking")
+    )
     timing = checks["mean_speed_tracking"] and checks["finite_route_success"]
     if foundation and timing:
         status = "base_task_sufficient"
@@ -209,7 +267,11 @@ def decide(core: dict[str, Any], random_height: dict[str, Any], gates: dict[str,
     return {
         "status": status,
         "checks": checks,
-        "worst_route_speed_survival_rate": worst_group_survival,
+        "worst_route_speed_survival_rate": core_decision["worst_route_speed_survival_rate"],
+        "worst_height_condition_absolute_error_m": core_decision[
+            "worst_height_condition_absolute_error_m"
+        ],
+        "next_run_required": False,
         "recommendation": recommendation,
     }
 
@@ -228,18 +290,21 @@ def main() -> None:
         expected=expected["core_envelope"],
         checkpoint_hash=checkpoint_hash,
     )
-    random_height, _ = summarize_run(
-        args.results_root / "random_height_challenge",
-        expected=expected["random_height_challenge"],
-        checkpoint_hash=checkpoint_hash,
-    )
-    if core["git_commit"] != random_height["git_commit"]:
-        raise ValueError("Capability runs were produced from different code commits.")
-    report = {
-        "protocol_id": protocol["protocol_id"],
-        "runs": [core, random_height],
-        "decision": decide(core, random_height, protocol["task_gates"]),
-    }
+    core_decision = decide_core(core, protocol["task_gates"])
+    random_path = args.results_root / "random_height_challenge"
+    runs = [core]
+    decision = core_decision
+    if core_decision["next_run_required"]:
+        random_height, _ = summarize_run(
+            random_path,
+            expected=expected["random_height_challenge"],
+            checkpoint_hash=checkpoint_hash,
+        )
+        if core["git_commit"] != random_height["git_commit"]:
+            raise ValueError("Capability runs were produced from different code commits.")
+        runs.append(random_height)
+        decision = decide(core, random_height, protocol["task_gates"])
+    report = {"protocol_id": protocol["protocol_id"], "runs": runs, "decision": decision}
     rendered = json.dumps(report, indent=2)
     print(rendered)
     if args.output:

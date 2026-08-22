@@ -8,6 +8,11 @@ requested mean speeds, three constant heights and three stochastic diffusion
 samples. `random_height_challenge` adds 18 scenarios on the three demanding
 path families, with reproducible random height requirements every metre.
 
+Run and summarize `core_envelope` first. If its decision is
+`base_envelope_not_ready`, stop: the transition challenge cannot make an unsafe
+constant-height envelope suitable for online optimization. The summarizer only
+requires `random_height_challenge` after the core foundation passes.
+
 Speeds above 0.6 m/s are deliberately excluded: the preflight already shows a
 66.7% survival rate at 0.6 m/s, so adding faster commands cannot establish the
 minimum safe domain needed before online learning. Longer runs and additional
@@ -41,3 +46,7 @@ The classifier has three outcomes:
   before considering joint residuals.
 - `base_envelope_not_ready`: safety, geometry or pose transitions fail; repair
   or restrict the base distribution before online optimization.
+
+Both aggregate and worst-condition gates are used. In particular, causal
+separation between endpoint heights does not count as successful interpolation
+when an intermediate requested height has excessive absolute error.

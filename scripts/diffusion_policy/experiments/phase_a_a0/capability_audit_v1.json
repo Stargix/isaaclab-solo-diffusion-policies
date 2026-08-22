@@ -4,6 +4,10 @@
   "checkpoint_manifest": "scripts/diffusion_policy/experiments/phase_a_a0/manifest.json",
   "preflight_decision": "scripts/diffusion_policy/evaluations/phase_a_causal_audit_v1/preflight_decision.json",
   "purpose": "Map the frozen base policy's valid route, speed and height envelope before choosing any online learner.",
+  "execution_policy": {
+    "order": ["core_envelope", "random_height_challenge"],
+    "stop_after_core_status": "base_envelope_not_ready"
+  },
   "runs": [
     {
       "id": "core_envelope",
@@ -43,6 +47,7 @@
     "maximum_mean_absolute_speed_ratio_error": 0.2,
     "maximum_mean_cross_track_rmse_m": 0.15,
     "maximum_mean_height_absolute_error_m": 0.03,
+    "maximum_height_condition_absolute_error_m": 0.03,
     "minimum_height_causal_direction_fraction": 0.9,
     "minimum_route_success_rate": 0.8,
     "minimum_random_height_survival_rate": 0.9,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from .summarize_capability_audit import _expected_scenarios, decide
+from .summarize_capability_audit import _expected_scenarios, decide, decide_core
 
 
 GATES = {
@@ -13,6 +13,7 @@ GATES = {
     "maximum_mean_absolute_speed_ratio_error": 0.2,
     "maximum_mean_cross_track_rmse_m": 0.15,
     "maximum_mean_height_absolute_error_m": 0.03,
+    "maximum_height_condition_absolute_error_m": 0.03,
     "minimum_height_causal_direction_fraction": 0.9,
     "minimum_route_success_rate": 0.8,
     "minimum_random_height_survival_rate": 0.9,
@@ -28,6 +29,7 @@ def _run(*, survival: float = 0.95, speed_error: float = 0.1, success: float = 0
         "mean_cross_track_rmse_m": 0.05,
         "mean_height_absolute_error_m": 0.01,
         "height_causality": {"correct_direction_fraction": 1.0},
+        "by_height": [{"mean_height_absolute_error_m": 0.01}],
         "by_route_and_speed": [{"survival_rate": survival}],
     }
 
@@ -52,6 +54,16 @@ class CapabilityAuditTest(unittest.TestCase):
     def test_safety_failure_rejects_online_optimization(self) -> None:
         result = decide(_run(survival=0.7), _run(), GATES)
         self.assertEqual(result["status"], "base_envelope_not_ready")
+
+    def test_core_failure_stops_before_transition_challenge(self) -> None:
+        result = decide_core(_run(survival=0.7), GATES)
+        self.assertEqual(result["status"], "base_envelope_not_ready")
+        self.assertFalse(result["next_run_required"])
+
+    def test_core_pass_requires_transition_challenge(self) -> None:
+        result = decide_core(_run(), GATES)
+        self.assertEqual(result["status"], "core_passed_random_height_required")
+        self.assertTrue(result["next_run_required"])
 
 
 if __name__ == "__main__":
