@@ -97,6 +97,45 @@ failures that require foot-level corrections. DPPO is a later alternative when
 the action manifold itself must change broadly; it is more expensive and risks
 forgetting the useful geometric prior.
 
+## Command-controllability result
+
+The diagnostic was executed from clean commit
+`2d29cf2cdc146c74b5a4ec686cead04b8b752881` with 24 straight-path scenarios
+(four low proxy speeds, two endpoint heights and three diffusion samples). A
+final nine-scenario walk-only floor probe closed the only unresolved boundary.
+All 33 scenarios survived the eight-second horizon.
+
+| Height mode | Proxy command [m/s] | Achieved tangent speed [m/s] |
+|---|---:|---:|
+| crouch | 0.05 | 0.133 +/- 0.044 |
+| crouch | 0.10 | 0.315 +/- 0.027 |
+| crouch | 0.15 | 0.318 +/- 0.014 |
+| crouch | 0.20 | 0.398 +/- 0.029 |
+| walk | 0.01 | 0.276 +/- 0.055 |
+| walk | 0.025 | 0.232 +/- 0.005 |
+| walk | 0.05 | 0.333 +/- 0.008 |
+| walk | 0.10 | 0.481 +/- 0.016 |
+| walk | 0.15 | 0.506 +/- 0.011 |
+| walk | 0.20 | 0.610 +/- 0.009 |
+
+The frozen policy therefore has useful command authority, but its interface is
+strongly height-dependent, high-gain and locally non-monotonic near zero. The
+0.2 m/s task speed is empirically attainable for both endpoint skills without
+changing diffusion weights: crouch crosses it between proxy commands 0.05 and
+0.10, while walk reaches 0.232 m/s at proxy command 0.025.
+
+This changes the next decision from base fine-tuning to a command-space online
+adapter candidate. The adapter must learn the internal proxy command required
+for the external desired speed and reduce it before curvature. It must not be a
+joint residual. A height-conditioned lookup/interpolation baseline is required
+to show whether RL adds curvature, feedback and transition robustness rather
+than merely learning a static inverse calibration.
+
+No further open-loop capability grid is justified before implementing that
+adapter. The next evaluation should compare the frozen direct command, the
+static calibration baseline and the learned high-level under identical held-out
+routes.
+
 ## Research interpretation
 
 This result does not reduce the project to a Solo reproduction of DiffuseLoco.
