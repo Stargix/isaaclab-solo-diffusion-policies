@@ -638,10 +638,23 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     policy_cfg = _model_cfg_from_checkpoint(config)
     policy_cfg.num_inference_steps = inference_steps
 
-    policy = Solo12DiffusionPolicy(policy_cfg)
-    policy.load_state_dict(checkpoint["ema_model_state_dict"])
-    policy.set_normalizer_stats(checkpoint["normalizer_stats"])
-    policy.to(device).eval()
+    if checkpoint.get("algorithm") == "dppo":
+        if str(_PROJECT_ROOT) not in sys.path:
+            sys.path.insert(0, str(_PROJECT_ROOT))
+        from scripts.dppo_diffusion_rl.checkpointing import build_inference_policy
+
+        policy = build_inference_policy(
+            checkpoint, device, inference_steps=inference_steps
+        )
+        print(
+            f"[INFO] DPPO hybrid sampler: frozen early steps + "
+            f"{checkpoint['dppo_config']['finetune_denoising_steps']} fine-tuned steps"
+        )
+    else:
+        policy = Solo12DiffusionPolicy(policy_cfg)
+        policy.load_state_dict(checkpoint["ema_model_state_dict"])
+        policy.set_normalizer_stats(checkpoint["normalizer_stats"])
+        policy.to(device).eval()
 
     env_cfg.scene.num_envs = num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device

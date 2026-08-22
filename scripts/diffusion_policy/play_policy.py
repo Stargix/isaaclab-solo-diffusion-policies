@@ -461,11 +461,28 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     waypoint_time_offsets_s = tuple(config_dict["dataset"]["waypoint_time_offsets_s"])
     goal_representation = config_dict["dataset"].get("goal_representation", "path11")
 
-    policy = Solo12DiffusionPolicy(policy_cfg)
-    policy.load_state_dict(checkpoint["ema_model_state_dict"])
-    policy.set_normalizer_stats(normalizer_stats)
-    policy.to(device)
-    policy.eval()
+    if checkpoint.get("algorithm") == "dppo":
+        repository_root = Path(__file__).resolve().parents[2]
+        if str(repository_root) not in sys.path:
+            sys.path.insert(0, str(repository_root))
+        from scripts.dppo_diffusion_rl.checkpointing import build_inference_policy
+
+        policy = build_inference_policy(checkpoint, device, inference_steps=infer_steps)
+        if args_cli.torchscript_denoiser or args_cli.compile_policy:
+            raise ValueError(
+                "TorchScript/torch.compile are not enabled for the hybrid DPPO sampler; "
+                "run without these flags to preserve frozen early denoising steps."
+            )
+        print(
+            f"[INFO] DPPO hybrid sampler: frozen early steps + "
+            f"{checkpoint['dppo_config']['finetune_denoising_steps']} fine-tuned steps"
+        )
+    else:
+        policy = Solo12DiffusionPolicy(policy_cfg)
+        policy.load_state_dict(checkpoint["ema_model_state_dict"])
+        policy.set_normalizer_stats(normalizer_stats)
+        policy.to(device)
+        policy.eval()
 
     if args_cli.torchscript_denoiser:
         print("[INFO] Tracing denoiser with TorchScript...")
