@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "protocol_id": "phase_a_capability_audit_v1",
+  "checkpoint_manifest": "scripts/diffusion_policy/experiments/phase_a_a0/manifest.json",
+  "preflight_decision": "scripts/diffusion_policy/evaluations/phase_a_causal_audit_v1/preflight_decision.json",
+  "purpose": "Map the frozen base policy's valid route, speed and height envelope before choosing any online learner.",
+  "runs": [
+    {
+      "id": "core_envelope",
+      "path_shapes": ["straight", "circle", "s_curve", "right_angle", "random_polyline"],
+      "speeds": [0.2, 0.4, 0.6],
+      "path_heights": [0.1705, 0.23185, 0.2932],
+      "repeats": 3,
+      "duration_s": 8.0,
+      "num_inference_steps": 10,
+      "exec_horizon": 1,
+      "seed": 142,
+      "deterministic_resets": true,
+      "require_empty_output_dir": true,
+      "headless": true
+    },
+    {
+      "id": "random_height_challenge",
+      "path_shapes": ["s_curve", "right_angle", "random_polyline"],
+      "speeds": [0.4, 0.6],
+      "path_height": 0.2932,
+      "height_profile": "random",
+      "height_segment_m": 1.0,
+      "height_cycle": [0.1705, 0.21, 0.25, 0.2932],
+      "repeats": 3,
+      "duration_s": 8.0,
+      "num_inference_steps": 10,
+      "exec_horizon": 1,
+      "seed": 242,
+      "deterministic_resets": true,
+      "require_empty_output_dir": true,
+      "headless": true
+    }
+  ],
+  "task_gates": {
+    "minimum_overall_survival_rate": 0.9,
+    "minimum_route_speed_group_survival_rate": 0.7777777777777778,
+    "maximum_mean_absolute_speed_ratio_error": 0.2,
+    "maximum_mean_cross_track_rmse_m": 0.15,
+    "maximum_mean_height_absolute_error_m": 0.03,
+    "minimum_height_causal_direction_fraction": 0.9,
+    "minimum_route_success_rate": 0.8,
+    "minimum_random_height_survival_rate": 0.9,
+    "maximum_random_height_absolute_error_m": 0.03
+  }
+}

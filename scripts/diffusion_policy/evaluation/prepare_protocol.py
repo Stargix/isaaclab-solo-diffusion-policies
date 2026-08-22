@@ -19,18 +19,29 @@ def build_command(run: dict, *, platform: str, checkpoint: str, results_root: st
     launcher = r".\isaaclab.bat" if platform == "powershell" else "./isaaclab.sh"
     output_dir = str(Path(results_root) / run["id"]).replace("\\", "/")
     tokens = [launcher, "-p", "scripts/diffusion_policy/evaluate_policy.py"]
-    arguments = {
+    arguments: dict[str, object] = {
         "checkpoint": checkpoint,
         "output_dir": output_dir,
         "path_shapes": run["path_shapes"],
         "speeds": run["speeds"],
-        "path_heights": run["path_heights"],
         "repeats": run["repeats"],
         "duration_s": run["duration_s"],
         "num_inference_steps": run["num_inference_steps"],
         "exec_horizon": run["exec_horizon"],
         "seed": run["seed"],
     }
+    optional_arguments = (
+        "path_height",
+        "path_heights",
+        "height_profile",
+        "height_segment_m",
+        "height_cycle",
+        "transition_fractions",
+        "warmup_steps",
+    )
+    for key in optional_arguments:
+        if key in run:
+            arguments[key] = run[key]
     for key, value in arguments.items():
         tokens.append(f"--{key}")
         if isinstance(value, list):

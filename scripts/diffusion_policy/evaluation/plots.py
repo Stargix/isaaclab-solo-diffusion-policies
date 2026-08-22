@@ -68,8 +68,15 @@ def plot_route_outcomes(summary_rows: list[dict[str, Any]], output_path: Path) -
         axis.spines["right"].set_visible(False)
 
     handles, labels = axes[0, 0].get_legend_handles_labels()
-    figure.legend(handles, labels, loc="upper center", ncol=min(6, len(labels)), frameon=False)
-    figure.suptitle("Finite-horizon route outcomes", fontweight="bold", y=0.985)
-    figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.94))
-    figure.savefig(output_path, dpi=200)
+    figure.suptitle("Finite-horizon route outcomes", fontweight="bold", y=0.99)
+    figure.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.955),
+        ncol=min(6, len(labels)),
+        frameon=False,
+    )
+    figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.89))
+    figure.savefig(output_path, dpi=200, bbox_inches="tight")
     plt.close(figure)

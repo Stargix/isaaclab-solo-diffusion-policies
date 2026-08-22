@@ -112,7 +112,7 @@ from train.conditioning.goal_builder import (
     build_path_guidance_goal_from_path,
 )
 from model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
-from evaluation.metrics import compute_route_metrics
+from evaluation.metrics import compute_route_metrics, point_at_progress, project_trajectory_to_polyline
 from evaluation.plots import plot_route_outcomes
 from train.config import resolve_inference_steps
 from train.data.obs_utils import proprio_from_env_tensors
@@ -1143,7 +1143,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                     ax.plot(ref_xy[:, 0], ref_xy[:, 1], color="#333333", linestyle="--", linewidth=2.0, label="Reference", zorder=3)
                     break
             
-            # Plot actual paths for different speeds
+            # Plot actual paths and the finite-horizon endpoint for each speed.
+            # The complete route remains a faint geometric reference; the
+            # marker is the position that must be reached after duration_s.
             speeds_list = sorted(list({scenario.speed for scenario in scenarios}))
             for speed_idx, speed in enumerate(speeds_list):
                 for i, s in enumerate(scenarios):
@@ -1151,6 +1153,25 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                         act_traj = np.array(trajectories[i]["actual"])
                         color = colors_list[speed_idx % len(colors_list)]
                         ax.plot(act_traj[:, 0], act_traj[:, 1], color=color, alpha=0.9, linewidth=2.0, label=f"{speed} m/s", zorder=4)
+                        plan = path_plans[i]
+                        start_progress, _ = project_trajectory_to_polyline(
+                            rollout_start_pos[i : i + 1, :2], plan.path_w[:, :2]
+                        )
+                        target_progress = min(
+                            float(start_progress[0]) + speed * args_cli.duration_s,
+                            float(plan.cumulative_lengths[-1]),
+                        )
+                        target_xy = point_at_progress(plan.path_w[:, :2], target_progress) - start_pos[i, :2]
+                        ax.scatter(
+                            target_xy[0],
+                            target_xy[1],
+                            marker="X",
+                            s=65,
+                            color=color,
+                            edgecolor="white",
+                            linewidth=0.8,
+                            zorder=5,
+                        )
                         break
             ax.set_title(title, fontsize=13, fontweight="bold", pad=12, color="#222222")
             ax.set_xlabel("Relative X [m]", fontsize=10, labelpad=8)

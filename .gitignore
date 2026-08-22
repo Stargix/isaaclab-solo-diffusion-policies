@@ -124,6 +124,7 @@ scripts/baseline_diffuseloco/evaluations/
 scripts/diffusion_policy/data/coverage/
 scripts/diffusion_policy/data/audits/
 scripts/diffusion_policy/evaluations/phase_a_causal_audit_v1/
+scripts/diffusion_policy/evaluations/phase_a_capability_audit_v1/
 
 # Local workspace links and SLURM outputs
 /sbs
