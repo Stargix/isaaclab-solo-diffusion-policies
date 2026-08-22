@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "protocol_id": "phase_a_causal_preflight_v1",
+  "checkpoint_manifest": "scripts/diffusion_policy/experiments/phase_a_a0/manifest.json",
+  "purpose": "Select execution horizon and reject an incompetent base before the full causal audit.",
+  "runs": [
+    {
+      "id": "preflight_exec1",
+      "path_shapes": ["straight", "s_curve", "right_angle"],
+      "speeds": [0.2, 0.4, 0.6],
+      "path_heights": [0.1705, 0.2932],
+      "repeats": 3,
+      "duration_s": 8.0,
+      "num_inference_steps": 10,
+      "exec_horizon": 1,
+      "seed": 42,
+      "deterministic_resets": true,
+      "require_empty_output_dir": true,
+      "headless": true
+    },
+    {
+      "id": "preflight_exec4",
+      "path_shapes": ["straight", "s_curve", "right_angle"],
+      "speeds": [0.2, 0.4, 0.6],
+      "path_heights": [0.1705, 0.2932],
+      "repeats": 3,
+      "duration_s": 8.0,
+      "num_inference_steps": 10,
+      "exec_horizon": 4,
+      "seed": 42,
+      "deterministic_resets": true,
+      "require_empty_output_dir": true,
+      "headless": true
+    }
+  ],
+  "preflight_gate": {
+    "minimum_survival_rate": 0.8,
+    "minimum_height_causal_direction_fraction": 0.9,
+    "safety_equivalence_margin": 0.02,
+    "selection_order": [
+      "survival_rate",
+      "mean_absolute_horizon_speed_ratio_error",
+      "mean_terminal_position_error_m",
+      "mean_cross_track_rmse_m"
+    ]
+  }
+}

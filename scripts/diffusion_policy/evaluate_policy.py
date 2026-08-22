@@ -46,6 +46,10 @@ parser.add_argument("--duration_s", type=float, default=50.0)
 parser.add_argument("--path_height", type=float, default=None,
                     help="Route height in metres. Defaults to the checkpoint dataset's desired_base_height.")
 parser.add_argument(
+    "--path_heights", type=float, nargs="+", default=None,
+    help="Evaluate several constant route heights in one paired run. Mutually exclusive with --path_height.",
+)
+parser.add_argument(
     "--transition_fractions", type=float, nargs="+", default=None,
     help="Evaluate walk->crouch transitions at these route fractions (e.g. 0.25 0.5 0.75). "
          "Uses 0.2932 m walk and 0.1705 m crouch heights.",
@@ -68,6 +72,14 @@ parser.add_argument("--exec_horizon", type=int, default=8)
 parser.add_argument("--guidance_scale", type=float, default=1.0)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument(
+    "--deterministic_resets", action="store_true",
+    help="Disable reset joint/velocity randomization for paired causal evaluation.",
+)
+parser.add_argument(
+    "--require_empty_output_dir", action="store_true",
+    help="Refuse to mix a canonical run with files from an earlier invocation.",
+)
+parser.add_argument(
     "--reference_replay_dataset",
     type=str,
     default=None,
@@ -83,6 +95,8 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 import gymnasium as gym
+import isaaclab.terrains as terrain_gen
+from isaaclab.terrains import TerrainGeneratorCfg
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
@@ -98,6 +112,8 @@ from train.conditioning.goal_builder import (
     build_path_guidance_goal_from_path,
 )
 from model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
+from evaluation.metrics import compute_route_metrics
+from evaluation.plots import plot_route_outcomes
 from train.config import resolve_inference_steps
 from train.data.obs_utils import proprio_from_env_tensors
 from train.runtime.checkpoint import load_training_checkpoint
@@ -126,6 +142,7 @@ class Scenario:
     speed: float
     demo_name: str | None = None
     transition_fraction: float | None = None
+    path_height: float | None = None
 
 
 def load_reference_fragments(
@@ -202,6 +219,16 @@ def current_git_commit() -> str:
         return "unknown"
 
 
+def git_is_dirty() -> bool | None:
+    try:
+        output = subprocess.check_output(
+            ["git", "status", "--porcelain"], cwd=_PROJECT_ROOT, text=True, stderr=subprocess.DEVNULL
+        )
+        return bool(output.strip())
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
 def dataset_hashes(config: dict[str, Any]) -> dict[str, str]:
     output: dict[str, str] = {}
     for raw_path in config.get("dataset", {}).get("hdf5_paths", []):
@@ -211,6 +238,12 @@ def dataset_hashes(config: dict[str, Any]) -> dict[str, str]:
         if path.is_file():
             output[str(path.resolve())] = sha256_file(path)
     return output
+
+
+def finite_mean(rows: list[dict[str, Any]], key: str) -> float | None:
+    values = np.asarray([row.get(key, math.nan) for row in rows], dtype=np.float64)
+    values = values[np.isfinite(values)]
+    return float(np.mean(values)) if values.size else None
 
 
 def build_straight_path(start_pos: np.ndarray, start_quat: np.ndarray, length_m: float = 10.0, num_points: int = 250) -> tuple[np.ndarray, np.ndarray]:
@@ -498,7 +531,7 @@ def _model_cfg_from_checkpoint(config_dict: dict) -> Solo12DiffusionPolicyConfig
     )
 
 
-def make_scenarios() -> list[Scenario]:
+def make_scenarios(path_heights: tuple[float, ...]) -> list[Scenario]:
     if args_cli.reference_replay_dataset:
         # For holonomic evaluation, we need at least 76 extra lookahead steps (1.52s) to prevent the goal lookahead horizon check from exceeding the reference endpoint.
         minimum = max(2, int(round(args_cli.duration_s * 50.0)) + 76)
@@ -506,7 +539,7 @@ def make_scenarios() -> list[Scenario]:
             args_cli.reference_replay_dataset, args_cli.reference_replay_demos, minimum
         )
         return [
-            Scenario(index, 0, "reference_replay", speed, demo_name)
+            Scenario(index, 0, "reference_replay", speed, demo_name=demo_name)
             for index, (demo_name, _, _, _, _, speed) in enumerate(fragments)
         ]
     scenarios = []
@@ -517,9 +550,16 @@ def make_scenarios() -> list[Scenario]:
             raise ValueError(f"Transition fractions must be in (0, 1), got {fraction}.")
     for shape in shapes:
         for speed in args_cli.speeds:
-            for fraction in transitions:
-                for r in range(args_cli.repeats):
-                    scenarios.append(Scenario(len(scenarios), r, shape, speed, None, fraction))
+            for height in path_heights:
+                for fraction in transitions:
+                    for r in range(args_cli.repeats):
+                        scenarios.append(
+                            Scenario(
+                                len(scenarios), r, shape, speed,
+                                transition_fraction=fraction,
+                                path_height=height,
+                            )
+                        )
     return scenarios
 
 
@@ -528,14 +568,13 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     torch.manual_seed(args_cli.seed)
     np.random.seed(args_cli.seed)
 
-    scenarios = make_scenarios()
-    num_envs = len(scenarios)
-    print(f"[INFO] Evaluating {num_envs} vectorized scenarios in parallel.")
-
     checkpoint_path = Path(args_cli.checkpoint).resolve()
+    source_git_dirty = git_is_dirty()
     output_dir = Path(args_cli.output_dir) if args_cli.output_dir else (
         Path(__file__).resolve().parent / "evaluations" / datetime.now().strftime("eval_%Y%m%d_%H%M%S")
     )
+    if args_cli.require_empty_output_dir and output_dir.exists() and any(output_dir.iterdir()):
+        raise FileExistsError(f"Canonical evaluation output directory is not empty: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -548,7 +587,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         ),
     )
     config = checkpoint["config"]
-    if args_cli.path_height is None:
+    if args_cli.path_height is not None and args_cli.path_heights is not None:
+        raise ValueError("Use either --path_height or --path_heights, not both.")
+    if args_cli.path_height is None and args_cli.path_heights is None:
         path_height = 0.2932
         for raw_dataset in config.get("dataset", {}).get("hdf5_paths", []):
             dataset_path = Path(raw_dataset)
@@ -566,10 +607,15 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 except (OSError, KeyError, ValueError):
                     pass
                 break
-    else:
+    elif args_cli.path_height is not None:
         path_height = float(args_cli.path_height)
-    if not 0.10 <= path_height <= 0.40:
-        raise ValueError(f"--path_height must be in [0.10, 0.40], got {path_height}.")
+    else:
+        path_height = float(args_cli.path_heights[0])
+    path_heights = tuple(float(value) for value in (args_cli.path_heights or (path_height,)))
+    if any(not 0.10 <= value <= 0.40 for value in path_heights):
+        raise ValueError(f"Route heights must be in [0.10, 0.40], got {path_heights}.")
+    if len(set(path_heights)) != len(path_heights):
+        raise ValueError(f"Route heights must be unique, got {path_heights}.")
     if args_cli.height_profile in {"interleaved", "random"}:
         if args_cli.transition_fractions is not None:
             raise ValueError("Use either --height_profile interleaved or --transition_fractions, not both.")
@@ -577,10 +623,17 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             raise ValueError("--height_segment_m must be positive.")
         if len(args_cli.height_cycle) < 2 or any(not 0.10 <= value <= 0.40 for value in args_cli.height_cycle):
             raise ValueError("--height_cycle needs at least two physical heights in [0.10, 0.40].")
-    print(f"[INFO] Evaluation route height: {path_height:.4f} m")
+    if len(path_heights) > 1 and (
+        args_cli.height_profile != "constant" or args_cli.transition_fractions is not None
+    ):
+        raise ValueError("--path_heights is only valid for constant-height evaluation without transitions.")
+    print(f"[INFO] Evaluation route heights: {list(path_heights)} m")
     if args_cli.height_profile in {"interleaved", "random"}:
         print(f"[INFO] {args_cli.height_profile.capitalize()} height schedule: cycle={list(args_cli.height_cycle)}, "
               f"segment={args_cli.height_segment_m:.2f} m")
+    scenarios = make_scenarios(path_heights)
+    num_envs = len(scenarios)
+    print(f"[INFO] Evaluating {num_envs} vectorized scenarios in parallel.")
     inference_steps = resolve_inference_steps(args_cli.num_inference_steps, config["diffusion"])
     policy_cfg = _model_cfg_from_checkpoint(config)
     policy_cfg.num_inference_steps = inference_steps
@@ -603,6 +656,26 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         env_cfg.actuation_delay_range = (0, 0)
     if hasattr(env_cfg, "base_push_interval_range_s"):
         env_cfg.base_push_interval_range_s = (1.0e9, 1.0e9)
+    # IsaacLab's default flat plane references a remote Grid USD.  Generate the
+    # physically equivalent plane locally so evaluation does not depend on
+    # network/cache state.  This changes neither the robot nor policy contract.
+    env_cfg.terrain.terrain_type = "generator"
+    env_cfg.terrain.terrain_generator = TerrainGeneratorCfg(
+        seed=args_cli.seed,
+        curriculum=False,
+        size=(20.0, 20.0),
+        border_width=0.0,
+        num_rows=1,
+        num_cols=1,
+        sub_terrains={"flat": terrain_gen.MeshPlaneTerrainCfg(proportion=1.0)},
+    )
+    if args_cli.deterministic_resets:
+        if hasattr(env_cfg, "reset_base_lin_vel_range"):
+            env_cfg.reset_base_lin_vel_range = (0.0, 0.0)
+        if hasattr(env_cfg, "reset_base_ang_vel_range"):
+            env_cfg.reset_base_ang_vel_range = (0.0, 0.0)
+        if hasattr(env_cfg, "flexed_initial_joint_pos_noise_range"):
+            env_cfg.flexed_initial_joint_pos_noise_range = (0.0, 0.0)
 
     env = gym.make(args_cli.task, cfg=env_cfg)
     vec_env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
@@ -674,7 +747,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             if args_cli.height_profile == "interleaved":
                 height_schedule = tuple(float(cycle[index % len(cycle)]) for index in range(num_segments))
             else:
-                rng = np.random.default_rng(args_cli.seed)
+                # Repeats sample different schedules while path/speed conditions
+                # with the same repeat remain paired on the same schedule.
+                rng = np.random.default_rng(args_cli.seed + s.repeat)
                 sampled: list[float] = []
                 for _ in range(num_segments):
                     candidates = cycle if not sampled else cycle[~np.isclose(cycle, sampled[-1])]
@@ -682,7 +757,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 height_schedule = tuple(sampled)
             pts[:, 2] = np.asarray(height_schedule, dtype=np.float32)[segment_index]
         elif s.transition_fraction is None:
-            pts[:, 2] = path_height
+            if s.path_height is None:
+                raise RuntimeError("Analytic constant-height scenario is missing path_height.")
+            pts[:, 2] = s.path_height
         else:
             arc = cumulative_xy_lengths(pts)
             transition_arc = float(arc[-1] * s.transition_fraction)
@@ -733,6 +810,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         update_history(proprio_buffer, action_buffer, goal_buffer, proprio, previous_action, goals)
         vec_env.step(stand_action)
         previous_action = stand_action.clone()
+
+    # The requested speed horizon starts after history warm-up.  Keep this
+    # state separate from the original spawn so warm-up drift cannot be counted
+    # as free route progress.
+    rollout_start_pos = raw_env._robot.data.root_pos_w.cpu().numpy().copy()
 
     # Track metrics
     trajectories = {i: {"ref": [], "actual": []} for i in range(num_envs)}
@@ -900,12 +982,29 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         )
         hold_count = min(50, planar_speeds_ach.size)
 
+        route_metrics = None
+        final_relative_xy = np.full(2, np.nan, dtype=np.float64)
+        if trajectories[i]["actual"]:
+            relative_positions = np.asarray(trajectories[i]["actual"], dtype=np.float64)
+            final_relative_xy = relative_positions[-1]
+            if not plan.time_indexed:
+                route_metrics = compute_route_metrics(
+                    relative_positions + start_pos[i, :2],
+                    plan.path_w[:, :2],
+                    requested_speed_m_s=float(s.speed),
+                    dt=dt,
+                    horizon_steps=duration_steps,
+                    start_position_xy=rollout_start_pos[i, :2],
+                )
+        route_values = route_metrics.to_dict() if route_metrics is not None else {}
+
         summary_rows.append({
             "scenario_id": s.scenario_id,
             "repeat": s.repeat,
             "path_shape": s.path_shape,
             "reference_demo": s.demo_name or "",
             "requested_speed": s.speed,
+            "requested_height": s.path_height if s.path_height is not None else math.nan,
             "transition_fraction": s.transition_fraction,
             "height_profile": args_cli.height_profile,
             "height_segment_m": args_cli.height_segment_m if args_cli.height_profile in {"interleaved", "random"} else math.nan,
@@ -924,6 +1023,21 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             "target_progress_m": target_progress_m,
             "target_path_index": terminal_index,
             "terminal_position_error_m": terminal_position_error,
+            "route_target_progress_m": route_values.get("target_progress_m", math.nan),
+            "route_final_progress_m": route_values.get("final_progress_m", math.nan),
+            "route_furthest_progress_m": route_values.get("furthest_progress_m", math.nan),
+            "route_completion_ratio": route_values.get("completion_ratio", math.nan),
+            "route_horizon_mean_speed_m_s": route_values.get("horizon_mean_speed_m_s", math.nan),
+            "route_horizon_speed_ratio": route_values.get("horizon_speed_ratio", math.nan),
+            "route_active_mean_speed_m_s": route_values.get("active_mean_speed_m_s", math.nan),
+            "route_active_speed_ratio": route_values.get("active_speed_ratio", math.nan),
+            "route_schedule_mae_m": route_values.get("schedule_mae_m", math.nan),
+            "route_final_schedule_error_m": route_values.get("final_schedule_error_m", math.nan),
+            "route_cross_track_rmse_m": route_values.get("cross_track_rmse_m", math.nan),
+            "route_cross_track_p95_m": route_values.get("cross_track_p95_m", math.nan),
+            "route_terminal_position_error_m": route_values.get("terminal_position_error_m", math.nan),
+            "final_relative_x_m": float(final_relative_xy[0]),
+            "final_relative_y_m": float(final_relative_xy[1]),
             "terminal_yaw_error_rad": terminal_yaw_error,
             "final_planar_speed_m_s": float(planar_speeds_ach[-1]) if planar_speeds_ach.size else math.nan,
             "last_1s_planar_speed_mean_m_s": (
@@ -962,6 +1076,10 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     plt.rcParams["axes.linewidth"] = 0.8
     plt.rcParams["xtick.color"] = "#333333"
     plt.rcParams["ytick.color"] = "#333333"
+
+    # Canonical finite-horizon metrics are plotted separately from the legacy
+    # nearest-point/tangent diagnostics retained below for backward comparison.
+    plot_route_outcomes(summary_rows, output_dir / "route_outcomes.png")
 
     # Color Palette: Sapphire Blue, Coral Pink, Emerald, Amber, Amethyst
     colors_list = ["#0052CC", "#FF5A5F", "#00A86B", "#FFB300", "#7B1FA2"]
@@ -1051,17 +1169,22 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     # absolute height error by transition location and requested speed.
     transition_values = sorted({s.transition_fraction for s in scenarios}, key=lambda x: -1.0 if x is None else x)
     transition_values = [value for value in transition_values if value is not None] or [None]
+    if args_cli.height_profile == "constant" and transition_values == [None]:
+        height_conditions = [(height, None) for height in path_heights]
+    else:
+        height_conditions = [(None, fraction) for fraction in transition_values]
     time_axis = np.arange(duration_steps, dtype=np.float32) * dt
     fig, axes = plt.subplots(1, 2, figsize=(14, 5.2), facecolor="white")
     ax = axes[0]
     plotted = False
     reference_shape = "straight" if "straight" in shapes else shapes[0]
     reference_speed = min(args_cli.speeds, key=lambda value: abs(value - 0.4))
-    for fraction in transition_values:
+    for requested_height, fraction in height_conditions:
         candidates = [
             (i, s) for i, s in enumerate(scenarios)
             if s.path_shape == reference_shape and s.repeat == 0
             and s.speed == reference_speed and s.transition_fraction == fraction
+            and (requested_height is None or s.path_height == requested_height)
         ]
         if not candidates:
             continue
@@ -1073,6 +1196,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         measured[~valid] = np.nan
         if args_cli.height_profile in {"interleaved", "random"}:
             label = f"{args_cli.height_profile} every {args_cli.height_segment_m:.1f} m"
+        elif requested_height is not None:
+            label = f"constant {requested_height:.4f} m"
         else:
             label = "constant" if fraction is None else f"transition at {fraction:.0%}"
         ax.plot(time_axis, target_heights[:, i], linestyle="--", linewidth=2.0, label=f"target ({label})")
@@ -1089,21 +1214,25 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
     ax = axes[1]
     speeds_list = sorted({float(s.speed) for s in scenarios})
-    x = np.arange(len(transition_values), dtype=np.float32)
+    x = np.arange(len(height_conditions), dtype=np.float32)
     width = 0.8 / max(1, len(speeds_list))
     for speed_index, speed in enumerate(speeds_list):
         values = []
-        for fraction in transition_values:
+        for requested_height, fraction in height_conditions:
             rows = [r["height_abs_error_mean"] for r in summary_rows
-                    if r["requested_speed"] == speed and r["transition_fraction"] == fraction]
+                    if r["requested_speed"] == speed and r["transition_fraction"] == fraction
+                    and (requested_height is None or r["requested_height"] == requested_height)]
             values.append(float(np.nanmean(rows)) if rows else np.nan)
         ax.bar(x + (speed_index - (len(speeds_list) - 1) / 2) * width, values,
                width=width, label=f"{speed:.1f} m/s")
-    labels = [
-        f"{args_cli.height_profile}\n{args_cli.height_segment_m:.1f} m" if args_cli.height_profile in {"interleaved", "random"}
-        else "constant" if f is None else f"{f:.0%}"
-        for f in transition_values
-    ]
+    labels = []
+    for requested_height, fraction in height_conditions:
+        if args_cli.height_profile in {"interleaved", "random"}:
+            labels.append(f"{args_cli.height_profile}\n{args_cli.height_segment_m:.1f} m")
+        elif requested_height is not None:
+            labels.append(f"{requested_height:.4f} m")
+        else:
+            labels.append("constant" if fraction is None else f"{fraction:.0%}")
     ax.set_xticks(x, labels)
     ax.set_title("Mean absolute height error")
     ax.set_xlabel("Height-profile condition")
@@ -1240,6 +1369,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         "checkpoint": str(checkpoint_path),
         "checkpoint_sha256": sha256_file(checkpoint_path),
         "git_commit": current_git_commit(),
+        "git_dirty_before_evaluation": source_git_dirty,
         "config": config,
         "dataset_sha256": dataset_hashes(config),
         "policy_kind": checkpoint.get("policy_kind", "unknown"),
@@ -1252,6 +1382,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         "goal_representation": goal_representation,
         "waypoint_time_offsets_s": waypoint_time_offsets_s,
         "speeds_evaluated": list(args_cli.speeds),
+        "heights_evaluated": list(path_heights),
         "transition_fractions": list(args_cli.transition_fractions) if args_cli.transition_fractions is not None else [],
         "height_profile": args_cli.height_profile,
         "height_segment_m": args_cli.height_segment_m if args_cli.height_profile in {"interleaved", "random"} else None,
@@ -1259,7 +1390,14 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         "reference_replay_dataset": (
             str(Path(args_cli.reference_replay_dataset).resolve()) if args_cli.reference_replay_dataset else None
         ),
+        "deterministic_resets": bool(args_cli.deterministic_resets),
         "overall_survival_rate": global_survival,
+        "overall_route_completion_ratio": finite_mean(summary_rows, "route_completion_ratio"),
+        "overall_route_horizon_speed_ratio": finite_mean(summary_rows, "route_horizon_speed_ratio"),
+        "overall_route_cross_track_rmse_m": finite_mean(summary_rows, "route_cross_track_rmse_m"),
+        "overall_route_terminal_position_error_m": finite_mean(
+            summary_rows, "route_terminal_position_error_m"
+        ),
         "survival_by_path": {
             shape: sum([r["survived"] for r in summary_rows if r["path_shape"] == shape]) / sum([1 for r in summary_rows if r["path_shape"] == shape])
             for shape in shapes
