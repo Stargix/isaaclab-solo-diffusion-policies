@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "experiment_id": "phase_a_a0",
+  "status": "frozen_baseline",
+  "frozen_on": "2026-08-22",
+  "source_commit": "8a0f6a455bf31627934e0ec7435a98d38c4dc2af",
+  "source_branch": "phase-b1-residual-ppo",
+  "artifacts": [
+    {
+      "role": "policy_checkpoint",
+      "path": "checkpoints_iri/real_walk_crouch_hindsight.pt",
+      "bytes": 20326045,
+      "sha256": "7975FE63FDFB5526A8E4613951C6337742CD95A043E1272A2DF98F4CC7CAB553",
+      "required": true
+    },
+    {
+      "role": "training_dataset",
+      "path": "scripts/diffusion_policy/data/datasets/walk_crouch_phase_a_waypoint_v3.hdf5",
+      "bytes": 680785080,
+      "sha256": "00AEA50B71D7CE3FB69C05996F51AE43F6A56623AC8A3314F7B684AE903E3A3F",
+      "required": true
+    }
+  ],
+  "checkpoint_contract": {
+    "policy_kind": "spatial_hindsight_geometry_ddpm",
+    "goal_schema": "hindsight_geometric_average12_v1",
+    "goal_source": "achieved",
+    "history": 8,
+    "prediction_horizon": 16,
+    "execution_offset": 8,
+    "goal_horizon_steps": 100,
+    "goal_dimension": 12,
+    "action_dimension": 12,
+    "diffusion_train_steps": 10,
+    "checkpoint_epoch_zero_based": 43,
+    "checkpoint_global_step": 53406,
+    "checkpoint_validation_loss": 0.004842201533558016,
+    "training_seed": 42,
+    "training_batch_size": 4096,
+    "training_epochs": 50
+  },
+  "provenance_notes": [
+    "The checkpoint-embedded config is authoritative.",
+    "The current checked-in balanced config is not the exact training config: it currently declares batch_size=1024 and epochs=30.",
+    "Historical evaluation JSON records a commit but did not record git dirty state; those outputs are evidence, not the canonical revalidation.",
+    "The merged dataset contains no walk/crouch skill boundary within the 2 s goal horizon. Height-transition tests therefore probe interpolation/OOD behavior, not demonstrated transitions."
+  ],
+  "dataset_audit": {
+    "sample_count": 20000,
+    "demonstrations": 6690,
+    "zero_action_history_fraction": 0.0103,
+    "height_transition_fraction_abs_gt_3cm": 0.05815,
+    "skill_boundary_within_2s_fraction": 0.0,
+    "local_report": "scripts/diffusion_policy/data/audits/phase_a_a0/spatial_dataset_audit.json"
+  },
+  "historical_evidence": [
+    {
+      "evaluation": "hindsight_walk_crouch",
+      "scenarios": 75,
+      "survival_rate": 0.7733,
+      "survivor_mean_tangent_speed_ratio": 1.0624,
+      "survivor_mean_terminal_position_error_m": 1.0150
+    },
+    {
+      "evaluation": "real_walk_crouch_hindsight_crouch",
+      "scenarios": 75,
+      "survival_rate": 0.8400,
+      "survivor_mean_tangent_speed_ratio": 1.1219,
+      "survivor_mean_terminal_position_error_m": 1.2431
+    },
+    {
+      "evaluation": "real_walk_crouch_transitions_v2",
+      "scenarios": 225,
+      "survival_rate": 0.4667,
+      "survivor_mean_tangent_speed_ratio": 1.2917,
+      "survivor_mean_height_absolute_error_m": 0.0349,
+      "survivor_mean_terminal_position_error_m": 1.5605
+    },
+    {
+      "evaluation": "real_walk_crouch_random_heights_v1",
+      "scenarios": 45,
+      "survival_rate": 0.6667,
+      "survivor_mean_tangent_speed_ratio": 1.3741,
+      "survivor_mean_height_absolute_error_m": 0.0398,
+      "survivor_mean_terminal_position_error_m": 1.7080
+    },
+    {
+      "evaluation": "real_walk_crouch_binary_heights_v1",
+      "scenarios": 45,
+      "survival_rate": 0.6000,
+      "survivor_mean_tangent_speed_ratio": 1.3087,
+      "survivor_mean_height_absolute_error_m": 0.0346,
+      "survivor_mean_terminal_position_error_m": 1.6245
+    }
+  ],
+  "next_gate": "phase_a_causal_audit_v1"
+}
