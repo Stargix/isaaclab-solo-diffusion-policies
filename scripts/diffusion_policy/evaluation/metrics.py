@@ -17,6 +17,10 @@ class RouteMetrics:
     completion_ratio: float
     horizon_mean_speed_m_s: float
     horizon_speed_ratio: float
+    arrived: bool
+    arrival_time_s: float
+    arrival_mean_speed_m_s: float
+    arrival_speed_ratio: float
     active_mean_speed_m_s: float
     active_speed_ratio: float
     schedule_mae_m: float
@@ -25,8 +29,42 @@ class RouteMetrics:
     cross_track_p95_m: float
     terminal_position_error_m: float
 
-    def to_dict(self) -> dict[str, float]:
+    def to_dict(self) -> dict[str, float | bool]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class TaskSuccessMetrics:
+    """First joint satisfaction of the terminal constraints used by DPPO."""
+
+    success: bool
+    time_s: float
+    position_error_m: float
+    yaw_error_rad: float
+    height_error_m: float
+    mean_speed_error_m_s: float
+
+    def to_dict(self) -> dict[str, float | bool]:
+        return asdict(self)
+
+
+def valid_post_step_mask(horizon_steps: int, failure_action_step: int | None) -> np.ndarray:
+    """Mask metrics returned after IsaacLab's in-step auto-reset.
+
+    ``failure_action_step`` is one-based. On that action IsaacLab has already
+    reset before callers can read robot tensors, so the corresponding sample
+    and everything after it are invalid for the terminated rollout.
+    """
+
+    if horizon_steps < 1:
+        raise ValueError("horizon_steps must be positive.")
+    mask = np.ones(horizon_steps, dtype=bool)
+    if failure_action_step is None:
+        return mask
+    if not 1 <= failure_action_step <= horizon_steps:
+        raise ValueError("failure_action_step must be within the evaluation horizon.")
+    mask[failure_action_step - 1 :] = False
+    return mask
 
 
 def _validate_polyline(path_xy: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -121,6 +159,8 @@ def compute_route_metrics(
     if dt <= 0.0 or horizon_steps < 1:
         raise ValueError("Require dt > 0 and horizon_steps >= 1.")
     positions = np.asarray(positions_xy, dtype=np.float64)
+    if positions.ndim != 2 or positions.shape[1] != 2 or len(positions) == 0:
+        raise ValueError("positions_xy must have shape (T, 2) with T >= 1.")
     if len(positions) > horizon_steps:
         raise ValueError("positions_xy cannot be longer than horizon_steps.")
 
@@ -155,6 +195,26 @@ def compute_route_metrics(
     completion_ratio = final_progress / max(target_progress, 1.0e-9)
     horizon_mean_speed = final_progress / horizon_duration
     active_mean_speed = final_progress / active_duration
+    monotonic_progress = np.maximum.accumulate(progress)
+    arrival_candidates = np.flatnonzero(monotonic_progress >= target_progress)
+    arrived = bool(arrival_candidates.size)
+    if arrived:
+        arrival_index = int(arrival_candidates[0])
+        previous_progress = 0.0 if arrival_index == 0 else float(monotonic_progress[arrival_index - 1])
+        current_progress = float(monotonic_progress[arrival_index])
+        progress_delta = current_progress - previous_progress
+        interpolation = (
+            (target_progress - previous_progress) / progress_delta
+            if progress_delta > 1.0e-9
+            else 1.0
+        )
+        arrival_time = (float(arrival_index) + float(np.clip(interpolation, 0.0, 1.0))) * dt
+        arrival_mean_speed = target_progress / max(arrival_time, 1.0e-9)
+        arrival_speed_ratio = arrival_mean_speed / requested_speed_m_s
+    else:
+        arrival_time = float("nan")
+        arrival_mean_speed = float("nan")
+        arrival_speed_ratio = float("nan")
 
     return RouteMetrics(
         target_progress_m=target_progress,
@@ -162,7 +222,13 @@ def compute_route_metrics(
         furthest_progress_m=furthest_progress,
         completion_ratio=completion_ratio,
         horizon_mean_speed_m_s=horizon_mean_speed,
+        # Retain a horizon-normalized displacement diagnostic, but do not use
+        # it as the primary speed metric on routes shorter than speed * time.
         horizon_speed_ratio=horizon_mean_speed / requested_speed_m_s,
+        arrived=arrived,
+        arrival_time_s=arrival_time,
+        arrival_mean_speed_m_s=arrival_mean_speed,
+        arrival_speed_ratio=arrival_speed_ratio,
         active_mean_speed_m_s=active_mean_speed,
         active_speed_ratio=active_mean_speed / requested_speed_m_s,
         schedule_mae_m=float(np.mean(np.abs(progress - scheduled))),
@@ -170,4 +236,102 @@ def compute_route_metrics(
         cross_track_rmse_m=float(np.sqrt(np.mean(np.square(cross_track)))),
         cross_track_p95_m=float(np.percentile(cross_track, 95)),
         terminal_position_error_m=terminal_error,
+    )
+
+
+def compute_first_task_success(
+    positions_xy: np.ndarray,
+    path_xy: np.ndarray,
+    *,
+    yaws_rad: np.ndarray,
+    heights_m: np.ndarray,
+    requested_speed_m_s: float,
+    target_progress_m: float,
+    target_yaw_rad: float,
+    target_height_m: float,
+    dt: float,
+    start_position_xy: np.ndarray,
+    position_tolerance_m: float = 0.15,
+    yaw_tolerance_rad: float = 0.40,
+    height_tolerance_m: float = 0.05,
+    mean_speed_tolerance_m_s: float = 0.08,
+    corridor_half_width_m: float = 0.60,
+) -> TaskSuccessMetrics:
+    """Reproduce the DPPO terminal predicate on an offline trajectory.
+
+    A prior corridor violation is absorbing, as it is during training.  The
+    returned time is the first sampled instant where position, pose and
+    route-average speed are all valid; it is intentionally separate from the
+    looser route-completion diagnostic.
+    """
+
+    positions = np.asarray(positions_xy, dtype=np.float64)
+    yaws = np.asarray(yaws_rad, dtype=np.float64).reshape(-1)
+    heights = np.asarray(heights_m, dtype=np.float64).reshape(-1)
+    if positions.ndim != 2 or positions.shape[1] != 2 or len(positions) == 0:
+        raise ValueError("positions_xy must have shape (T, 2) with T >= 1.")
+    if len(yaws) != len(positions) or len(heights) != len(positions):
+        raise ValueError("positions, yaws and heights must have the same length.")
+    if requested_speed_m_s <= 0.0 or target_progress_m <= 0.0 or dt <= 0.0:
+        raise ValueError("speed, target progress and dt must be positive.")
+    tolerances = (
+        position_tolerance_m,
+        yaw_tolerance_rad,
+        height_tolerance_m,
+        mean_speed_tolerance_m_s,
+        corridor_half_width_m,
+    )
+    if any(value <= 0.0 for value in tolerances):
+        raise ValueError("task tolerances must be positive.")
+
+    start = np.asarray(start_position_xy, dtype=np.float64).reshape(-1)
+    if start.size != 2:
+        raise ValueError("start_position_xy must contain exactly two values.")
+    combined_progress, combined_cross_track = project_trajectory_to_polyline(
+        np.vstack((start, positions)), path_xy
+    )
+    progress = np.maximum.accumulate(combined_progress[1:] - float(combined_progress[0]))
+    cross_track = combined_cross_track[1:]
+    target_point = point_at_progress(path_xy, float(combined_progress[0]) + target_progress_m)
+    elapsed = (np.arange(len(positions), dtype=np.float64) + 1.0) * dt
+    position_error = np.linalg.norm(positions - target_point[None, :], axis=1)
+    yaw_error = np.abs(np.arctan2(
+        np.sin(target_yaw_rad - yaws), np.cos(target_yaw_rad - yaws)
+    ))
+    height_error = np.abs(heights - target_height_m)
+    mean_speed_error = np.where(
+        elapsed >= 0.5,
+        progress / np.maximum(elapsed, 0.5) - requested_speed_m_s,
+        0.0,
+    )
+    # RouteBank uses min(0.12 m, 5% of route length) as its near-terminal gate.
+    near_terminal_distance = min(0.12, 0.05 * target_progress_m)
+    near_terminal = target_progress_m - progress <= near_terminal_distance
+    corridor_violation = np.abs(cross_track) > corridor_half_width_m
+    corridor_absorbed = np.maximum.accumulate(corridor_violation)
+    terminal_along_error = (
+        np.cos(target_yaw_rad) * (positions[:, 0] - target_point[0])
+        + np.sin(target_yaw_rad) * (positions[:, 1] - target_point[1])
+    )
+    overshoot_absorbed = np.maximum.accumulate(near_terminal & (terminal_along_error > 0.50))
+    valid = (
+        near_terminal
+        & (position_error <= position_tolerance_m)
+        & (yaw_error <= yaw_tolerance_rad)
+        & (height_error <= height_tolerance_m)
+        & (np.abs(mean_speed_error) <= mean_speed_tolerance_m_s)
+        & ~corridor_absorbed
+        & ~overshoot_absorbed
+    )
+    candidates = np.flatnonzero(valid)
+    if not candidates.size:
+        return TaskSuccessMetrics(False, *(float("nan"),) * 5)
+    index = int(candidates[0])
+    return TaskSuccessMetrics(
+        True,
+        float(elapsed[index]),
+        float(position_error[index]),
+        float(yaw_error[index]),
+        float(height_error[index]),
+        float(mean_speed_error[index]),
     )

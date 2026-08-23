@@ -113,7 +113,19 @@ class DPPOTrainer:
         )
         self.running_episode_return = torch.zeros(self.num_envs, device=self.device)
         self.total_physics_steps = int(source_checkpoint.get("total_physics_steps", 0))
-        self.best_score = float("-inf")
+        continuing_same_output = (
+            Path(source_checkpoint_path).resolve().parent == self.output_dir.resolve()
+        )
+        saved_best = source_checkpoint.get("best_score") if continuing_same_output else None
+        if saved_best is not None:
+            self.best_score = float(saved_best)
+        elif source_checkpoint.get("algorithm") == "dppo" and continuing_same_output:
+            try:
+                self.best_score = self._selection_score(source_checkpoint.get("metrics", {}))
+            except KeyError:
+                self.best_score = float("-inf")
+        else:
+            self.best_score = float("-inf")
         self.metrics_path = self.output_dir / "metrics.jsonl"
 
     def _critic_observation(self) -> torch.Tensor:
@@ -149,6 +161,20 @@ class DPPOTrainer:
             self.goal_history[newly_done] = 0.0
             self.previous_applied_action[newly_done] = 0.0
 
+    def _seed_history(self, env_ids: torch.Tensor | None = None) -> None:
+        """Reproduce the Phase-A padded-start observation contract."""
+
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device)
+        if len(env_ids) == 0:
+            return
+        proprio = self.raw_env.get_proprioception()[env_ids]
+        goals = self.raw_env.get_goal()[env_ids]
+        self.proprio_history[env_ids] = proprio[:, None, :].expand(-1, self.history, -1)
+        self.goal_history[env_ids] = goals[:, None, :].expand(-1, self.history, -1)
+        self.action_history[env_ids] = 0.0
+        self.previous_applied_action[env_ids] = 0.0
+
     @torch.no_grad()
     def collect(self) -> tuple[RolloutBatch, dict[str, float]]:
         stored: dict[str, list[torch.Tensor]] = {
@@ -178,6 +204,7 @@ class DPPOTrainer:
             saturation_sum += float((sample.normalized_trajectory.abs() >= 0.999).float().mean())
             macro_reward = torch.zeros(self.num_envs, device=self.device)
             macro_done = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+            needs_boundary_reset = torch.zeros_like(macro_done)
             for index in range(self.policy.dppo_cfg.exec_horizon):
                 active = ~macro_done
                 proprio_before = self.raw_env.get_proprioception().clone()
@@ -195,7 +222,15 @@ class DPPOTrainer:
                 episodes.add_extras(extras, active)
                 self._advance_history(proprio_before, goal_before, action, active, done_now)
                 macro_done |= done_now
+                if index + 1 < self.policy.dppo_cfg.exec_horizon:
+                    needs_boundary_reset |= done_now
                 self.total_physics_steps += self.num_envs
+
+            if torch.any(needs_boundary_reset):
+                self.raw_env.reset_after_action_chunk(
+                    torch.nonzero(needs_boundary_reset, as_tuple=False).squeeze(-1)
+                )
+            self._seed_history(torch.nonzero(macro_done, as_tuple=False).squeeze(-1))
 
             stored["proprio"].append(proprio)
             stored["action_history"].append(action_history)
@@ -233,8 +268,10 @@ class DPPOTrainer:
             metrics["Episode/success_rate"]
             - metrics["Episode/base_contact_rate"]
             - 0.5 * metrics["Episode/corridor_failure_rate"]
+            - 0.5 * metrics["Episode/terminal_overshoot_rate"]
             + 0.10 * metrics["Episode/progress_fraction"]
             - 0.02 * metrics["Episode/mean_speed_error_abs_mps"]
+            - 0.01 * metrics["Episode/terminal_distance_m"]
         )
 
     def _write_metrics(self, iteration: int, metrics: dict[str, float]) -> None:
@@ -255,12 +292,14 @@ class DPPOTrainer:
             iteration=iteration,
             total_physics_steps=self.total_physics_steps,
             metrics=metrics,
+            best_score=self.best_score,
         )
 
     def run(self, iterations: int) -> None:
         if iterations < 1:
             raise ValueError("iterations must be positive.")
         self.env.reset()
+        self._seed_history()
         for iteration in range(self.start_iteration, self.start_iteration + iterations):
             started = time.perf_counter()
             rollout, rollout_metrics = self.collect()

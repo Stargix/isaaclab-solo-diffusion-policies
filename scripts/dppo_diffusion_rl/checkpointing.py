@@ -69,10 +69,16 @@ def load_policy_checkpoint(
         path,
         device,
         expected_policy_kind="spatial_hindsight_geometry_ddpm",
+        allow_dppo=True,
     )
     config = checkpoint["config"]
     if config["dataset"].get("goal_representation") != "hindsight_geom_avg12":
         raise ValueError("DPPO Phase B requires the geometric hindsight goal12 checkpoint.")
+    if not config["dataset"].get("include_padded_starts", False):
+        raise ValueError(
+            "DPPO Phase B requires a checkpoint trained with include_padded_starts=true; "
+            "otherwise its reset-history distribution is undefined."
+        )
     if int(config["diffusion"]["num_train_timesteps"]) != dppo_cfg.inference_steps:
         raise ValueError(
             "Exact DDPM DPPO currently requires inference_steps == the checkpoint training steps."
@@ -84,15 +90,24 @@ def load_policy_checkpoint(
         if checkpoint.get("dppo_checkpoint_version") != DPPO_CHECKPOINT_VERSION:
             raise ValueError("Unsupported DPPO checkpoint version.")
         saved_cfg = DPPOConfig(**checkpoint["dppo_config"])
-        structural = (
+        resume_contract = (
             "inference_steps",
             "finetune_denoising_steps",
             "exec_horizon",
             "min_denoising_std",
+            "gamma",
+            "gae_lambda",
+            "gamma_denoising",
         )
-        mismatch = [name for name in structural if getattr(saved_cfg, name) != getattr(dppo_cfg, name)]
+        mismatch = [
+            name
+            for name in resume_contract
+            if getattr(saved_cfg, name) != getattr(dppo_cfg, name)
+        ]
         if mismatch:
-            raise ValueError(f"Resume configuration changes DPPO's likelihood contract: {mismatch}.")
+            raise ValueError(
+                f"Resume configuration changes DPPO's likelihood/objective contract: {mismatch}."
+            )
         policy.load_dppo_actor(
             checkpoint["ema_model_state_dict"],
             checkpoint["dppo_base_model_state_dict"],
@@ -148,6 +163,7 @@ def save_checkpoint(
     iteration: int,
     total_physics_steps: int,
     metrics: dict[str, float],
+    best_score: float,
 ) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -170,6 +186,7 @@ def save_checkpoint(
         "iteration": int(iteration),
         "total_physics_steps": int(total_physics_steps),
         "metrics": dict(metrics),
+        "best_score": float(best_score),
         "source_checkpoint": str(Path(source_path)),
         "source_checkpoint_sha256": sha256_file(source_path),
     }
@@ -186,3 +203,11 @@ def restore_training_state(
     critic.load_state_dict(checkpoint["critic_state_dict"])
     updater.actor_optimizer.load_state_dict(checkpoint["actor_optimizer_state_dict"])
     updater.critic_optimizer.load_state_dict(checkpoint["critic_optimizer_state_dict"])
+    # ``load_state_dict`` restores parameter-group options too. Re-apply the
+    # explicit configuration so a resumed run cannot silently use stale LRs.
+    for group in updater.actor_optimizer.param_groups:
+        group["lr"] = updater.cfg.actor_lr
+        group["weight_decay"] = updater.cfg.actor_weight_decay
+    for group in updater.critic_optimizer.param_groups:
+        group["lr"] = updater.cfg.critic_lr
+        group["weight_decay"] = updater.cfg.critic_weight_decay

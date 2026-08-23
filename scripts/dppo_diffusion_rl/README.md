@@ -26,12 +26,16 @@ decision, so DPPO memory does not scale like ordinary PPO.
 Resume with the same likelihood contract:
 
 ```powershell
-.\isaaclab.bat -p scripts/dppo_diffusion_rl/train.py --checkpoint scripts/dppo_diffusion_rl/runs/dppo_path_pose_speed_v1/last.pt --output_dir scripts/dppo_diffusion_rl/runs/dppo_path_pose_speed_v1_resume --num_envs 4096 --iterations 500 --rollout_chunks 32 --headless --device cuda:0 --wandb --run_name dppo_path_pose_speed_v1_resume
+.\isaaclab.bat -p scripts/dppo_diffusion_rl/train.py --checkpoint scripts/dppo_diffusion_rl/runs/dppo_path_pose_speed_v1/last.pt --output_dir scripts/dppo_diffusion_rl/runs/dppo_path_pose_speed_v1 --num_envs 4096 --iterations 500 --rollout_chunks 32 --headless --device cuda:0 --wandb --run_name dppo_path_pose_speed_v1
 ```
 
 Changing `inference_steps`, `finetune_denoising_steps`, `exec_horizon`, or
 `min_denoising_std` while resuming is rejected because it changes the stored
-transition likelihood.
+transition likelihood. Changing `gamma`, `gae_lambda`, or `gamma_denoising` is
+also rejected because it changes the objective attached to the stored rollout.
+Optimizer learning rates may be changed explicitly and are reapplied after
+loading AdamW state. Reusing a populated output directory is allowed only when
+the checkpoint belongs to that same run; this prevents accidental log mixing.
 
 ## Evaluate
 
@@ -39,8 +43,16 @@ The existing evaluator detects DPPO metadata and reconstructs the frozen-early
 / fine-tuned-late sampler. Do not strip the DPPO keys from the checkpoint.
 
 ```powershell
-.\isaaclab.bat -p scripts/diffusion_policy/evaluate_policy.py --checkpoint scripts/dppo_diffusion_rl/runs/dppo_path_pose_speed_v1/best.pt --output_dir scripts/dppo_diffusion_rl/evaluations/dppo_path_pose_speed_v1 --speeds 0.2 0.4 0.6 0.8 1.0 --path_shapes straight circle s_curve right_angle random_polyline --height_profile random --height_cycle 0.2932 0.25 0.21 0.1705 --height_segment_m 0.8 --repeats 3 --duration_s 50 --exec_horizon 4 --seed 42 --headless
+.\isaaclab.bat -p scripts/diffusion_policy/evaluate_policy.py --checkpoint scripts/dppo_diffusion_rl/runs/dppo_path_pose_speed_v1/best.pt --output_dir scripts/dppo_diffusion_rl/evaluations/dppo_path_pose_speed_v1 --speeds 0.2 0.4 0.6 0.8 1.0 --path_shapes straight circle s_curve right_angle random_polyline --height_profile random --height_cycle 0.2932 0.25 0.21 0.1705 --height_segment_m 0.8 --repeats 3 --duration_s 50 --seed 42 --headless --require_empty_output_dir
 ```
+
+For finite routes, use `route_arrival_speed_ratio` together with
+`route_arrived`; the old full-horizon speed is only a displacement diagnostic
+after the robot reaches the endpoint and waits. `task_success` is the joint
+training predicate (position, final yaw, final height, route-average speed and
+no prior corridor/overshoot failure). Height reports now separate the physical
+requirement at current route progress from the future height preview supplied
+to the policy.
 
 Interactive right-angle transition:
 
@@ -49,9 +61,10 @@ Interactive right-angle transition:
 ```
 
 `best.pt` is created only after at least one episode has completed. Selection
-prioritizes route success and fall avoidance, then progress and mean-speed
-error. `last.pt`, periodic `model_N.pt`, `metrics.jsonl`, and `run_config.json`
-are always produced.
+prioritizes route success and fall avoidance, penalizes corridor/overshoot, and
+then uses progress, mean-speed error and terminal distance. Its score is saved
+and restored on an in-place resume. `last.pt`, periodic `model_N.pt`,
+`metrics.jsonl`, and `run_config.json` are always produced.
 
 The first 10 iterations train only the critic. With 32 chunks per iteration,
 this covers approximately one full 24 s route before the transformer actor is
@@ -61,9 +74,10 @@ ablation.
 ## Tests
 
 ```powershell
-conda run --no-capture-output -n env_isaaclab python -m pytest scripts/dppo_diffusion_rl/tests -q -p no:cacheprovider
+conda run --no-capture-output -n env_isaaclab python -m pytest scripts/dppo_diffusion_rl/tests scripts/diffusion_policy/evaluation/test_metrics.py -q -p no:cacheprovider
 ```
 
 The suite checks the reverse DDPM transition against `diffusers`, exact
 behavior-logprob reproduction, the denoising clip schedule, base-network
-immutability, a complete synthetic PPO update, and reward invariants.
+immutability, reset/chunk handling, checkpoint resume, a complete synthetic PPO
+update, reward invariants, and finite-route evaluation semantics.

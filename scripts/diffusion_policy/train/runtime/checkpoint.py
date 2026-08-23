@@ -21,6 +21,7 @@ def load_training_checkpoint(
     device: torch.device | str,
     *,
     expected_policy_kind: str | Iterable[str] | None = None,
+    allow_dppo: bool = False,
 ) -> dict[str, Any]:
     """Load a Solo12 diffusion-policy checkpoint saved by ``train.py``.
 
@@ -31,6 +32,12 @@ def load_training_checkpoint(
     """
 
     checkpoint = torch.load(path, map_location=device, weights_only=False)
+    if checkpoint.get("algorithm") == "dppo" and not allow_dppo:
+        raise ValueError(
+            f"Checkpoint {path} is a hybrid DPPO policy. This consumer would silently use "
+            "the fine-tuned denoiser for every reverse step; load it through the DPPO-aware "
+            "sampler instead."
+        )
     config = checkpoint.get("config", {})
     schema_version = checkpoint.get("schema_version", config.get("schema_version"))
     policy_kind = checkpoint.get("policy_kind", config.get("policy_kind"))

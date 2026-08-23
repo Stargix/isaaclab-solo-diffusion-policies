@@ -15,7 +15,7 @@ def _finite(values: list[Any]) -> np.ndarray:
 
 
 def plot_route_outcomes(summary_rows: list[dict[str, Any]], output_path: Path) -> None:
-    """Plot the four metrics that determine finite-horizon route success."""
+    """Plot route completion, strict arrival timing, and geometric accuracy."""
 
     import matplotlib
 
@@ -24,14 +24,15 @@ def plot_route_outcomes(summary_rows: list[dict[str, Any]], output_path: Path) -
 
     metric_specs = (
         ("route_completion_ratio", "Completion ratio", 1.0),
-        ("route_horizon_speed_ratio", "Horizon mean-speed ratio", 1.0),
+        ("route_arrived", "Strict endpoint arrival rate", 1.0),
+        ("route_arrival_speed_ratio", "Arrival mean-speed ratio", 1.0),
         ("route_terminal_position_error_m", "Terminal position error [m]", None),
         ("route_cross_track_rmse_m", "Cross-track RMSE [m]", None),
     )
     shapes = sorted({str(row["path_shape"]) for row in summary_rows})
     speeds = sorted({float(row["requested_speed"]) for row in summary_rows})
     palette = ("#0052CC", "#FF5A5F", "#00A86B", "#FFB300", "#7B1FA2")
-    figure, axes = plt.subplots(2, 2, figsize=(13, 9), facecolor="white")
+    figure, axes = plt.subplots(2, 3, figsize=(17, 9), facecolor="white")
 
     for axis, (key, label, ideal) in zip(axes.flat, metric_specs):
         for shape_index, shape in enumerate(shapes):
@@ -66,6 +67,9 @@ def plot_route_outcomes(summary_rows: list[dict[str, Any]], output_path: Path) -
         axis.grid(alpha=0.25)
         axis.spines["top"].set_visible(False)
         axis.spines["right"].set_visible(False)
+
+    for axis in axes.flat[len(metric_specs):]:
+        axis.set_visible(False)
 
     handles, labels = axes[0, 0].get_legend_handles_labels()
     figure.suptitle("Finite-horizon route outcomes", fontweight="bold", y=0.99)

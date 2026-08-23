@@ -197,14 +197,38 @@ class DPPODiffusionPolicy(torch.nn.Module):
             std = std.clamp_min(self.dppo_cfg.min_denoising_std)
         return mean, std
 
-    def _executed_logprob(self, mean: torch.Tensor, std: torch.Tensor, next_sample: torch.Tensor) -> torch.Tensor:
+    def _reward_relevant_logprob(
+        self,
+        mean: torch.Tensor,
+        std: torch.Tensor,
+        next_sample: torch.Tensor,
+        final_transition: bool | torch.Tensor,
+    ) -> torch.Tensor:
+        """Likelihood of stochastic tokens that can still cause the reward.
+
+        The trajectory contains a generated history prefix before its
+        executable slice. Because the denoiser is causal, that prefix affects
+        executable tokens while another reverse step remains. At the final
+        transition the newly sampled prefix is never consumed again, so only
+        the executed slice belongs to the reward's stochastic computation
+        graph. Tokens after the executed chunk are always irrelevant.
+        """
+
         start = self.cfg.execution_offset
-        end = start + self.dppo_cfg.exec_horizon
-        elementwise = Normal(mean, std).log_prob(next_sample)[:, start:end]
+        end = self.cfg.execution_offset + self.dppo_cfg.exec_horizon
+        elementwise = Normal(mean, std).log_prob(next_sample).clamp(-5.0, 2.0)
         # The paper's implementation averages rather than sums the high-
         # dimensional action likelihood and clips rare tails before the PPO
         # ratio. This avoids exponential ratios for action chunks.
-        return elementwise.clamp(-5.0, 2.0).mean(dim=(-1, -2))
+        # Keep one common denominator across denoising transitions. The final
+        # transition omits irrelevant prefix scores; it must not thereby give
+        # each executed coordinate ``end / exec_horizon`` times more weight.
+        denominator = float(end * elementwise.shape[-1])
+        causal = elementwise[:, :end].sum(dim=(-1, -2)) / denominator
+        executed = elementwise[:, start:end].sum(dim=(-1, -2)) / denominator
+        if isinstance(final_transition, bool):
+            return executed if final_transition else causal
+        return torch.where(final_transition.bool(), executed, causal)
 
     @torch.no_grad()
     def sample(
@@ -256,7 +280,14 @@ class DPPODiffusionPolicy(torch.nn.Module):
                 next_trajectory = mean
             if trainable:
                 if training_exploration:
-                    logprobs.append(self._executed_logprob(mean, std, next_trajectory))
+                    logprobs.append(
+                        self._reward_relevant_logprob(
+                            mean,
+                            std,
+                            next_trajectory,
+                            final_transition=index == self.dppo_cfg.inference_steps - 1,
+                        )
+                    )
                 else:
                     logprobs.append(torch.zeros(trajectory.shape[0], device=trajectory.device))
                 chain.append(next_trajectory.clone())
@@ -312,11 +343,17 @@ class DPPODiffusionPolicy(torch.nn.Module):
             mean, std = self._transition_mean_std(chain_previous[mask], output[mask], timestep)
             means[mask] = mean
             stds[mask] = std
-        logprob = self._executed_logprob(means, stds, chain_next)
+        final_transition = local_denoising_index == self.dppo_cfg.finetune_denoising_steps - 1
+        logprob = self._reward_relevant_logprob(
+            means, stds, chain_next, final_transition=final_transition
+        )
         entropy = Normal(means, stds).entropy()
         start = self.cfg.execution_offset
-        end = start + self.dppo_cfg.exec_horizon
-        return logprob, entropy[:, start:end].mean(dim=(-1, -2))
+        end = self.cfg.execution_offset + self.dppo_cfg.exec_horizon
+        denominator = float(end * entropy.shape[-1])
+        causal_entropy = entropy[:, :end].sum(dim=(-1, -2)) / denominator
+        executed_entropy = entropy[:, start:end].sum(dim=(-1, -2)) / denominator
+        return logprob, torch.where(final_transition, executed_entropy, causal_entropy)
 
     @torch.no_grad()
     def predict_action(

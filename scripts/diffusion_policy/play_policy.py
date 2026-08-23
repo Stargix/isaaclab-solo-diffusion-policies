@@ -23,7 +23,7 @@ from typing import Any
 import numpy as np
 import torch
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _UPSTREAM_RSL_SCRIPT_DIR = _PROJECT_ROOT / "scripts" / "reinforcement_learning" / "rsl_rl"
 if str(_UPSTREAM_RSL_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_UPSTREAM_RSL_SCRIPT_DIR))
@@ -56,8 +56,8 @@ parser.add_argument("--temporal_blend_alpha", type=float, default=1.0, help="1.0
 parser.add_argument(
     "--exec_horizon",
     type=int,
-    default=8,
-    help="Execute N chunk actions before replanning; eight matches the validated baseline deployment.",
+    default=None,
+    help="Executed actions per sample; defaults to the DPPO training value or 8 for Phase A.",
 )
 parser.add_argument("--real_time_viewer", action="store_true", default=True, help="Sleep to match sim dt (GUI).")
 parser.add_argument("--no_real_time_viewer", action="store_false", dest="real_time_viewer")
@@ -440,15 +440,23 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    requested_device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    device = torch.device(requested_device)
     print(f"[INFO] Loading checkpoint: {checkpoint_path} ({device})")
 
     checkpoint = load_training_checkpoint(
         checkpoint_path,
         device,
         expected_policy_kind=("spatial_time_preview_ddpm", "spatial_reference_path_ddpm", "holonomic_reference_path_ddpm", "path_guidance_terminal_ddpm", "spatial_hindsight_geometry_ddpm"),
+        allow_dppo=True,
     )
     config_dict = checkpoint["config"]
+    if args_cli.exec_horizon is None:
+        args_cli.exec_horizon = (
+            int(checkpoint["dppo_config"]["exec_horizon"])
+            if checkpoint.get("algorithm") == "dppo"
+            else 8
+        )
     print(
         f"[INFO] policy_kind={checkpoint['policy_kind']} "
         f"goal_source={config_dict['dataset'].get('goal_source', 'achieved')}"
@@ -507,7 +515,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         raise ValueError(f"exec_horizon must be in [1, {future_horizon}].")
 
     env_cfg.scene.num_envs = args_cli.num_envs
-    env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    env_cfg.sim.device = str(device)
     env_cfg.episode_length_s = 1.0e9
     if getattr(env_cfg, "events", None):
         env_cfg.events = None

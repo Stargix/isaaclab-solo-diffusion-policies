@@ -68,7 +68,12 @@ parser.add_argument(
 )
 parser.add_argument("--warmup_steps", type=int, default=25)
 parser.add_argument("--num_inference_steps", type=int, default=None)
-parser.add_argument("--exec_horizon", type=int, default=8)
+parser.add_argument(
+    "--exec_horizon",
+    type=int,
+    default=None,
+    help="Executed actions per sample; defaults to the DPPO training value or 8 for Phase A.",
+)
 parser.add_argument("--guidance_scale", type=float, default=1.0)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument(
@@ -112,7 +117,13 @@ from train.conditioning.goal_builder import (
     build_path_guidance_goal_from_path,
 )
 from model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
-from evaluation.metrics import compute_route_metrics, point_at_progress, project_trajectory_to_polyline
+from evaluation.metrics import (
+    compute_first_task_success,
+    compute_route_metrics,
+    point_at_progress,
+    project_trajectory_to_polyline,
+    valid_post_step_mask,
+)
 from evaluation.plots import plot_route_outcomes
 from train.config import resolve_inference_steps
 from train.data.obs_utils import proprio_from_env_tensors
@@ -577,7 +588,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         raise FileExistsError(f"Canonical evaluation output directory is not empty: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    requested_device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    device = torch.device(requested_device)
     checkpoint = load_training_checkpoint(
         checkpoint_path,
         device,
@@ -585,8 +597,15 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             "spatial_time_preview_ddpm", "spatial_reference_path_ddpm", "holonomic_reference_path_ddpm",
             "path_guidance_terminal_ddpm", "spatial_hindsight_geometry_ddpm",
         ),
+        allow_dppo=True,
     )
     config = checkpoint["config"]
+    if args_cli.exec_horizon is None:
+        args_cli.exec_horizon = (
+            int(checkpoint["dppo_config"]["exec_horizon"])
+            if checkpoint.get("algorithm") == "dppo"
+            else 8
+        )
     if args_cli.path_height is not None and args_cli.path_heights is not None:
         raise ValueError("Use either --path_height or --path_heights, not both.")
     if args_cli.path_height is None and args_cli.path_heights is None:
@@ -657,7 +676,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         policy.to(device).eval()
 
     env_cfg.scene.num_envs = num_envs
-    env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    env_cfg.sim.device = str(device)
     env_cfg.episode_length_s = 1.0e9
     if hasattr(env_cfg, "seed"):
         env_cfg.seed = args_cli.seed
@@ -745,7 +764,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         elif s.path_shape == "right_angle":
             pts, yaws = build_right_angle_path(start_pos[i], start_quat[i])
         elif s.path_shape == "random_polyline":
-            pts, yaws = build_random_polyline_path(start_pos[i], start_quat[i])
+            # Pair the same repeat geometry across speeds/heights while making
+            # distinct repeats actual geometry generalization trials.
+            pts, yaws = build_random_polyline_path(
+                start_pos[i], start_quat[i], seed=args_cli.seed + s.repeat
+            )
         else:
             raise ValueError(f"Unknown shape: {s.path_shape}")
         # Analytic route builders use walk height by default. For transition
@@ -840,6 +863,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     tilts = []
     action_deltas = []
     commanded_heights = []
+    required_heights = []
     failures = np.zeros(num_envs, dtype=bool)
     failure_step = np.full(num_envs, -1, dtype=np.int64)
 
@@ -875,6 +899,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             elif goal_representation == "path11":
                 commanded_heights.append(goals[:, 8].detach().cpu().numpy())
             _, _, dones, _ = vec_env.step(action)
+            done_np = dones.cpu().numpy().astype(bool)
+            newly_failed = done_np & ~failures
             update_history(proprio_buffer, action_buffer, goal_buffer, proprio, previous_action, goals)
             previous_action = action.clone()
 
@@ -894,6 +920,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
         step_errors = []
         tangent_speeds = []
+        step_required_heights = []
         for i in range(num_envs):
             plan = path_plans[i]
             closest_idx = (
@@ -903,13 +930,14 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             )
             err = float(np.linalg.norm(pos_w[i, :2] - plan.path_w[closest_idx, :2]))
             step_errors.append(err)
+            step_required_heights.append(float(plan.path_w[closest_idx, 2]))
             tangent_idx = min(closest_idx + 1, len(plan.path_w) - 1)
             tangent = plan.path_w[tangent_idx, :2] - plan.path_w[max(0, tangent_idx - 1), :2]
             tangent_norm = float(np.linalg.norm(tangent))
             tangent = tangent / tangent_norm if tangent_norm > 1.0e-6 else np.zeros(2, dtype=np.float32)
             tangent_speeds.append(float(np.dot(vel_world[i], tangent)))
 
-            if not failures[i]:
+            if not failures[i] and not done_np[i]:
                 # Track actual vs reference relative to spawn
                 trajectories[i]["actual"].append(pos_w[i, :2] - start_pos[i, :2])
                 ref_xy = plan.path_w[closest_idx, :2] - start_pos[i, :2]
@@ -923,10 +951,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         achieved_yaws.append(yaw)
         tilts.append(tilt)
         action_deltas.append(a_delta)
+        required_heights.append(np.asarray(step_required_heights, dtype=np.float32))
 
         # Handle resets / failures
-        done_np = dones.cpu().numpy().astype(bool)
-        newly_failed = done_np & ~failures
         failure_step[newly_failed] = step + 1
         failures |= done_np
 
@@ -940,19 +967,22 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     tilts = np.stack(tilts, axis=0)
     action_deltas = np.stack(action_deltas, axis=0)
 
-    # Use the terminal height actually supplied to the policy at every step.
-    # This is the appropriate target for path11 and hindsight_geom_avg12;
-    # both schemas condition height only through their rolling terminal pose.
     if len(commanded_heights) != duration_steps:
         raise RuntimeError(f"No terminal-height command available for goal representation {goal_representation!r}.")
-    target_heights = np.stack(commanded_heights, axis=0)
+    if len(required_heights) != duration_steps:
+        raise RuntimeError("No route-height requirement was recorded during evaluation.")
+    preview_target_heights = np.stack(commanded_heights, axis=0)
+    # Primary tracking target: height required at the robot's current route
+    # progress, matching the online task reward. The terminal-preview command
+    # is retained separately to diagnose anticipatory causal response.
+    target_heights = np.stack(required_heights, axis=0)
 
     # Save summary table
     summary_rows = []
     for i, s in enumerate(scenarios):
-        mask = np.ones(duration_steps, dtype=bool)
-        if failures[i]:
-            mask[int(failure_step[i]):] = False  # Clip errors after failure
+        mask = valid_post_step_mask(
+            duration_steps, int(failure_step[i]) if failures[i] else None
+        )
         
         xy_errs = tracking_errors[:, i][mask]
         speeds_ach = achieved_speeds[:, i][mask]
@@ -966,24 +996,40 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         xy_rmse = float(np.sqrt(np.mean(np.square(xy_errs)))) if xy_errs.size else math.nan
         plan = path_plans[i]
         target_h = target_heights[:, i][mask]
+        preview_target_h = preview_target_heights[:, i][mask]
         h_rmse = float(np.sqrt(np.mean(np.square(hgts - target_h)))) if hgts.size else math.nan
+        preview_h_rmse = (
+            float(np.sqrt(np.mean(np.square(hgts - preview_target_h))))
+            if hgts.size else math.nan
+        )
         target_change_steps = np.flatnonzero(np.abs(np.diff(target_heights[:, i])) > 1.0e-5) + 1
+        preview_change_steps = np.flatnonzero(
+            np.abs(np.diff(preview_target_heights[:, i])) > 1.0e-5
+        ) + 1
         valid_steps = int(np.count_nonzero(mask))
         survived = not bool(failures[i])
         if plan.time_indexed and plan.terminal_step is not None:
             terminal_index = int(plan.terminal_step)
             target_progress_m = float(plan.cumulative_lengths[terminal_index] - plan.cumulative_lengths[0])
+            target_arc = float(plan.cumulative_lengths[terminal_index])
         else:
             # Analytic paths are longer than a finite evaluation episode at low
             # speed.  Compare against the point reachable in v*t, not always
             # against the global endpoint of the polyline.
-            target_progress_m = min(float(s.speed) * float(args_cli.duration_s), float(plan.cumulative_lengths[-1]))
-            target_arc = float(plan.cumulative_lengths[0] + target_progress_m)
+            rollout_start_progress = float(project_trajectory_to_polyline(
+                rollout_start_pos[i : i + 1, :2], plan.path_w[:, :2]
+            )[0][0])
+            remaining_path = max(
+                0.0, float(plan.cumulative_lengths[-1]) - rollout_start_progress
+            )
+            target_progress_m = min(float(s.speed) * float(args_cli.duration_s), remaining_path)
+            target_arc = rollout_start_progress + target_progress_m
             terminal_index = int(np.clip(np.searchsorted(plan.cumulative_lengths, target_arc, side="left"), 0, len(plan.path_w) - 1))
         terminal_index = int(np.clip(terminal_index, 0, len(plan.path_w) - 1))
         if trajectories[i]["actual"]:
             final_xy = np.asarray(trajectories[i]["actual"][-1]) + start_pos[i, :2]
-            terminal_position_error = float(np.linalg.norm(final_xy - plan.path_w[terminal_index, :2]))
+            terminal_target_xy = point_at_progress(plan.path_w[:, :2], target_arc)
+            terminal_position_error = float(np.linalg.norm(final_xy - terminal_target_xy))
         else:
             terminal_position_error = math.nan
         terminal_yaw_error = (
@@ -1010,6 +1056,24 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                     start_position_xy=rollout_start_pos[i, :2],
                 )
         route_values = route_metrics.to_dict() if route_metrics is not None else {}
+        task_success_applicable = bool(
+            route_metrics is not None
+            and abs(target_arc - float(plan.cumulative_lengths[-1])) <= 1.0e-4
+        )
+        task_values: dict[str, float | bool] = {}
+        if task_success_applicable:
+            task_values = compute_first_task_success(
+                relative_positions + start_pos[i, :2],
+                plan.path_w[:, :2],
+                yaws_rad=yaws_ach,
+                heights_m=hgts,
+                requested_speed_m_s=float(s.speed),
+                target_progress_m=float(route_metrics.target_progress_m),
+                target_yaw_rad=float(plan.yaws_w[terminal_index]),
+                target_height_m=float(plan.path_w[terminal_index, 2]),
+                dt=dt,
+                start_position_xy=rollout_start_pos[i, :2],
+            ).to_dict()
 
         summary_rows.append({
             "scenario_id": s.scenario_id,
@@ -1027,12 +1091,17 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             ),
             "target_height_changes": int(target_change_steps.size),
             "target_height_changes_before_failure": int(np.count_nonzero(target_change_steps < valid_steps)),
+            "preview_height_changes": int(preview_change_steps.size),
             "reference_curvature_abs_mean": mean_abs_path_curvature(path_plans[i].path_w),
             "survived": survived,
             "time_to_failure_s": float(failure_step[i] * dt) if failures[i] else args_cli.duration_s,
             "xy_rmse": xy_rmse,
             "height_rmse": h_rmse,
             "height_abs_error_mean": float(np.mean(np.abs(hgts - target_h))) if hgts.size else math.nan,
+            "preview_height_rmse": preview_h_rmse,
+            "preview_height_abs_error_mean": (
+                float(np.mean(np.abs(hgts - preview_target_h))) if hgts.size else math.nan
+            ),
             "target_progress_m": target_progress_m,
             "target_path_index": terminal_index,
             "terminal_position_error_m": terminal_position_error,
@@ -1042,6 +1111,10 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             "route_completion_ratio": route_values.get("completion_ratio", math.nan),
             "route_horizon_mean_speed_m_s": route_values.get("horizon_mean_speed_m_s", math.nan),
             "route_horizon_speed_ratio": route_values.get("horizon_speed_ratio", math.nan),
+            "route_arrived": route_values.get("arrived", math.nan),
+            "route_arrival_time_s": route_values.get("arrival_time_s", math.nan),
+            "route_arrival_mean_speed_m_s": route_values.get("arrival_mean_speed_m_s", math.nan),
+            "route_arrival_speed_ratio": route_values.get("arrival_speed_ratio", math.nan),
             "route_active_mean_speed_m_s": route_values.get("active_mean_speed_m_s", math.nan),
             "route_active_speed_ratio": route_values.get("active_speed_ratio", math.nan),
             "route_schedule_mae_m": route_values.get("schedule_mae_m", math.nan),
@@ -1049,6 +1122,15 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             "route_cross_track_rmse_m": route_values.get("cross_track_rmse_m", math.nan),
             "route_cross_track_p95_m": route_values.get("cross_track_p95_m", math.nan),
             "route_terminal_position_error_m": route_values.get("terminal_position_error_m", math.nan),
+            "task_success_applicable": task_success_applicable,
+            "task_success": task_values.get("success", False),
+            "task_success_time_s": task_values.get("time_s", math.nan),
+            "task_success_position_error_m": task_values.get("position_error_m", math.nan),
+            "task_success_yaw_error_rad": task_values.get("yaw_error_rad", math.nan),
+            "task_success_height_error_m": task_values.get("height_error_m", math.nan),
+            "task_success_mean_speed_error_m_s": task_values.get(
+                "mean_speed_error_m_s", math.nan
+            ),
             "final_relative_x_m": float(final_relative_xy[0]),
             "final_relative_y_m": float(final_relative_xy[1]),
             "terminal_yaw_error_rad": terminal_yaw_error,
@@ -1223,9 +1305,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         if not candidates:
             continue
         i, scenario = candidates[0]
-        valid = np.ones(duration_steps, dtype=bool)
-        if failures[i]:
-            valid[int(failure_step[i]):] = False
+        valid = valid_post_step_mask(
+            duration_steps, int(failure_step[i]) if failures[i] else None
+        )
         measured = achieved_heights[:, i].copy()
         measured[~valid] = np.nan
         if args_cli.height_profile in {"interleaved", "random"}:
@@ -1234,7 +1316,15 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             label = f"constant {requested_height:.4f} m"
         else:
             label = "constant" if fraction is None else f"transition at {fraction:.0%}"
-        ax.plot(time_axis, target_heights[:, i], linestyle="--", linewidth=2.0, label=f"target ({label})")
+        ax.plot(time_axis, target_heights[:, i], linestyle="--", linewidth=2.0, label=f"required ({label})")
+        ax.plot(
+            time_axis,
+            preview_target_heights[:, i],
+            linestyle=":",
+            linewidth=1.2,
+            alpha=0.8,
+            label=f"policy preview ({label})",
+        )
         ax.plot(time_axis, measured, linewidth=1.5, alpha=0.9, label=f"actual ({label})")
         plotted = True
     if plotted:
@@ -1291,9 +1381,14 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         speeds_ach = []
         speeds_std = []
         for v in speeds_req:
-            vals = [r["achieved_tangent_speed_mean"] for r in subset if r["requested_speed"] == v]
-            speeds_ach.append(np.mean(vals) if vals else np.nan)
-            speeds_std.append(np.std(vals) if vals else np.nan)
+            vals = np.asarray([
+                r["route_arrival_mean_speed_m_s"]
+                for r in subset
+                if r["requested_speed"] == v
+            ], dtype=np.float64)
+            vals = vals[np.isfinite(vals)]
+            speeds_ach.append(np.mean(vals) if vals.size else np.nan)
+            speeds_std.append(np.std(vals) if vals.size else np.nan)
         
         speeds_ach = np.array(speeds_ach)
         speeds_std = np.array(speeds_std)
@@ -1309,8 +1404,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             )
             
     axes[0].set_xlabel("Requested Speed [m/s]", fontsize=10, labelpad=8)
-    axes[0].set_ylabel("Achieved Speed [m/s]", fontsize=10, labelpad=8)
-    axes[0].set_title("Speed Tracking Accuracy", fontsize=12, fontweight="bold", pad=12, color="#222222")
+    axes[0].set_ylabel("Mean speed to endpoint [m/s]", fontsize=10, labelpad=8)
+    axes[0].set_title("Finite-route arrival speed", fontsize=12, fontweight="bold", pad=12, color="#222222")
     axes[0].grid(True, color="#e5e5e5", linestyle="-", linewidth=0.5)
     axes[0].spines["top"].set_visible(False)
     axes[0].spines["right"].set_visible(False)
@@ -1397,6 +1492,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
     # Write overall validation JSON summary
     global_survival = sum([r["survived"] for r in summary_rows]) / len(summary_rows)
+    route_rows = [
+        row for row in summary_rows
+        if np.isfinite(float(row["route_target_progress_m"]))
+    ]
+    task_rows = [row for row in summary_rows if row["task_success_applicable"]]
     overall_summary = {
         "timestamp": datetime.now().isoformat(),
         "task": args_cli.task,
@@ -1428,6 +1528,18 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         "overall_survival_rate": global_survival,
         "overall_route_completion_ratio": finite_mean(summary_rows, "route_completion_ratio"),
         "overall_route_horizon_speed_ratio": finite_mean(summary_rows, "route_horizon_speed_ratio"),
+        "overall_route_arrival_rate": (
+            sum(bool(row["route_arrived"]) for row in route_rows) / len(route_rows)
+            if route_rows else None
+        ),
+        "overall_route_arrival_speed_ratio": finite_mean(
+            summary_rows, "route_arrival_speed_ratio"
+        ),
+        "overall_task_success_rate": (
+            sum(bool(row["task_success"]) for row in task_rows) / len(task_rows)
+            if task_rows else None
+        ),
+        "task_success_scenarios": len(task_rows),
         "overall_route_cross_track_rmse_m": finite_mean(summary_rows, "route_cross_track_rmse_m"),
         "overall_route_terminal_position_error_m": finite_mean(
             summary_rows, "route_terminal_position_error_m"
@@ -1435,6 +1547,17 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         "survival_by_path": {
             shape: sum([r["survived"] for r in summary_rows if r["path_shape"] == shape]) / sum([1 for r in summary_rows if r["path_shape"] == shape])
             for shape in shapes
+        },
+        "arrival_rate_by_path": {
+            shape: (
+                sum(
+                    bool(row["route_arrived"])
+                    for row in route_rows if row["path_shape"] == shape
+                )
+                / sum(1 for row in route_rows if row["path_shape"] == shape)
+            )
+            for shape in shapes
+            if any(row["path_shape"] == shape for row in route_rows)
         },
         "mean_xy_rmse_by_path": {
             shape: float(np.nanmean([r["xy_rmse"] for r in summary_rows if r["path_shape"] == shape and r["survived"]]))

@@ -35,7 +35,7 @@ class UpdateMetrics:
             "Policy/approximate_kl": self.approximate_kl / actor_divisor,
             "Policy/clip_fraction": self.clip_fraction / actor_divisor,
             "Policy/ratio_mean": self.ratio_mean / actor_divisor,
-            "Policy/entropy": self.entropy / actor_divisor,
+            "Policy/fixed_transition_entropy": self.entropy / actor_divisor,
             "Policy/actor_grad_norm": self.actor_grad_norm / actor_divisor,
             "Policy/critic_grad_norm": self.critic_grad_norm / critic_divisor,
             "Policy/actor_updates": float(self.actor_updates),
@@ -71,6 +71,23 @@ class DPPOUpdater:
             low, high = torch.quantile(normalized, torch.tensor([q, 1.0 - q], device=normalized.device))
             normalized = normalized.clamp(low, high)
         return normalized
+
+    @staticmethod
+    def _value_loss(
+        value: torch.Tensor,
+        old_value: torch.Tensor,
+        returns: torch.Tensor,
+        *,
+        value_clip: float | None,
+        use_clipping: bool,
+    ) -> torch.Tensor:
+        loss_unclipped = (value - returns).square()
+        if value_clip is None or not use_clipping:
+            return 0.5 * loss_unclipped.mean()
+        delta = (value - old_value).clamp(-value_clip, value_clip)
+        clipped_value = old_value + delta
+        loss_clipped = (clipped_value - returns).square()
+        return 0.5 * torch.maximum(loss_unclipped, loss_clipped).mean()
 
     def update(self, rollout: RolloutBatch, *, update_actor: bool = True) -> dict[str, float]:
         batch = rollout.flatten()
@@ -136,11 +153,15 @@ class DPPOUpdater:
             for start in range(0, physical_count, self.cfg.critic_minibatch_size):
                 index = permutation[start : start + self.cfg.critic_minibatch_size]
                 value = self.critic(batch.critic_observation[index])
-                delta = (value - batch.old_values[index]).clamp(-self.cfg.value_clip, self.cfg.value_clip)
-                clipped_value = batch.old_values[index] + delta
-                loss_unclipped = (value - batch.returns[index]).square()
-                loss_clipped = (clipped_value - batch.returns[index]).square()
-                value_loss = 0.5 * torch.maximum(loss_unclipped, loss_clipped).mean()
+                # Never clip critic-only warm-up: with a distant target the
+                # clipped branch can otherwise have exactly zero gradient.
+                value_loss = self._value_loss(
+                    value,
+                    batch.old_values[index],
+                    batch.returns[index],
+                    value_clip=self.cfg.value_clip,
+                    use_clipping=update_actor,
+                )
                 self.critic_optimizer.zero_grad(set_to_none=True)
                 (self.cfg.value_coef * value_loss).backward()
                 grad_norm = torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.cfg.max_grad_norm)

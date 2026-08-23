@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+
 import numpy as np
 import pytest
 import torch
@@ -8,19 +10,20 @@ from scripts.diffusion_policy.model.solo12_diffusion_policy import Solo12Diffusi
 from scripts.diffusion_policy.train.data.normalization import MinMaxStats, NormalizerStats, ZScoreStats
 from scripts.dppo_diffusion_rl.config import DPPOConfig
 from scripts.dppo_diffusion_rl.buffer import RolloutBatch
+from scripts.dppo_diffusion_rl.checkpointing import restore_training_state
 from scripts.dppo_diffusion_rl.critic import ValueCritic
 from scripts.dppo_diffusion_rl.policy import DPPODiffusionPolicy
 from scripts.dppo_diffusion_rl.ppo import DPPOUpdater
 
 
-def _policy() -> DPPODiffusionPolicy:
+def _policy(prediction_horizon: int = 4) -> DPPODiffusionPolicy:
     policy_cfg = Solo12DiffusionPolicyConfig(
         proprio_dim=3,
         action_hist_dim=2,
         goal_dim=2,
         action_dim=2,
         history=2,
-        prediction_horizon=4,
+        prediction_horizon=prediction_horizon,
         execution_offset=2,
         d_model=16,
         nhead=2,
@@ -66,6 +69,75 @@ def test_behavior_logprob_is_reproduced_exactly() -> None:
     )
     old_logprob = sample.old_logprobs[batch, denoise]
     torch.testing.assert_close(new_logprob, old_logprob, atol=2.0e-6, rtol=2.0e-6)
+
+
+def test_logprob_support_matches_the_reward_causal_cone() -> None:
+    policy = _policy(prediction_horizon=6)
+    mean = torch.zeros(1, 6, 2)
+    std = torch.ones(1, 1, 1)
+    next_sample = torch.zeros_like(mean)
+    next_sample[:, :2] = 2.0
+    before_final = policy._reward_relevant_logprob(
+        mean, std, next_sample, final_transition=False
+    )
+    final = policy._reward_relevant_logprob(
+        mean, std, next_sample, final_transition=True
+    )
+    elementwise = torch.distributions.Normal(mean, std).log_prob(next_sample).clamp(-5.0, 2.0)
+    expected = elementwise[:, :4].mean(dim=(-1, -2))
+    executed_only = elementwise[:, 2:4].sum(dim=(-1, -2)) / (4 * elementwise.shape[-1])
+    torch.testing.assert_close(before_final, expected)
+    torch.testing.assert_close(final, executed_only)
+    assert not torch.allclose(before_final, final)
+
+
+def test_mixed_transition_batch_uses_per_sample_support() -> None:
+    policy = _policy(prediction_horizon=6)
+    mean = torch.zeros(2, 6, 2)
+    std = torch.ones(2, 1, 1)
+    next_sample = torch.zeros_like(mean)
+    next_sample[:, :2] = 2.0
+    mixed = policy._reward_relevant_logprob(
+        mean,
+        std,
+        next_sample,
+        final_transition=torch.tensor([False, True]),
+    )
+    assert mixed[0] != mixed[1]
+
+
+def test_executed_token_has_same_scale_at_every_denoising_step() -> None:
+    policy = _policy(prediction_horizon=6)
+    mean = torch.zeros(1, 6, 2)
+    std = torch.ones(1, 1, 1)
+    baseline = torch.zeros_like(mean)
+    perturbed = baseline.clone()
+    perturbed[:, 2, 0] = 1.0
+    deltas = []
+    for final in (False, True):
+        base_logprob = policy._reward_relevant_logprob(
+            mean, std, baseline, final_transition=final
+        )
+        changed_logprob = policy._reward_relevant_logprob(
+            mean, std, perturbed, final_transition=final
+        )
+        deltas.append(changed_logprob - base_logprob)
+    torch.testing.assert_close(deltas[0], deltas[1])
+
+
+def test_transformer_causality_matches_likelihood_support() -> None:
+    policy = _policy(prediction_horizon=6)
+    trajectory = torch.randn(1, 6, 2, requires_grad=True)
+    output = policy.policy.model(
+        trajectory,
+        torch.zeros(1, 2, 3),
+        torch.zeros(1, 2, 2),
+        torch.zeros(1, 2, 2),
+        torch.ones(1, dtype=torch.long),
+    )
+    gradient = torch.autograd.grad(output[:, 2:4].sum(), trajectory)[0]
+    assert float(gradient[:, :2].abs().sum()) > 0.0
+    torch.testing.assert_close(gradient[:, 4:], torch.zeros_like(gradient[:, 4:]))
 
 
 def test_base_is_frozen_and_dropout_is_disabled() -> None:
@@ -151,3 +223,68 @@ def test_one_synthetic_ppo_update_is_finite_and_preserves_base() -> None:
     assert all(np.isfinite(value) for value in metrics.values())
     for name, value in policy.base_model.state_dict().items():
         torch.testing.assert_close(value, base_before[name])
+
+
+def test_rare_positive_advantage_is_not_clipped_away() -> None:
+    policy = _policy()
+    critic = ValueCritic(7, hidden_dims=(16, 8))
+    updater = DPPOUpdater(policy, critic, policy.dppo_cfg)
+    advantages = torch.cat((torch.full((999,), -1.0), torch.tensor([10.0])))
+    normalized = updater._normalized_advantages(advantages)
+    assert normalized[-1] > 0.0
+    assert normalized[-1] == normalized.max()
+
+
+def test_critic_warmup_has_gradient_for_distant_return() -> None:
+    value = torch.tensor([1.0], requires_grad=True)
+    loss = DPPOUpdater._value_loss(
+        value,
+        torch.tensor([0.0]),
+        torch.tensor([10.0]),
+        value_clip=0.2,
+        use_clipping=False,
+    )
+    loss.backward()
+    assert value.grad is not None
+    assert abs(float(value.grad)) > 1.0
+
+
+def test_resume_reapplies_explicit_optimizer_hyperparameters() -> None:
+    policy = _policy()
+    critic = ValueCritic(7, hidden_dims=(16, 8))
+    updater = DPPOUpdater(policy, critic, policy.dppo_cfg)
+    actor_state = copy.deepcopy(updater.actor_optimizer.state_dict())
+    critic_state = copy.deepcopy(updater.critic_optimizer.state_dict())
+    actor_state["param_groups"][0]["lr"] = 0.5
+    critic_state["param_groups"][0]["lr"] = 0.5
+    checkpoint = {
+        "algorithm": "dppo",
+        "critic_state_dict": critic.state_dict(),
+        "actor_optimizer_state_dict": actor_state,
+        "critic_optimizer_state_dict": critic_state,
+    }
+    restore_training_state(checkpoint, critic, updater)
+    assert updater.actor_optimizer.param_groups[0]["lr"] == policy.dppo_cfg.actor_lr
+    assert updater.critic_optimizer.param_groups[0]["lr"] == policy.dppo_cfg.critic_lr
+
+
+def test_invalid_zero_clip_schedule_rate_is_rejected() -> None:
+    cfg = DPPOConfig(clip_ratio_rate=0.0)
+    with pytest.raises(ValueError, match="clip_ratio_rate"):
+        cfg.validate(prediction_horizon=16, execution_offset=8)
+
+
+def test_discount_below_one_is_rejected_for_endpoint_potentials() -> None:
+    cfg = DPPOConfig(gamma=0.995)
+    with pytest.raises(ValueError, match="gamma must be 1.0"):
+        cfg.validate(prediction_horizon=16, execution_offset=8)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("target_kl", 0.0), ("value_coef", 0.0), ("max_grad_norm", 0.0)),
+)
+def test_invalid_positive_optimizer_controls_are_rejected(field: str, value: float) -> None:
+    cfg = DPPOConfig(**{field: value})
+    with pytest.raises(ValueError, match=field):
+        cfg.validate(prediction_horizon=16, execution_offset=8)

@@ -24,13 +24,25 @@ parser.add_argument("--num_envs", type=int, default=2048)
 parser.add_argument("--iterations", type=int, default=1000, help="Additional PPO iterations to run.")
 parser.add_argument("--rollout_chunks", type=int, default=32)
 parser.add_argument("--episode_length_s", type=float, default=24.0)
+parser.add_argument("--route_stage", type=int, choices=(0, 1, 2), default=2)
+parser.add_argument(
+    "--route_speed_max_mps",
+    type=float,
+    default=None,
+    help="Optional speed cap for controlled support/stage ablations.",
+)
 parser.add_argument("--save_interval", type=int, default=25)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--inference_steps", type=int, default=10)
 parser.add_argument("--finetune_denoising_steps", type=int, default=5)
 parser.add_argument("--exec_horizon", type=int, default=4)
 parser.add_argument("--min_denoising_std", type=float, default=0.10)
-parser.add_argument("--gamma", type=float, default=0.995)
+parser.add_argument(
+    "--gamma",
+    type=float,
+    default=1.0,
+    help="Physical discount; 1.0 preserves the terminal average-speed objective exactly.",
+)
 parser.add_argument("--gae_lambda", type=float, default=0.95)
 parser.add_argument("--gamma_denoising", type=float, default=0.99)
 parser.add_argument("--actor_lr", type=float, default=1.0e-5)
@@ -42,6 +54,12 @@ parser.add_argument("--update_epochs", type=int, default=5)
 parser.add_argument("--minibatch_size", type=int, default=8192)
 parser.add_argument("--critic_minibatch_size", type=int, default=4096)
 parser.add_argument("--critic_warmup_iterations", type=int, default=10)
+parser.add_argument(
+    "--value_clip",
+    type=float,
+    default=None,
+    help="Optional PPO value clipping; disabled by default as in official DPPO.",
+)
 parser.add_argument("--wandb", action="store_true")
 parser.add_argument("--wandb_project", default="solo12-dppo")
 parser.add_argument("--wandb_entity", default=None)
@@ -88,6 +106,7 @@ def _dppo_config() -> DPPOConfig:
         minibatch_size=args_cli.minibatch_size,
         critic_minibatch_size=args_cli.critic_minibatch_size,
         critic_warmup_iterations=args_cli.critic_warmup_iterations,
+        value_clip=args_cli.value_clip,
     )
 
 
@@ -102,7 +121,6 @@ def main() -> None:
     if not checkpoint_path.is_file():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
     output_dir = _output_directory()
-    output_dir.mkdir(parents=True, exist_ok=True)
     dppo_cfg = _dppo_config()
 
     env_cfg = parse_env_cfg(
@@ -115,11 +133,30 @@ def main() -> None:
     if args_cli.episode_length_s <= 0.0:
         raise ValueError("episode_length_s must be positive.")
     env_cfg.episode_length_s = float(args_cli.episode_length_s)
+    env_cfg.route_stage = int(args_cli.route_stage)
+    env_cfg.route_speed_max_mps = args_cli.route_speed_max_mps
     env = gym.make(args_cli.task, cfg=env_cfg)
     device = torch.device(env.unwrapped.device)
     source_checkpoint, policy, start_iteration = load_policy_checkpoint(
         checkpoint_path, device, dppo_cfg
     )
+    existing_run_artifacts = (
+        "metrics.jsonl", "run_config.json", "best.pt", "last.pt"
+    )
+    populated = output_dir.exists() and any(
+        (output_dir / name).exists() for name in existing_run_artifacts
+    )
+    resuming_same_run = (
+        source_checkpoint.get("algorithm") == "dppo"
+        and checkpoint_path.parent == output_dir
+    )
+    if populated and not resuming_same_run:
+        env.close()
+        raise FileExistsError(
+            f"Refusing to mix DPPO runs in populated output directory: {output_dir}. "
+            "Choose a new directory, or resume a checkpoint stored in this directory."
+        )
+    output_dir.mkdir(parents=True, exist_ok=True)
     critic_input_dim = policy.cfg.history * (
         policy.cfg.proprio_dim + policy.cfg.action_hist_dim + policy.cfg.goal_dim
     ) + CRITIC_FEATURE_DIM

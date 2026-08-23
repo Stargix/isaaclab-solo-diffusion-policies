@@ -65,7 +65,14 @@ class RouteBank:
         self.route_kind = torch.zeros(num_envs, dtype=torch.long, device=self.device)
         self._kind_sample_counter = 0
 
-    def reset(self, env_ids: torch.Tensor, stage: int, *, stratified: bool = False) -> None:
+    def reset(
+        self,
+        env_ids: torch.Tensor,
+        stage: int,
+        *,
+        stratified: bool = False,
+        speed_max: float | None = None,
+    ) -> None:
         """Sample routes; stages implement fixed-to-random curriculum."""
 
         count = len(env_ids)
@@ -124,7 +131,11 @@ class RouteBank:
         self.height[env_ids] = height
         self.arc[env_ids] = arc
         self.length[env_ids] = arc[:, -1]
-        speed_hi = 0.4 if stage <= 0 else 0.5 if stage == 1 else 0.6
+        speed_hi = float(speed_max) if speed_max is not None else (
+            0.4 if stage <= 0 else 0.5 if stage == 1 else 0.6
+        )
+        if speed_hi < 0.2:
+            raise ValueError("speed_max must be at least 0.2 m/s.")
         self.speed[env_ids] = torch.empty(count, device=self.device).uniform_(0.2, speed_hi)
         self.route_kind[env_ids] = kind
         self.progress_idx[env_ids] = 0
