@@ -11,7 +11,7 @@ from typing import Any
 import torch
 
 from .buffer import RolloutBatch
-from .checkpointing import restore_training_state, save_checkpoint
+from .checkpointing import save_checkpoint
 from .critic import ValueCritic
 from .policy import DPPODiffusionPolicy
 from .ppo import DPPOUpdater
@@ -24,6 +24,7 @@ class EpisodeAccumulator:
     base_contact: float = 0.0
     corridor_failure: float = 0.0
     terminal_overshoot: float = 0.0
+    arrival_failure: float = 0.0
     progress_fraction: float = 0.0
     mean_speed_error_abs_mps: float = 0.0
     terminal_distance_m: float = 0.0
@@ -44,6 +45,7 @@ class EpisodeAccumulator:
             "base_contact",
             "corridor_failure",
             "terminal_overshoot",
+            "arrival_failure",
             "progress_fraction",
             "mean_speed_error_abs_mps",
             "terminal_distance_m",
@@ -58,6 +60,7 @@ class EpisodeAccumulator:
             "Episode/base_contact_rate": self.base_contact / divisor,
             "Episode/corridor_failure_rate": self.corridor_failure / divisor,
             "Episode/terminal_overshoot_rate": self.terminal_overshoot / divisor,
+            "Episode/arrival_failure_rate": self.arrival_failure / divisor,
             "Episode/progress_fraction": self.progress_fraction / divisor,
             "Episode/mean_speed_error_abs_mps": self.mean_speed_error_abs_mps / divisor,
             "Episode/terminal_distance_m": self.terminal_distance_m / divisor,
@@ -78,6 +81,7 @@ class DPPOTrainer:
         output_dir: str | Path,
         rollout_chunks: int,
         start_iteration: int = 0,
+        initial_total_physics_steps: int = 0,
         save_interval: int = 25,
         logger=None,
     ):
@@ -112,7 +116,7 @@ class DPPOTrainer:
             self.num_envs, self.policy.cfg.action_dim, device=self.device
         )
         self.running_episode_return = torch.zeros(self.num_envs, device=self.device)
-        self.total_physics_steps = int(source_checkpoint.get("total_physics_steps", 0))
+        self.total_physics_steps = int(initial_total_physics_steps)
         continuing_same_output = (
             Path(source_checkpoint_path).resolve().parent == self.output_dir.resolve()
         )
@@ -269,8 +273,9 @@ class DPPOTrainer:
             - metrics["Episode/base_contact_rate"]
             - 0.5 * metrics["Episode/corridor_failure_rate"]
             - 0.5 * metrics["Episode/terminal_overshoot_rate"]
+            - 0.5 * metrics.get("Episode/arrival_failure_rate", 0.0)
             + 0.10 * metrics["Episode/progress_fraction"]
-            - 0.02 * metrics["Episode/mean_speed_error_abs_mps"]
+            - 0.50 * metrics["Episode/mean_speed_error_abs_mps"]
             - 0.01 * metrics["Episode/terminal_distance_m"]
         )
 
@@ -328,6 +333,7 @@ class DPPOTrainer:
             print(
                 f"[DPPO {iteration:05d}] reward={metrics['Rollout/reward_mean']:+.3f} "
                 f"success={metrics['Episode/success_rate']:.3f} "
+                f"arrival_fail={metrics['Episode/arrival_failure_rate']:.3f} "
                 f"fall={metrics['Episode/base_contact_rate']:.3f} "
                 f"progress={metrics['Episode/progress_fraction']:.3f} "
                 f"speed_err={metrics['Episode/mean_speed_error_abs_mps']:.3f} "

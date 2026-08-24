@@ -35,7 +35,7 @@ class RouteMetrics:
 
 @dataclass(frozen=True)
 class TaskSuccessMetrics:
-    """First joint satisfaction of the terminal constraints used by DPPO."""
+    """Task result evaluated at the first valid entry into the goal region."""
 
     success: bool
     time_s: float
@@ -259,10 +259,10 @@ def compute_first_task_success(
 ) -> TaskSuccessMetrics:
     """Reproduce the DPPO terminal predicate on an offline trajectory.
 
-    A prior corridor violation is absorbing, as it is during training.  The
-    returned time is the first sampled instant where position, pose and
-    route-average speed are all valid; it is intentionally separate from the
-    looser route-completion diagnostic.
+    A prior corridor or overshoot violation is absorbing, as it is during
+    training. Position defines the first arrival event. Pose, height and mean
+    route speed are evaluated exactly once at that event, so arriving early
+    and waiting at the endpoint cannot turn a failed attempt into success.
     """
 
     positions = np.asarray(positions_xy, dtype=np.float64)
@@ -299,11 +299,7 @@ def compute_first_task_success(
         np.sin(target_yaw_rad - yaws), np.cos(target_yaw_rad - yaws)
     ))
     height_error = np.abs(heights - target_height_m)
-    mean_speed_error = np.where(
-        elapsed >= 0.5,
-        progress / np.maximum(elapsed, 0.5) - requested_speed_m_s,
-        0.0,
-    )
+    arrival_speed_error = target_progress_m / elapsed - requested_speed_m_s
     # RouteBank uses min(0.12 m, 5% of route length) as its near-terminal gate.
     near_terminal_distance = min(0.12, 0.05 * target_progress_m)
     near_terminal = target_progress_m - progress <= near_terminal_distance
@@ -314,24 +310,26 @@ def compute_first_task_success(
         + np.sin(target_yaw_rad) * (positions[:, 1] - target_point[1])
     )
     overshoot_absorbed = np.maximum.accumulate(near_terminal & (terminal_along_error > 0.50))
-    valid = (
+    valid_arrival = (
         near_terminal
         & (position_error <= position_tolerance_m)
-        & (yaw_error <= yaw_tolerance_rad)
-        & (height_error <= height_tolerance_m)
-        & (np.abs(mean_speed_error) <= mean_speed_tolerance_m_s)
         & ~corridor_absorbed
         & ~overshoot_absorbed
     )
-    candidates = np.flatnonzero(valid)
+    candidates = np.flatnonzero(valid_arrival)
     if not candidates.size:
         return TaskSuccessMetrics(False, *(float("nan"),) * 5)
     index = int(candidates[0])
+    success = bool(
+        yaw_error[index] <= yaw_tolerance_rad
+        and height_error[index] <= height_tolerance_m
+        and abs(arrival_speed_error[index]) <= mean_speed_tolerance_m_s
+    )
     return TaskSuccessMetrics(
-        True,
+        success,
         float(elapsed[index]),
         float(position_error[index]),
         float(yaw_error[index]),
         float(height_error[index]),
-        float(mean_speed_error[index]),
+        float(arrival_speed_error[index]),
     )

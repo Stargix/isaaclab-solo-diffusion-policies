@@ -3,7 +3,11 @@ from __future__ import annotations
 import pytest
 import torch
 
-from scripts.dppo_diffusion_rl.checkpointing import load_policy_checkpoint
+from scripts.dppo_diffusion_rl.checkpointing import (
+    DPPO_TASK_CONTRACT_VERSION,
+    load_policy_checkpoint,
+    training_resume_state,
+)
 from scripts.dppo_diffusion_rl.config import DPPOConfig
 from scripts.diffusion_policy.train.conditioning.goal_builder import (
     GEOMETRIC_HINDSIGHT_GOAL_SCHEMA_NAME,
@@ -47,3 +51,24 @@ def test_dppo_loader_rejects_checkpoint_without_padded_starts(monkeypatch) -> No
     )
     with pytest.raises(ValueError, match="include_padded_starts=true"):
         load_policy_checkpoint("unused.pt", torch.device("cpu"), DPPOConfig())
+
+
+def test_legacy_task_contract_requires_clean_optimization_restart() -> None:
+    legacy = {
+        "algorithm": "dppo",
+        "iteration": 69,
+        "total_physics_steps": 1234,
+    }
+    with pytest.raises(ValueError, match="--restart_optimization"):
+        training_resume_state(legacy, restart_optimization=False)
+    assert training_resume_state(legacy, restart_optimization=True) == (0, 0, False)
+
+
+def test_current_task_contract_resumes_optimizer_and_counters() -> None:
+    current = {
+        "algorithm": "dppo",
+        "dppo_task_contract_version": DPPO_TASK_CONTRACT_VERSION,
+        "iteration": 12,
+        "total_physics_steps": 3456,
+    }
+    assert training_resume_state(current, restart_optimization=False) == (13, 3456, True)

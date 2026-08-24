@@ -162,6 +162,33 @@ def test_selection_score_penalizes_overshoot_and_terminal_distance() -> None:
     assert near > far > overshoot
 
 
+def test_selection_score_prefers_accurate_first_arrival() -> None:
+    common = {
+        "Episode/completed": 1.0,
+        "Episode/success_rate": 0.0,
+        "Episode/base_contact_rate": 0.0,
+        "Episode/corridor_failure_rate": 0.0,
+        "Episode/terminal_overshoot_rate": 0.0,
+        "Episode/progress_fraction": 1.0,
+        "Episode/terminal_distance_m": 0.1,
+    }
+    accurate = DPPOTrainer._selection_score(
+        {
+            **common,
+            "Episode/arrival_failure_rate": 0.0,
+            "Episode/mean_speed_error_abs_mps": 0.02,
+        }
+    )
+    early = DPPOTrainer._selection_score(
+        {
+            **common,
+            "Episode/arrival_failure_rate": 1.0,
+            "Episode/mean_speed_error_abs_mps": 0.20,
+        }
+    )
+    assert accurate > early
+
+
 def test_historical_best_score_is_only_reused_in_place(tmp_path) -> None:
     source = {"algorithm": "dppo", "best_score": 3.0}
     old_dir = tmp_path / "old"

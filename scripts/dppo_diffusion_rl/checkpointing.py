@@ -20,6 +20,41 @@ from .ppo import DPPOUpdater
 
 
 DPPO_CHECKPOINT_VERSION = 1
+DPPO_TASK_CONTRACT_VERSION = 2
+
+
+def training_resume_state(
+    checkpoint: dict[str, Any], *, restart_optimization: bool
+) -> tuple[int, int, bool]:
+    """Return iteration, physics-step count and whether optimizer state is valid.
+
+    A critic and Adam moments estimate a particular reward/termination return.
+    They must not be restored across a task-contract change. Actor weights are
+    still loaded by :func:`load_policy_checkpoint` and provide the warm start.
+    """
+
+    if checkpoint.get("algorithm") != "dppo":
+        if restart_optimization:
+            raise ValueError(
+                "--restart_optimization is only valid for a DPPO checkpoint; "
+                "a Phase-A checkpoint already starts with fresh optimization state."
+            )
+        return 0, 0, False
+    saved_contract = int(checkpoint.get("dppo_task_contract_version", 1))
+    if saved_contract != DPPO_TASK_CONTRACT_VERSION and not restart_optimization:
+        raise ValueError(
+            "This DPPO checkpoint was trained with task contract "
+            f"v{saved_contract}, but the current environment uses v{DPPO_TASK_CONTRACT_VERSION}. "
+            "Start a new output directory with --restart_optimization to keep the actor "
+            "while resetting the critic and Adam states."
+        )
+    if restart_optimization:
+        return 0, 0, False
+    return (
+        int(checkpoint.get("iteration", -1)) + 1,
+        int(checkpoint.get("total_physics_steps", 0)),
+        True,
+    )
 
 
 def sha256_file(path: str | Path) -> str:
@@ -178,6 +213,7 @@ def save_checkpoint(
         "ema_model_state_dict": policy.actor_policy_state_dict(),
         "algorithm": "dppo",
         "dppo_checkpoint_version": DPPO_CHECKPOINT_VERSION,
+        "dppo_task_contract_version": DPPO_TASK_CONTRACT_VERSION,
         "dppo_config": policy.dppo_cfg.to_dict(),
         "dppo_base_model_state_dict": policy.base_model_state_dict(),
         "critic_state_dict": critic.state_dict(),

@@ -20,6 +20,7 @@ class TaskRewardWeights:
     terminal_yaw: float = 0.5
     terminal_height: float = 1.0
     success: float = 10.0
+    arrival_failure: float = 10.0
     timeout_failure: float = 10.0
     hard_failure_margin: float = 2.0
     fall_extra: float = 10.0
@@ -90,8 +91,9 @@ def schedule_error_improvement(
         (progress - progress_delta).clamp_min(0.0), route_length
     )
     # Do not cap the schedule at the endpoint: |L-v*t| must remain non-zero
-    # when the route is completed late. At the desired arrival time it is zero;
-    # an early arrival can wait until that instant and recover the potential.
+    # when the route is completed late. The environment terminates on the first
+    # entry into the goal region, so an early arrival cannot recover this error
+    # by waiting at the endpoint.
     current_schedule = desired_speed * elapsed_s.clamp_min(0.0)
     previous_schedule = desired_speed * (elapsed_s - dt).clamp_min(0.0)
     previous_error = (previous_progress - previous_schedule).abs()
@@ -142,6 +144,7 @@ def path_task_reward(
     projected_gravity_xy: torch.Tensor,
     vertical_velocity: torch.Tensor,
     success: torch.Tensor,
+    arrival_failure: torch.Tensor,
     timeout_failure: torch.Tensor,
     corridor_failure: torch.Tensor,
     overshoot_failure: torch.Tensor,
@@ -184,6 +187,7 @@ def path_task_reward(
         * bounded_huber(vertical_velocity, scales.vertical_velocity_mps)
         * distance,
         "success": weights.success * success.float(),
+        "arrival_failure": -weights.arrival_failure * arrival_failure.float(),
         "timeout_failure": -weights.timeout_failure * timeout_failure.float(),
         "hard_failure": -hard_failure_cost * hard_failure.float(),
         "fall": -(hard_failure_cost + weights.fall_extra) * fell.float(),

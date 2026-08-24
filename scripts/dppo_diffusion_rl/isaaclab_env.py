@@ -96,6 +96,7 @@ class DPPODiffusionEnv(Solo12Env):
         self._goal = torch.zeros(self.num_envs, 12, device=self.device)
         self._task_step = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._success = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._arrival_failure = torch.zeros_like(self._success)
         self._base_contact_failure = torch.zeros_like(self._success)
         self._corridor_failure = torch.zeros_like(self._success)
         self._overshoot_failure = torch.zeros_like(self._success)
@@ -196,28 +197,41 @@ class DPPODiffusionEnv(Solo12Env):
             torch.sin(self._routes.yaw[:, -1] - self._robot_yaw()),
             torch.cos(self._routes.yaw[:, -1] - self._robot_yaw()),
         )
+        elapsed_s = self._task_step.float() * self.step_dt
         mean_speed_error = self._mean_speed_error(state)
         corridor = state.cross_track.abs() > self.cfg.corridor_half_width_m
         overshoot = state.near_terminal & (state.terminal_along_error > self.cfg.terminal_overshoot_m)
+        arrival = state.near_terminal & (
+            state.terminal_distance <= self.cfg.route_goal_tolerance_m
+        )
+        # The timing objective is route length divided by first-arrival time.
+        # Using the full route length avoids redefining the task as a shorter
+        # route merely because the goal is represented by a tolerance region.
+        arrival_speed_error = (
+            self._routes.length / elapsed_s.clamp_min(self.step_dt) - self._routes.speed
+        )
         success = (
-            state.near_terminal
-            & (state.terminal_distance <= self.cfg.route_goal_tolerance_m)
+            arrival
             & (terminal_yaw_error.abs() <= self.cfg.terminal_yaw_tolerance_rad)
             & (
                 (self._base_height() - self._routes.height[:, -1]).abs()
                 <= self.cfg.terminal_height_tolerance_m
             )
-            & (mean_speed_error.abs() <= self.cfg.terminal_mean_speed_tolerance_mps)
+            & (arrival_speed_error.abs() <= self.cfg.terminal_mean_speed_tolerance_mps)
             & ~contact
             & ~corridor
             & ~overshoot
         )
+        arrival_failure = arrival & ~success & ~contact & ~corridor & ~overshoot
         self._success.copy_(success)
+        self._arrival_failure.copy_(arrival_failure)
         self._base_contact_failure.copy_(contact)
         self._corridor_failure.copy_(corridor)
         self._overshoot_failure.copy_(overshoot)
-        self._last_mean_speed_error.copy_(mean_speed_error)
-        terminated = contact | corridor | overshoot | success
+        self._last_mean_speed_error.copy_(
+            torch.where(arrival, arrival_speed_error, mean_speed_error)
+        )
+        terminated = contact | corridor | overshoot | arrival
         return terminated, timeout & ~terminated
 
     def _get_rewards(self) -> torch.Tensor:
@@ -231,6 +245,7 @@ class DPPODiffusionEnv(Solo12Env):
         )
         timeout_failure = self.reset_time_outs & ~(
             self._success
+            | self._arrival_failure
             | self._base_contact_failure
             | self._corridor_failure
             | self._overshoot_failure
@@ -275,6 +290,7 @@ class DPPODiffusionEnv(Solo12Env):
             projected_gravity_xy=self._robot.data.projected_gravity_b[:, :2],
             vertical_velocity=self._robot.data.root_lin_vel_b[:, 2],
             success=self._success,
+            arrival_failure=self._arrival_failure,
             timeout_failure=timeout_failure,
             corridor_failure=self._corridor_failure,
             overshoot_failure=self._overshoot_failure,
@@ -290,6 +306,7 @@ class DPPODiffusionEnv(Solo12Env):
             "Metrics/mean_speed_error_abs_mps": float(self._last_mean_speed_error.abs().mean()),
             "Metrics/terminal_distance_m": float(state.terminal_distance.mean()),
             "Metrics/success": float(self._success.float().mean()),
+            "Metrics/arrival_failure": float(self._arrival_failure.float().mean()),
         }
         return reward
 
@@ -328,6 +345,7 @@ class DPPODiffusionEnv(Solo12Env):
             if len(completed_ids) > 0 and self._route_state is not None:
                 episode_snapshot = {
                     "success": float(self._success[completed_ids].float().mean()),
+                    "arrival_failure": float(self._arrival_failure[completed_ids].float().mean()),
                     "base_contact": float(self._base_contact_failure[completed_ids].float().mean()),
                     "corridor_failure": float(self._corridor_failure[completed_ids].float().mean()),
                     "terminal_overshoot": float(self._overshoot_failure[completed_ids].float().mean()),
@@ -341,6 +359,7 @@ class DPPODiffusionEnv(Solo12Env):
                 episode_event = {
                     "env_ids": completed_ids.clone(),
                     "success": self._success[completed_ids].float().clone(),
+                    "arrival_failure": self._arrival_failure[completed_ids].float().clone(),
                     "base_contact": self._base_contact_failure[completed_ids].float().clone(),
                     "corridor_failure": self._corridor_failure[completed_ids].float().clone(),
                     "terminal_overshoot": self._overshoot_failure[completed_ids].float().clone(),
@@ -370,6 +389,7 @@ class DPPODiffusionEnv(Solo12Env):
         )
         self._task_step[env_ids] = 0
         self._success[env_ids] = False
+        self._arrival_failure[env_ids] = False
         self._base_contact_failure[env_ids] = False
         self._corridor_failure[env_ids] = False
         self._overshoot_failure[env_ids] = False

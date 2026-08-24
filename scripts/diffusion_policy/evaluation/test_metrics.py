@@ -171,6 +171,28 @@ class RouteMetricsTest(unittest.TestCase):
         )
         self.assertFalse(result.success)
 
+    def test_task_success_cannot_be_recovered_by_waiting_after_early_arrival(self) -> None:
+        # At t=2 s the route is reached at 0.5 m/s although 0.25 m/s was
+        # requested. Waiting until t=4 s used to turn this into a false success.
+        positions = np.asarray(
+            [[0.5, 0.0], [1.0, 0.0], [1.0, 0.0], [1.0, 0.0]], dtype=np.float32
+        )
+        result = compute_first_task_success(
+            positions,
+            self.path,
+            yaws_rad=np.zeros(4),
+            heights_m=np.full(4, 0.2932),
+            requested_speed_m_s=0.25,
+            target_progress_m=1.0,
+            target_yaw_rad=0.0,
+            target_height_m=0.2932,
+            dt=1.0,
+            start_position_xy=np.asarray([0.0, 0.0]),
+        )
+        self.assertFalse(result.success)
+        self.assertAlmostEqual(result.time_s, 2.0)
+        self.assertAlmostEqual(result.mean_speed_error_m_s, 0.25)
+
 
 if __name__ == "__main__":
     unittest.main()

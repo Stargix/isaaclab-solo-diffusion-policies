@@ -16,12 +16,21 @@ and its [official implementation](https://github.com/irom-princeton/dppo).
 
 ## Why this checkpoint, and its real limitation
 
-The starting artifact is `checkpoints_iri/real_walk_crouch_hindsight.pt`. It is
-the right checkpoint structurally: it already responds causally to path geometry
-and height, interpolates intermediate heights, and exposes the requested average
-speed in the same condition used at deployment.
+The v2 starting actor is `checkpoints_iri/checkpoints_dppo/dppo_path_1.pt`,
+itself fine-tuned from `real_walk_crouch_hindsight.pt`. This is deliberately a
+warm start rather than a return to Phase A: its evaluation already showed about
+98.7% survival, 93.3% arrival and 0.042 m cross-track RMSE, so rewriting the
+actor condition or discarding its online geometric correction would add risk
+without addressing the observed failure.
 
-It is not a solved base policy. The frozen capability audit recorded roughly:
+Its limitation is specific and measurable. At requested speeds 0.2 and 0.4
+m/s it commonly reached the endpoint at the pretrained gait speed and waited
+until `L/t` entered the success tolerance. The old terminal predicate allowed
+this because it checked for joint satisfaction at every later step. Contract
+v2 preserves the actor but makes first entry into the goal region absorbing;
+critic and optimizer state are reset because they estimate the old return.
+
+The original frozen Phase-A capability audit recorded roughly:
 
 - 0.807 overall survival;
 - 0.106 m cross-track RMSE;
@@ -150,8 +159,9 @@ reward is
 
 `- Delta s [1.25 B(e_perp;0.12) + 0.25 B(e_psi;0.40) + 0.75 B(e_h;0.04) + stability]`.
 
-The schedule potential is not capped in time: arriving late leaves
-`|L-v*t|>0`, while an early arrival must wait until `t=L/v` before it can satisfy
+The schedule potential is not capped in time: arriving either early or late
+leaves `|L-v*t|>0`. The episode terminates at the first entry into the goal
+region, so an early arrival cannot wait until `t=L/v` and retroactively satisfy
 the average-speed condition. `Phi_pose <= 0` is a bounded final-position/yaw/
 height potential. Its gate turns on only when the endpoint is inside the same
 two-second geometric lookahead visible to the actor. This gives dense terminal
@@ -166,15 +176,16 @@ penalty, residual penalty, or external smoothing controller.
 Terminal outcomes are:
 
 - route success: `+10`;
+- arrival with invalid yaw, height or mean speed: `-10`;
 - timeout: `-10`;
 - corridor/overshoot: a route- and horizon-dependent penalty larger than the
   maximum positive dense progress return, plus a safety margin;
 - base contact: that hard-failure penalty plus `-10`.
 
-Success requires final position within 0.15 m, yaw within 0.40 rad, height
-within 0.05 m and route-average speed within 0.08 m/s. Desired mean speed thus
-defines timing without a separate deadline reward. Timeout remains a failed
-episode, not a source of value bootstrapping.
+Success requires first arrival within 0.15 m, yaw within 0.40 rad, height
+within 0.05 m and `|L/t_arrival-v_des| <= 0.08 m/s`. Desired mean speed thus
+defines timing without a separate deadline or instantaneous-speed reward.
+Timeout remains a failed episode, not a source of value bootstrapping.
 
 Smooth height transitions are not hard-coded. The network receives future
 height through its geometric goal and is rewarded against the height required

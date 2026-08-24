@@ -26,6 +26,7 @@ def _reward(**overrides):
         "projected_gravity_xy": torch.zeros(batch, 2),
         "vertical_velocity": torch.zeros(batch),
         "success": torch.zeros(batch, dtype=torch.bool),
+        "arrival_failure": torch.zeros(batch, dtype=torch.bool),
         "timeout_failure": torch.zeros(batch, dtype=torch.bool),
         "corridor_failure": torch.zeros(batch, dtype=torch.bool),
         "overshoot_failure": torch.zeros(batch, dtype=torch.bool),
@@ -55,6 +56,19 @@ def test_fall_is_strictly_worse_than_ordinary_failure() -> None:
     ordinary, _ = _reward(corridor_failure=torch.ones(2, dtype=torch.bool))
     fall, _ = _reward(fell=torch.ones(2, dtype=torch.bool))
     assert torch.all(fall < ordinary)
+
+
+def test_failed_first_arrival_has_same_terminal_cost_as_timeout() -> None:
+    arrival, arrival_terms = _reward(
+        arrival_failure=torch.ones(2, dtype=torch.bool)
+    )
+    timeout, timeout_terms = _reward(
+        timeout_failure=torch.ones(2, dtype=torch.bool)
+    )
+    torch.testing.assert_close(arrival, timeout)
+    torch.testing.assert_close(
+        arrival_terms["arrival_failure"], timeout_terms["timeout_failure"]
+    )
 
 
 def test_average_speed_has_neutral_startup_and_correct_units() -> None:

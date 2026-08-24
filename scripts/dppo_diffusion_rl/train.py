@@ -32,6 +32,14 @@ parser.add_argument(
     help="Optional speed cap for controlled support/stage ablations.",
 )
 parser.add_argument("--save_interval", type=int, default=25)
+parser.add_argument(
+    "--restart_optimization",
+    action="store_true",
+    help=(
+        "Keep a DPPO actor as a warm start but reset iteration, critic and Adam states. "
+        "Required when migrating a legacy checkpoint to the first-arrival task contract."
+    ),
+)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--inference_steps", type=int, default=10)
 parser.add_argument("--finetune_denoising_steps", type=int, default=5)
@@ -73,7 +81,11 @@ import gymnasium as gym
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import parse_env_cfg
 
-from scripts.dppo_diffusion_rl.checkpointing import load_policy_checkpoint, restore_training_state
+from scripts.dppo_diffusion_rl.checkpointing import (
+    load_policy_checkpoint,
+    restore_training_state,
+    training_resume_state,
+)
 from scripts.dppo_diffusion_rl.config import DPPOConfig
 from scripts.dppo_diffusion_rl.critic import ValueCritic
 from scripts.dppo_diffusion_rl.isaaclab_env import CRITIC_FEATURE_DIM
@@ -137,8 +149,11 @@ def main() -> None:
     env_cfg.route_speed_max_mps = args_cli.route_speed_max_mps
     env = gym.make(args_cli.task, cfg=env_cfg)
     device = torch.device(env.unwrapped.device)
-    source_checkpoint, policy, start_iteration = load_policy_checkpoint(
+    source_checkpoint, policy, _ = load_policy_checkpoint(
         checkpoint_path, device, dppo_cfg
+    )
+    start_iteration, initial_total_physics_steps, restore_optimization = training_resume_state(
+        source_checkpoint, restart_optimization=args_cli.restart_optimization
     )
     existing_run_artifacts = (
         "metrics.jsonl", "run_config.json", "best.pt", "last.pt"
@@ -149,6 +164,7 @@ def main() -> None:
     resuming_same_run = (
         source_checkpoint.get("algorithm") == "dppo"
         and checkpoint_path.parent == output_dir
+        and restore_optimization
     )
     if populated and not resuming_same_run:
         env.close()
@@ -162,13 +178,16 @@ def main() -> None:
     ) + CRITIC_FEATURE_DIM
     critic = ValueCritic(critic_input_dim).to(device)
     updater = DPPOUpdater(policy, critic, dppo_cfg)
-    restore_training_state(source_checkpoint, critic, updater)
+    if restore_optimization:
+        restore_training_state(source_checkpoint, critic, updater)
 
     metadata = {
         "command": vars(args_cli),
         "dppo": dppo_cfg.to_dict(),
         "checkpoint": str(checkpoint_path),
         "start_iteration": start_iteration,
+        "initial_total_physics_steps": initial_total_physics_steps,
+        "restored_optimization_state": restore_optimization,
         "critic_input_dim": critic_input_dim,
     }
     with (output_dir / "run_config.json").open("w", encoding="utf-8") as stream:
@@ -203,6 +222,7 @@ def main() -> None:
         output_dir=output_dir,
         rollout_chunks=args_cli.rollout_chunks,
         start_iteration=start_iteration,
+        initial_total_physics_steps=initial_total_physics_steps,
         save_interval=args_cli.save_interval,
         logger=logger,
     )
