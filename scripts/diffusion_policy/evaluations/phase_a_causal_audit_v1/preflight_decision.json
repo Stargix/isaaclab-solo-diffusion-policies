@@ -1,0 +1,47 @@
+{
+  "runs": [
+    {
+      "path": "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\scripts\\diffusion_policy\\evaluations\\phase_a_causal_audit_v1\\preflight_exec1",
+      "checkpoint_sha256": "7975FE63FDFB5526A8E4613951C6337742CD95A043E1272A2DF98F4CC7CAB553",
+      "git_commit": "9a9aa1c4f89d8f67048fd2cb09bc2dab57de5494",
+      "exec_horizon": 1,
+      "scenarios": 54,
+      "survival_rate": 0.8333333333333334,
+      "route_success_rate": 0.037037037037037035,
+      "mean_completion_ratio": 1.6810419902573397,
+      "mean_absolute_horizon_speed_ratio_error": 0.8008841584310119,
+      "mean_terminal_position_error_m": 2.262827327356163,
+      "mean_cross_track_rmse_m": 0.07576191170072114,
+      "mean_height_absolute_error_m": 0.011751014325353835,
+      "height_causality": {
+        "pairs": 27,
+        "correct_direction_fraction": 1.0,
+        "mean_response_slope": 1.0794987877587805
+      }
+    },
+    {
+      "path": "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\scripts\\diffusion_policy\\evaluations\\phase_a_causal_audit_v1\\preflight_exec4",
+      "checkpoint_sha256": "7975FE63FDFB5526A8E4613951C6337742CD95A043E1272A2DF98F4CC7CAB553",
+      "git_commit": "9a9aa1c4f89d8f67048fd2cb09bc2dab57de5494",
+      "exec_horizon": 4,
+      "scenarios": 54,
+      "survival_rate": 0.7777777777777778,
+      "route_success_rate": 0.037037037037037035,
+      "mean_completion_ratio": 1.3697384247257387,
+      "mean_absolute_horizon_speed_ratio_error": 0.5132106845209629,
+      "mean_terminal_position_error_m": 1.756211677674425,
+      "mean_cross_track_rmse_m": 0.06579788587987423,
+      "mean_height_absolute_error_m": 0.011408096101755897,
+      "height_causality": {
+        "pairs": 27,
+        "correct_direction_fraction": 1.0,
+        "mean_response_slope": 1.0707067653103648
+      }
+    }
+  ],
+  "decision": {
+    "status": "winner_selected",
+    "exec_horizon": 1,
+    "rule": "Safety/causality gate, then speed error, terminal error and cross-track error."
+  }
+}

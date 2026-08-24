@@ -1,0 +1,230 @@
+{
+  "protocol_id": "phase_a_capability_audit_v1",
+  "runs": [
+    {
+      "id": "core_envelope",
+      "path": "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\scripts\\diffusion_policy\\evaluations\\phase_a_capability_audit_v1\\core_envelope",
+      "checkpoint_sha256": "7975FE63FDFB5526A8E4613951C6337742CD95A043E1272A2DF98F4CC7CAB553",
+      "git_commit": "03bcd2597511ebfd671fd395a1300bd86f03316f",
+      "scenarios": 135,
+      "survival_rate": 0.8074074074074075,
+      "route_success_rate": 0.02962962962962963,
+      "mean_absolute_speed_ratio_error": 0.8836242559515399,
+      "mean_terminal_position_error_m": 2.3286590618325413,
+      "mean_cross_track_rmse_m": 0.10552216423330484,
+      "mean_height_absolute_error_m": 0.02966041053403859,
+      "height_causality": {
+        "pairs": 45,
+        "correct_direction_fraction": 1.0,
+        "mean_response_slope": 1.0514072665677687
+      },
+      "by_height": [
+        {
+          "requested_height_m": 0.1705,
+          "scenarios": 45,
+          "survival_rate": 0.9777777777777777,
+          "mean_achieved_height_m": 0.1652219484249751,
+          "mean_height_absolute_error_m": 0.01281264413976007
+        },
+        {
+          "requested_height_m": 0.23185,
+          "scenarios": 45,
+          "survival_rate": 0.9333333333333333,
+          "mean_achieved_height_m": 0.2628489477766885,
+          "mean_height_absolute_error_m": 0.0637049694856008
+        },
+        {
+          "requested_height_m": 0.2932,
+          "scenarios": 45,
+          "survival_rate": 0.5111111111111111,
+          "mean_achieved_height_m": 0.2942296200328403,
+          "mean_height_absolute_error_m": 0.012463617976754904
+        }
+      ],
+      "by_route_and_speed": [
+        {
+          "path_shape": "circle",
+          "requested_speed_m_s": 0.2,
+          "scenarios": 9,
+          "survival_rate": 0.8888888888888888,
+          "route_success_rate": 0.0,
+          "mean_absolute_speed_ratio_error": 1.6966282228628795,
+          "mean_terminal_position_error_m": 2.041777588084656,
+          "mean_cross_track_rmse_m": 0.0765400431636307,
+          "mean_height_absolute_error_m": 0.028124797985785537
+        },
+        {
+          "path_shape": "circle",
+          "requested_speed_m_s": 0.4,
+          "scenarios": 9,
+          "survival_rate": 0.6666666666666666,
+          "route_success_rate": 0.0,
+          "mean_absolute_speed_ratio_error": 0.39190968374411267,
+          "mean_terminal_position_error_m": 1.8161928966837577,
+          "mean_cross_track_rmse_m": 0.12129130442109373,
+          "mean_height_absolute_error_m": 0.030192513018846512
+        },
+        {
+          "path_shape": "circle",
+          "requested_speed_m_s": 0.6,
+          "scenarios": 9,
+          "survival_rate": 0.3333333333333333,
+          "route_success_rate": 0.0,
+          "mean_absolute_speed_ratio_error": 0.47604339321454364,
+          "mean_terminal_position_error_m": 2.216129832800692,
+          "mean_cross_track_rmse_m": 0.1654896301527818,
+          "mean_height_absolute_error_m": 0.03200446120980713
+        },
+        {
+          "path_shape": "random_polyline",
+          "requested_speed_m_s": 0.2,
+          "scenarios": 9,
+          "survival_rate": 0.8888888888888888,
+          "route_success_rate": 0.0,
+          "mean_absolute_speed_ratio_error": 1.437606276737319,
+          "mean_terminal_position_error_m": 2.4335421304702742,
+          "mean_cross_track_rmse_m": 0.07255433375636737,
+          "mean_height_absolute_error_m": 0.029103058390319347
+        },
+        {
+          "path_shape": "random_polyline",
+          "requested_speed_m_s": 0.4,
+          "scenarios": 9,
+          "survival_rate": 1.0,
+          "route_success_rate": 0.0,
+          "mean_absolute_speed_ratio_error": 0.8015044430891672,
+          "mean_terminal_position_error_m": 2.338389822158197,
+          "mean_cross_track_rmse_m": 0.0994836799800396,
+          "mean_height_absolute_error_m": 0.02838212453449766
+        },
+        {
+          "path_shape": "random_polyline",
+          "requested_speed_m_s": 0.6,
+          "scenarios": 9,
+          "survival_rate": 0.5555555555555556,
+          "route_success_rate": 0.0,
+          "mean_absolute_speed_ratio_error": 0.2573573810082895,
+          "mean_terminal_position_error_m": 2.80253498363778,
+          "mean_cross_track_rmse_m": 0.17979163490235806,
+          "mean_height_absolute_error_m": 0.030345475818547938
+        },
+        {
+          "path_shape": "right_angle",
+          "requested_speed_m_s": 0.2,
+          "scenarios": 9,
+          "survival_rate": 0.8888888888888888,
+          "route_success_rate": 0.0,
+          "mean_absolute_speed_ratio_error": 1.4620845086044736,
+          "mean_terminal_position_error_m": 1.817359581904282,
+          "mean_cross_track_rmse_m": 0.12639471226268345,
+          "mean_height_absolute_error_m": 0.027762371581047773
+        },
+        {
+          "path_shape": "right_angle",
+          "requested_speed_m_s": 0.4,
+          "scenarios": 9,
+          "survival_rate": 0.6666666666666666,
+          "route_success_rate": 0.0,
+          "mean_absolute_speed_ratio_error": 0.27745486630333793,
+          "mean_terminal_position_error_m": 1.5232400078994326,
+          "mean_cross_track_rmse_m": 0.17263620181216133,
+          "mean_height_absolute_error_m": 0.029654213537772495
+        },
+        {
+          "path_shape": "right_angle",
+          "requested_speed_m_s": 0.6,
+          "scenarios": 9,
+          "survival_rate": 0.6666666666666666,
+          "route_success_rate": 0.3333333333333333,
+          "mean_absolute_speed_ratio_error": 0.17059851244643887,
+          "mean_terminal_position_error_m": 1.4598938531627446,
+          "mean_cross_track_rmse_m": 0.179571316887935,
+          "mean_height_absolute_error_m": 0.0302063026982877
+        },
+        {
+          "path_shape": "s_curve",
+          "requested_speed_m_s": 0.2,
+          "scenarios": 9,
+          "survival_rate": 1.0,
+          "route_success_rate": 0.0,
+          "mean_absolute_speed_ratio_error": 1.8277729451656342,
+          "mean_terminal_position_error_m": 2.9060640371726243,
+          "mean_cross_track_rmse_m": 0.04302957591911157,
+          "mean_height_absolute_error_m": 0.030103341365853947
+        },
+        {
+          "path_shape": "s_curve",
+          "requested_speed_m_s": 0.4,
+          "scenarios": 9,
+          "survival_rate": 0.8888888888888888,
+          "route_success_rate": 0.0,
+          "mean_absolute_speed_ratio_error": 0.8137790064016978,
+          "mean_terminal_position_error_m": 2.839463679792038,
+          "mean_cross_track_rmse_m": 0.06916612345311376,
+          "mean_height_absolute_error_m": 0.030910893757310178
+        },
+        {
+          "path_shape": "s_curve",
+          "requested_speed_m_s": 0.6,
+          "scenarios": 9,
+          "survival_rate": 0.7777777777777778,
+          "route_success_rate": 0.0,
+          "mean_absolute_speed_ratio_error": 0.2398556879273167,
+          "mean_terminal_position_error_m": 1.7612429518097876,
+          "mean_cross_track_rmse_m": 0.10993936688949664,
+          "mean_height_absolute_error_m": 0.02854836732149124
+        },
+        {
+          "path_shape": "straight",
+          "requested_speed_m_s": 0.2,
+          "scenarios": 9,
+          "survival_rate": 1.0,
+          "route_success_rate": 0.0,
+          "mean_absolute_speed_ratio_error": 1.840205430984497,
+          "mean_terminal_position_error_m": 2.9444533534130977,
+          "mean_cross_track_rmse_m": 0.032791700317627855,
+          "mean_height_absolute_error_m": 0.03075157975157102
+        },
+        {
+          "path_shape": "straight",
+          "requested_speed_m_s": 0.4,
+          "scenarios": 9,
+          "survival_rate": 1.0,
+          "route_success_rate": 0.0,
+          "mean_absolute_speed_ratio_error": 1.0100413428412542,
+          "mean_terminal_position_error_m": 3.2323540709572836,
+          "mean_cross_track_rmse_m": 0.03163463705115848,
+          "mean_height_absolute_error_m": 0.030254026254018147
+        },
+        {
+          "path_shape": "straight",
+          "requested_speed_m_s": 0.6,
+          "scenarios": 9,
+          "survival_rate": 0.8888888888888888,
+          "route_success_rate": 0.1111111111111111,
+          "mean_absolute_speed_ratio_error": 0.5515221379421376,
+          "mean_terminal_position_error_m": 2.7972471375414907,
+          "mean_cross_track_rmse_m": 0.10251820253001319,
+          "mean_height_absolute_error_m": 0.02856263078542219
+        }
+      ]
+    }
+  ],
+  "decision": {
+    "status": "base_envelope_not_ready",
+    "checks": {
+      "overall_survival": false,
+      "worst_route_speed_survival": false,
+      "path_tracking": true,
+      "constant_height_tracking": true,
+      "worst_constant_height_tracking": false,
+      "height_causality": true,
+      "mean_speed_tracking": false,
+      "finite_route_success": false
+    },
+    "worst_route_speed_survival_rate": 0.3333333333333333,
+    "worst_height_condition_absolute_error_m": 0.0637049694856008,
+    "next_run_required": false,
+    "recommendation": "Repair or restrict the frozen base envelope before online optimization; the random-height challenge cannot change this decision."
+  }
+}
