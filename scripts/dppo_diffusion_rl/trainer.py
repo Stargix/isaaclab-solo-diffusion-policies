@@ -298,6 +298,12 @@ class DPPOTrainer:
             total_physics_steps=self.total_physics_steps,
             metrics=metrics,
             best_score=self.best_score,
+            task_config={
+                "speed_budget_max_mps": float(self.raw_env.cfg.speed_budget_max_mps),
+                "route_stage": int(self.raw_env.cfg.route_stage),
+                "route_speed_max_mps": self.raw_env.cfg.route_speed_max_mps,
+                "episode_length_s": float(self.raw_env.cfg.episode_length_s),
+            },
         )
 
     def run(self, iterations: int) -> None:

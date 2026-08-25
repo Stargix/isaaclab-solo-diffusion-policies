@@ -359,6 +359,10 @@ def compute_goals(
     v_req_clip: float,
     goal_representation: str,
     device: torch.device,
+    speed_budget_start_arc: np.ndarray | None = None,
+    speed_budget_target_arc: np.ndarray | None = None,
+    speed_budget_elapsed_s: np.ndarray | None = None,
+    speed_budget_max_mps: float | None = None,
 ) -> torch.Tensor:
     robot = raw_env._robot
     pos_w = robot.data.root_pos_w.cpu().numpy()
@@ -393,6 +397,32 @@ def compute_goals(
             dt=dt, speed=speed, path_progress=path_progress, v_req_clip=v_req_clip,
         )
     goals_tensor = torch.from_numpy(goals).to(device)
+    if (
+        speed_budget_start_arc is not None
+        or speed_budget_target_arc is not None
+        or speed_budget_elapsed_s is not None
+    ):
+        if any(value is None for value in (
+            speed_budget_start_arc, speed_budget_target_arc, speed_budget_elapsed_s
+        )):
+            raise ValueError("All dynamic speed-budget arrays must be provided together.")
+        if goal_representation != "hindsight_geom_avg12":
+            raise ValueError("Dynamic speed budget requires hindsight_geom_avg12.")
+        from scripts.dppo_diffusion_rl.conditioning import remaining_speed_budget
+
+        current_arc = cumulative_lengths[path_progress]
+        target_distance = np.maximum(speed_budget_target_arc - speed_budget_start_arc, 0.0)
+        remaining_distance = np.maximum(speed_budget_target_arc - current_arc, 0.0)
+        goals_tensor[:, -1] = remaining_speed_budget(
+            remaining_distance=torch.as_tensor(remaining_distance, device=device),
+            route_length=torch.as_tensor(target_distance, device=device),
+            desired_mean_speed=torch.full(
+                (len(path_progress),), float(speed), device=device
+            ),
+            elapsed_s=torch.as_tensor(speed_budget_elapsed_s, device=device),
+            max_speed=float(speed_budget_max_mps or v_req_clip),
+            min_remaining_time_s=dt,
+        )
     if getattr(args_cli, "force_walk_goal", False) and goal_representation == "path11":
         goals_tensor[:, 0] = 0.2
         goals_tensor[:, 1] = 0.0
@@ -576,6 +606,20 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         goal_representation=goal_representation,
         device=device,
     )
+    dynamic_speed_budget = bool(
+        checkpoint.get("algorithm") == "dppo"
+        and int(checkpoint.get("dppo_task_contract_version", 1)) >= 3
+    )
+    speed_budget_max_mps = float(
+        checkpoint.get("dppo_task_config", {}).get("speed_budget_max_mps", 0.6)
+    )
+    speed_budget_start_arc = path_plan.cumulative_lengths[path_progress].astype(np.float32)
+    speed_budget_target_arc = np.full(
+        num_envs, float(path_plan.cumulative_lengths[-1]), dtype=np.float32
+    )
+    speed_budget_elapsed_s = np.zeros(num_envs, dtype=np.float32)
+    if dynamic_speed_budget:
+        print("[INFO] Actor conditioning: closed-loop remaining-route speed budget (task contract v3).")
 
     # Benchmark latency over 50 runs.
     print("[INFO] Benchmarking policy latency over 50 passes...")
@@ -681,8 +725,13 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 v_req_clip=v_req_clip,
                 goal_representation=goal_representation,
                 device=device,
+                speed_budget_start_arc=speed_budget_start_arc if dynamic_speed_budget else None,
+                speed_budget_target_arc=speed_budget_target_arc if dynamic_speed_budget else None,
+                speed_budget_elapsed_s=speed_budget_elapsed_s if dynamic_speed_budget else None,
+                speed_budget_max_mps=speed_budget_max_mps if dynamic_speed_budget else None,
             )
             _, _, dones, _ = vec_env.step(action_step)
+            speed_budget_elapsed_s += float(dt)
 
             update_delayed_buffers(
                 proprio_buffer,
@@ -705,6 +754,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                     reset_pos = raw_env._robot.data.root_pos_w.cpu().numpy()
                     reset_quat = raw_env._robot.data.root_quat_w.cpu().numpy()
                     path_plan.rebuild_from_robot(reset_pos, reset_quat, i)
+                    speed_budget_start_arc[i] = 0.0
+                    speed_budget_target_arc[i] = float(path_plan.cumulative_lengths[-1])
+                    speed_budget_elapsed_s[i] = 0.0
                     reset_env_history(
                         i,
                         proprio_buffer,

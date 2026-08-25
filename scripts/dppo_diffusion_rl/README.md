@@ -7,6 +7,22 @@ high-level velocity controller.
 
 ## Train
 
+Recommended v4 continuation from `dppo_path_3`.  Task-contract v3 keeps the
+12-D geometric goal but replaces its final local `v_avg` scalar with the
+closed-loop remaining-route speed budget
+`(remaining distance) / (remaining target time)`.  Geometry is still previewed
+at the nominal requested speed.  The reward is unchanged: this only makes
+accumulated timing debt observable to the actor.
+
+```bash
+./isaaclab.sh -p scripts/dppo_diffusion_rl/train.py --checkpoint checkpoints_iri/checkpoints_dppo/dppo_path_3.pt --output_dir scripts/dppo_diffusion_rl/runs/dppo_path_4_speed_budget --run_name dppo_path_4_speed_budget --restart_optimization --reference_kl_coef 0.05 --num_envs 4096 --iterations 500 --rollout_chunks 32 --route_stage 2 --route_speed_max_mps 0.6 --speed_budget_max_mps 0.6 --save_interval 25 --headless --device cuda:0 --wandb
+```
+
+`--restart_optimization` is mandatory when loading path3: its critic and Adam
+states estimate task-contract v2.  The actor remains the path3 actor, and the
+immutable reference used by the KL is deliberately re-anchored to that loaded
+actor rather than to an older reference stored inside the checkpoint.
+
 Recommended v3 after the paired path_1/path_2 audit. It retains the stable
 `path_1` actor as an immutable transition-kernel reference while optimizing the
 first-arrival speed objective. The task reward weights are intentionally

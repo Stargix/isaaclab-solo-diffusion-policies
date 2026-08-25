@@ -85,6 +85,10 @@ parser.add_argument(
     help="Refuse to mix a canonical run with files from an earlier invocation.",
 )
 parser.add_argument(
+    "--save_timeseries", action="store_true",
+    help="Save per-step route progress, tangent speed, height and validity for temporal-allocation analysis.",
+)
+parser.add_argument(
     "--reference_replay_dataset",
     type=str,
     default=None,
@@ -384,6 +388,9 @@ def compute_vectorized_goals(
     device: torch.device,
     goal_representation: str,
     reference_step: int | None = None,
+    speed_budget_start_arc: np.ndarray | None = None,
+    speed_budget_target_arc: np.ndarray | None = None,
+    speed_budget_max_mps: float | None = None,
 ) -> torch.Tensor:
     robot = raw_env._robot
     pos_w = robot.data.root_pos_w.cpu().numpy()
@@ -486,7 +493,30 @@ def compute_vectorized_goals(
                 v_req_clip=v_req_clip,
                 )
             )
-    return torch.from_numpy(np.stack(goals, axis=0)).to(device)
+    goals_tensor = torch.from_numpy(np.stack(goals, axis=0)).to(device)
+    if speed_budget_target_arc is not None or speed_budget_start_arc is not None:
+        if speed_budget_target_arc is None or speed_budget_start_arc is None:
+            raise ValueError("Both speed-budget arc arrays must be provided together.")
+        if goal_representation != "hindsight_geom_avg12" or any(plan.time_indexed for plan in path_plans):
+            raise ValueError("Dynamic speed budget currently requires analytic hindsight_geom_avg12 routes.")
+        from scripts.dppo_diffusion_rl.conditioning import remaining_speed_budget
+
+        current_arc = np.asarray(
+            [plan.cumulative_lengths[int(path_progress[i])] for i, plan in enumerate(path_plans)],
+            dtype=np.float32,
+        )
+        target_distance = np.maximum(speed_budget_target_arc - speed_budget_start_arc, 0.0)
+        remaining_distance = np.maximum(speed_budget_target_arc - current_arc, 0.0)
+        elapsed_s = float(reference_step or 0) * float(dt)
+        goals_tensor[:, -1] = remaining_speed_budget(
+            remaining_distance=torch.as_tensor(remaining_distance, device=device),
+            route_length=torch.as_tensor(target_distance, device=device),
+            desired_mean_speed=torch.as_tensor(speeds, device=device),
+            elapsed_s=torch.full((len(path_plans),), elapsed_s, device=device),
+            max_speed=float(speed_budget_max_mps or v_req_clip),
+            min_remaining_time_s=dt,
+        )
+    return goals_tensor
 
 
 def get_proprio_30d(raw_env: Any, joint_ids: slice) -> torch.Tensor:
@@ -852,6 +882,34 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     # state separate from the original spawn so warm-up drift cannot be counted
     # as free route progress.
     rollout_start_pos = raw_env._robot.data.root_pos_w.cpu().numpy().copy()
+    dynamic_speed_budget = bool(
+        checkpoint.get("algorithm") == "dppo"
+        and int(checkpoint.get("dppo_task_contract_version", 1)) >= 3
+    )
+    speed_budget_max_mps = float(
+        checkpoint.get("dppo_task_config", {}).get("speed_budget_max_mps", 0.6)
+    )
+    speed_budget_start_arc = np.asarray(
+        [
+            project_trajectory_to_polyline(
+                rollout_start_pos[i : i + 1, :2], plan.path_w[:, :2]
+            )[0][0]
+            for i, plan in enumerate(path_plans)
+        ],
+        dtype=np.float32,
+    )
+    speed_budget_target_arc = np.asarray(
+        [
+            min(
+                float(speed_budget_start_arc[i]) + float(speeds[i]) * float(args_cli.duration_s),
+                float(plan.cumulative_lengths[-1]),
+            )
+            for i, plan in enumerate(path_plans)
+        ],
+        dtype=np.float32,
+    )
+    if dynamic_speed_budget:
+        print("[INFO] Actor conditioning: closed-loop remaining-route speed budget (task contract v3).")
 
     # Track metrics
     trajectories = {i: {"ref": [], "actual": []} for i in range(num_envs)}
@@ -859,6 +917,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     achieved_speeds = []
     achieved_planar_speeds = []
     achieved_tangent_speeds = []
+    positions_xy = []
+    progress_m = []
+    trace_valid = []
     achieved_heights = []
     achieved_yaws = []
     tilts = []
@@ -896,6 +957,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 raw_env, path_plans, speeds, path_progress, goal_horizon_steps, waypoint_time_offsets_s, dt, v_req_clip, device,
                 goal_representation,
                 reference_step=step,
+                speed_budget_start_arc=speed_budget_start_arc if dynamic_speed_budget else None,
+                speed_budget_target_arc=speed_budget_target_arc if dynamic_speed_budget else None,
+                speed_budget_max_mps=speed_budget_max_mps if dynamic_speed_budget else None,
             )
             if goal_representation == "hindsight_geom_avg12":
                 commanded_heights.append(goals[:, 10].detach().cpu().numpy())
@@ -929,6 +993,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         step_errors = []
         tangent_speeds = []
         step_required_heights = []
+        step_progress_m = []
         for i in range(num_envs):
             plan = path_plans[i]
             closest_idx = (
@@ -939,6 +1004,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             err = float(np.linalg.norm(pos_w[i, :2] - plan.path_w[closest_idx, :2]))
             step_errors.append(err)
             step_required_heights.append(float(plan.path_w[closest_idx, 2]))
+            step_progress_m.append(float(plan.cumulative_lengths[closest_idx] - plan.cumulative_lengths[0]))
             tangent_idx = min(closest_idx + 1, len(plan.path_w) - 1)
             tangent = plan.path_w[tangent_idx, :2] - plan.path_w[max(0, tangent_idx - 1), :2]
             tangent_norm = float(np.linalg.norm(tangent))
@@ -955,6 +1021,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         achieved_speeds.append(vx)
         achieved_planar_speeds.append(planar_speed)
         achieved_tangent_speeds.append(np.asarray(tangent_speeds, dtype=np.float32))
+        positions_xy.append(pos_w[:, :2].copy())
+        progress_m.append(np.asarray(step_progress_m, dtype=np.float32))
+        # Once an environment has terminated, IsaacLab may immediately reset
+        # it; exclude all subsequent reset states from the causal trace.
+        trace_valid.append((~failures) & (~step_failed))
         achieved_heights.append(height)
         achieved_yaws.append(yaw)
         tilts.append(tilt)
@@ -973,6 +1044,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     achieved_speeds = np.stack(achieved_speeds, axis=0)  # [steps, num_envs]
     achieved_planar_speeds = np.stack(achieved_planar_speeds, axis=0)
     achieved_tangent_speeds = np.stack(achieved_tangent_speeds, axis=0)
+    positions_xy = np.stack(positions_xy, axis=0)
+    progress_m = np.stack(progress_m, axis=0)
+    trace_valid = np.stack(trace_valid, axis=0)
     achieved_heights = np.stack(achieved_heights, axis=0)
     achieved_yaws = np.stack(achieved_yaws, axis=0)
     tilts = np.stack(tilts, axis=0)
@@ -987,6 +1061,45 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     # progress, matching the online task reward. The terminal-preview command
     # is retained separately to diagnose anticipatory causal response.
     target_heights = np.stack(required_heights, axis=0)
+
+    if args_cli.save_timeseries:
+        # Keep the trace opt-in: broad evaluations otherwise only need the
+        # compact CSV/JSON summaries.  The path metadata makes this artifact
+        # self-contained and avoids reconstructing random-polyline geometry.
+        np.savez_compressed(
+            output_dir / "timeseries.npz",
+            time_s=np.arange(duration_steps, dtype=np.float32) * dt,
+            positions_xy=positions_xy,
+            progress_m=progress_m,
+            tangent_speed_m_s=achieved_tangent_speeds,
+            planar_speed_m_s=achieved_planar_speeds,
+            required_height_m=target_heights,
+            commanded_height_m=preview_target_heights,
+            valid=trace_valid,
+            requested_speed_m_s=speeds,
+            failure_step=failure_step,
+            base_failure=base_failures,
+            physical_sanity_failure=physical_sanity_failures,
+        )
+        trace_metadata = {
+            "dt_s": dt,
+            "scenarios": [
+                {
+                    "index": i,
+                    "path_shape": s.path_shape,
+                    "repeat": s.repeat,
+                    "requested_speed_m_s": float(s.speed),
+                    "path_height_m": s.path_height,
+                    "height_schedule_m": list(path_plans[i].height_schedule or []),
+                    "path_xy": path_plans[i].path_w[:, :2].tolist(),
+                    "path_cumulative_m": path_plans[i].cumulative_lengths.tolist(),
+                }
+                for i, s in enumerate(scenarios)
+            ],
+        }
+        with open(output_dir / "timeseries_metadata.json", "w", encoding="utf-8") as trace_file:
+            json.dump(trace_metadata, trace_file, indent=2)
+        print(f"[INFO] Saved temporal-allocation trace to {output_dir / 'timeseries.npz'}")
 
     # Save summary table
     summary_rows = []
@@ -1527,6 +1640,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         "exec_horizon": args_cli.exec_horizon,
         "goal_horizon_steps": goal_horizon_steps,
         "goal_representation": goal_representation,
+        "dynamic_speed_budget": dynamic_speed_budget,
+        "speed_budget_max_mps": speed_budget_max_mps if dynamic_speed_budget else None,
         "waypoint_time_offsets_s": waypoint_time_offsets_s,
         "speeds_evaluated": list(args_cli.speeds),
         "heights_evaluated": list(path_heights),

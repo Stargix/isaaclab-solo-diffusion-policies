@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 
+from scripts.dppo_diffusion_rl.conditioning import remaining_speed_budget
 from scripts.dppo_diffusion_rl.rewards import (
     average_speed_error,
     bounded_huber,
@@ -10,6 +11,33 @@ from scripts.dppo_diffusion_rl.rewards import (
     terminal_pose_potential,
 )
 from scripts.dppo_diffusion_rl.config import DPPOConfig
+
+
+def _speed_budget(progress: list[float], elapsed: list[float]) -> torch.Tensor:
+    progress_t = torch.tensor(progress)
+    return remaining_speed_budget(
+        remaining_distance=4.0 - progress_t,
+        route_length=torch.full_like(progress_t, 4.0),
+        desired_mean_speed=torch.full_like(progress_t, 0.4),
+        elapsed_s=torch.tensor(elapsed),
+        max_speed=0.6,
+        min_remaining_time_s=0.02,
+    )
+
+
+def test_speed_budget_equals_request_at_reset() -> None:
+    torch.testing.assert_close(_speed_budget([0.0], [0.0]), torch.tensor([0.4]))
+
+
+def test_speed_budget_exposes_ahead_and_behind_schedule() -> None:
+    budget = _speed_budget([2.5, 2.0, 1.5], [5.0, 5.0, 5.0])
+    torch.testing.assert_close(budget, torch.tensor([0.3, 0.4, 0.5]))
+
+
+def test_speed_budget_clips_late_debt_and_tapers_at_endpoint() -> None:
+    torch.testing.assert_close(
+        _speed_budget([3.0, 4.0], [11.0, 11.0]), torch.tensor([0.6, 0.0])
+    )
 
 
 def _reward(**overrides):

@@ -40,6 +40,12 @@ parser.add_argument(
         "Required when migrating a legacy checkpoint to the first-arrival task contract."
     ),
 )
+parser.add_argument(
+    "--speed_budget_max_mps",
+    type=float,
+    default=0.6,
+    help="Maximum remaining-route pace exposed to the actor; keep within the Phase-A support.",
+)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--inference_steps", type=int, default=10)
 parser.add_argument("--finetune_denoising_steps", type=int, default=5)
@@ -88,6 +94,8 @@ simulation_app = app_launcher.app
 
 import gymnasium as gym
 import isaaclab_tasks  # noqa: F401
+import isaaclab.terrains as terrain_gen
+from isaaclab.terrains import TerrainGeneratorCfg
 from isaaclab_tasks.utils import parse_env_cfg
 
 from scripts.dppo_diffusion_rl.checkpointing import (
@@ -157,6 +165,20 @@ def main() -> None:
     env_cfg.episode_length_s = float(args_cli.episode_length_s)
     env_cfg.route_stage = int(args_cli.route_stage)
     env_cfg.route_speed_max_mps = args_cli.route_speed_max_mps
+    env_cfg.speed_budget_max_mps = float(args_cli.speed_budget_max_mps)
+    # Use a generated flat mesh rather than the remote Grid USD.  Physics is
+    # equivalent, while local and cluster runs no longer depend on asset-cache
+    # state or network availability during scene creation.
+    env_cfg.terrain.terrain_type = "generator"
+    env_cfg.terrain.terrain_generator = TerrainGeneratorCfg(
+        seed=args_cli.seed,
+        curriculum=False,
+        size=(20.0, 20.0),
+        border_width=0.0,
+        num_rows=1,
+        num_cols=1,
+        sub_terrains={"flat": terrain_gen.MeshPlaneTerrainCfg(proportion=1.0)},
+    )
     env = gym.make(args_cli.task, cfg=env_cfg)
     device = torch.device(env.unwrapped.device)
     source_checkpoint, policy, _ = load_policy_checkpoint(
@@ -165,6 +187,11 @@ def main() -> None:
     start_iteration, initial_total_physics_steps, restore_optimization = training_resume_state(
         source_checkpoint, restart_optimization=args_cli.restart_optimization
     )
+    if args_cli.restart_optimization:
+        # A new task contract is a new optimization run.  Anchor conservative
+        # KL regularization to the warm-start actor itself (e.g. path_3), not
+        # to an older reference carried inside that checkpoint.
+        policy.anchor_reference_to_actor()
     existing_run_artifacts = (
         "metrics.jsonl", "run_config.json", "best.pt", "last.pt"
     )

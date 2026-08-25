@@ -13,6 +13,7 @@ from isaaclab_tasks.direct.solo12.solo12_env_cfg import Solo12EnvCfg
 from scripts.diffusion_policy.train.data.obs_utils import proprio_from_env_tensors
 from scripts.residual_diffusion_rl.routes import RouteBank, RouteState
 
+from .conditioning import remaining_speed_budget
 from .rewards import (
     TaskRewardWeights,
     average_speed_error,
@@ -43,6 +44,7 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
     terminal_overshoot_m: float = 0.50
     goal_horizon_steps: int = 100
     v_req_clip: float = 2.0
+    speed_budget_max_mps: float = 0.6
     reset_x_pos = 0.0
     reset_y_pos = 0.0
     reset_yaw = 0.0
@@ -69,6 +71,15 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
             raise ValueError(
                 "route_speed_max_mps cannot exceed v_req_clip: the actor would receive "
                 "a clipped speed goal while the task still rewards the unclipped speed."
+            )
+        if not 0.0 < self.speed_budget_max_mps <= self.v_req_clip:
+            raise ValueError("speed_budget_max_mps must be in (0, v_req_clip].")
+        sampled_speed_max = self.route_speed_max_mps
+        if sampled_speed_max is None:
+            sampled_speed_max = 0.4 if self.route_stage <= 0 else 0.5 if self.route_stage == 1 else 0.6
+        if sampled_speed_max > self.speed_budget_max_mps:
+            raise ValueError(
+                "speed_budget_max_mps must cover the maximum sampled route speed."
             )
         if self.route_goal_tolerance_m <= 0.0 or self.corridor_half_width_m <= self.route_goal_tolerance_m:
             raise ValueError("The corridor must be wider than the positive terminal tolerance.")
@@ -131,6 +142,19 @@ class DPPODiffusionEnv(Solo12Env):
             self._robot_yaw(),
             horizon_s=self.cfg.goal_horizon_steps * self.step_dt,
             v_clip=self.cfg.v_req_clip,
+        )
+        # Preserve the Phase-A 12-D goal layout and its nominal geometric
+        # preview.  Only the final v_avg scalar becomes closed-loop: it is the
+        # pace required to meet the route-level first-arrival time from the
+        # current progress.  This makes accumulated timing debt observable to
+        # the actor without imposing an instantaneous velocity controller.
+        self._goal[:, -1] = remaining_speed_budget(
+            remaining_distance=self._route_state.remaining_distance,
+            route_length=self._routes.length,
+            desired_mean_speed=self._routes.speed,
+            elapsed_s=self._task_step.float() * self.step_dt,
+            max_speed=self.cfg.speed_budget_max_mps,
+            min_remaining_time_s=self.step_dt,
         )
         return self._route_state
 

@@ -20,7 +20,7 @@ from .ppo import DPPOUpdater
 
 
 DPPO_CHECKPOINT_VERSION = 1
-DPPO_TASK_CONTRACT_VERSION = 2
+DPPO_TASK_CONTRACT_VERSION = 3
 
 
 def training_resume_state(
@@ -201,6 +201,7 @@ def save_checkpoint(
     total_physics_steps: int,
     metrics: dict[str, float],
     best_score: float,
+    task_config: dict[str, Any],
 ) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -216,6 +217,7 @@ def save_checkpoint(
         "algorithm": "dppo",
         "dppo_checkpoint_version": DPPO_CHECKPOINT_VERSION,
         "dppo_task_contract_version": DPPO_TASK_CONTRACT_VERSION,
+        "dppo_task_config": dict(task_config),
         "dppo_config": policy.dppo_cfg.to_dict(),
         "dppo_base_model_state_dict": policy.base_model_state_dict(),
         "dppo_reference_model_state_dict": policy.reference_model_state_dict(),

@@ -132,6 +132,13 @@ class DPPODiffusionPolicy(torch.nn.Module):
     def reference_model_state_dict(self) -> dict[str, torch.Tensor]:
         return self.reference_model.state_dict()
 
+    def anchor_reference_to_actor(self) -> None:
+        """Use the currently loaded actor as the immutable KL reference."""
+
+        self.reference_model.load_state_dict(self.policy.model.state_dict())
+        self.reference_model.requires_grad_(False)
+        self.reference_model.eval()
+
     def _normalized_condition(
         self,
         proprio_hist: torch.Tensor,
