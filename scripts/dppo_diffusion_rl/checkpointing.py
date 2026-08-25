@@ -147,6 +147,7 @@ def load_policy_checkpoint(
             checkpoint["ema_model_state_dict"],
             checkpoint["dppo_base_model_state_dict"],
             stats,
+            checkpoint.get("dppo_reference_model_state_dict"),
         )
         start_iteration = int(checkpoint.get("iteration", -1)) + 1
     else:
@@ -183,6 +184,7 @@ def build_inference_policy(
         checkpoint["ema_model_state_dict"],
         checkpoint["dppo_base_model_state_dict"],
         stats,
+        checkpoint.get("dppo_reference_model_state_dict"),
     )
     return policy.eval()
 
@@ -216,6 +218,7 @@ def save_checkpoint(
         "dppo_task_contract_version": DPPO_TASK_CONTRACT_VERSION,
         "dppo_config": policy.dppo_cfg.to_dict(),
         "dppo_base_model_state_dict": policy.base_model_state_dict(),
+        "dppo_reference_model_state_dict": policy.reference_model_state_dict(),
         "critic_state_dict": critic.state_dict(),
         "actor_optimizer_state_dict": updater.actor_optimizer.state_dict(),
         "critic_optimizer_state_dict": updater.critic_optimizer.state_dict(),

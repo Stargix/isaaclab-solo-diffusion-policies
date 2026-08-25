@@ -214,9 +214,13 @@ height separately from the future height preview sent to the actor.
 
 - Full `K'=10` fine-tuning is an ablation, not the default, because it removes
   the frozen coarse prior.
-- A reference-policy KL or BC auxiliary loss is deferred. Partial denoising
-  fine-tuning plus PPO trust-region controls already tests canonical DPPO; an
-  extra regularizer would change the hypothesis.
+- Canonical DPPO without a reference loss remains the v1/v2 ablation. The
+  paired evaluation showed that its small per-update PPO KL still accumulated
+  a large gait drift while correcting speed. The v3 primary run therefore uses
+  the exact conditional Gaussian KL between the trainable reverse kernel and
+  an immutable `path_1` actor at the same diffusion state. This tests whether
+  online refinement can correct timing without leaving the stable locomotion
+  manifold; it does not modify the task reward.
 - Residual PPO remains a separate baseline. It has stronger action-level safety
   but cannot reshape the diffusion distribution itself.
 - A velocity-policy plus high-level path planner remains the alternative if the

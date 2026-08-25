@@ -48,6 +48,56 @@ class TaskSuccessMetrics:
         return asdict(self)
 
 
+def physical_state_valid(
+    root_positions_w: np.ndarray,
+    planar_speeds_m_s: np.ndarray,
+    tilt_deg: np.ndarray,
+    actions: np.ndarray,
+    *,
+    min_base_height_m: float = 0.08,
+    max_base_height_m: float = 0.50,
+    max_planar_speed_m_s: float = 5.0,
+    max_tilt_deg: float = 60.0,
+) -> np.ndarray:
+    """Return a per-environment simulator sanity mask.
+
+    IsaacLab's base task only terminates on configured contacts. A PhysX escape
+    can therefore remain finite while the robot is metres below the plane and
+    be reported as a survivor. These deliberately loose bounds reject only
+    states outside the locomotion experiment's physical envelope; they are not
+    tracking objectives and do not alter training.
+    """
+
+    positions = np.asarray(root_positions_w)
+    speeds = np.asarray(planar_speeds_m_s).reshape(-1)
+    tilts = np.asarray(tilt_deg).reshape(-1)
+    action_values = np.asarray(actions)
+    if positions.ndim != 2 or positions.shape[1] != 3:
+        raise ValueError("root_positions_w must have shape (N, 3).")
+    count = len(positions)
+    if speeds.shape != (count,) or tilts.shape != (count,):
+        raise ValueError("speed and tilt arrays must have shape (N,).")
+    if action_values.ndim != 2 or action_values.shape[0] != count:
+        raise ValueError("actions must have shape (N, action_dim).")
+    if not 0.0 < min_base_height_m < max_base_height_m:
+        raise ValueError("base-height sanity bounds are invalid.")
+    if max_planar_speed_m_s <= 0.0 or not 0.0 < max_tilt_deg <= 180.0:
+        raise ValueError("speed and tilt sanity bounds must be positive.")
+    finite = (
+        np.isfinite(positions).all(axis=1)
+        & np.isfinite(speeds)
+        & np.isfinite(tilts)
+        & np.isfinite(action_values).all(axis=1)
+    )
+    return (
+        finite
+        & (positions[:, 2] >= min_base_height_m)
+        & (positions[:, 2] <= max_base_height_m)
+        & (speeds <= max_planar_speed_m_s)
+        & (tilts <= max_tilt_deg)
+    )
+
+
 def valid_post_step_mask(horizon_steps: int, failure_action_step: int | None) -> np.ndarray:
     """Mask metrics returned after IsaacLab's in-step auto-reset.
 

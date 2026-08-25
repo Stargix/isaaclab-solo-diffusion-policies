@@ -58,6 +58,15 @@ parser.add_argument("--critic_lr", type=float, default=1.0e-3)
 parser.add_argument("--clip_ratio_base", type=float, default=1.0e-3)
 parser.add_argument("--clip_ratio", type=float, default=1.0e-2)
 parser.add_argument("--target_kl", type=float, default=0.02)
+parser.add_argument(
+    "--reference_kl_coef",
+    type=float,
+    default=0.0,
+    help=(
+        "Transition-kernel KL coefficient to the immutable actor loaded at run start. "
+        "Leave at zero for canonical DPPO; enable explicitly for reference-anchored fine-tuning."
+    ),
+)
 parser.add_argument("--update_epochs", type=int, default=5)
 parser.add_argument("--minibatch_size", type=int, default=8192)
 parser.add_argument("--critic_minibatch_size", type=int, default=4096)
@@ -114,6 +123,7 @@ def _dppo_config() -> DPPOConfig:
         clip_ratio_base=args_cli.clip_ratio_base,
         clip_ratio=args_cli.clip_ratio,
         target_kl=args_cli.target_kl,
+        reference_kl_coef=args_cli.reference_kl_coef,
         update_epochs=args_cli.update_epochs,
         minibatch_size=args_cli.minibatch_size,
         critic_minibatch_size=args_cli.critic_minibatch_size,

@@ -121,6 +121,7 @@ from evaluation.metrics import (
     compute_first_task_success,
     compute_route_metrics,
     point_at_progress,
+    physical_state_valid,
     project_trajectory_to_polyline,
     valid_post_step_mask,
 )
@@ -865,6 +866,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     commanded_heights = []
     required_heights = []
     failures = np.zeros(num_envs, dtype=bool)
+    base_failures = np.zeros(num_envs, dtype=bool)
+    physical_sanity_failures = np.zeros(num_envs, dtype=bool)
     failure_step = np.full(num_envs, -1, dtype=np.int64)
 
     current_chunk: torch.Tensor | None = None
@@ -900,7 +903,6 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 commanded_heights.append(goals[:, 8].detach().cpu().numpy())
             _, _, dones, _ = vec_env.step(action)
             done_np = dones.cpu().numpy().astype(bool)
-            newly_failed = done_np & ~failures
             update_history(proprio_buffer, action_buffer, goal_buffer, proprio, previous_action, goals)
             previous_action = action.clone()
 
@@ -916,7 +918,13 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         quat = robot.root_quat_w.cpu().numpy()
         yaw = np.asarray([robot_yaw_w(value) for value in quat], dtype=np.float32)
         a_delta = torch.sqrt(torch.mean(torch.square(action - previous_for_delta), dim=-1)).cpu().numpy()
+        action_np = action.detach().cpu().numpy()
         previous_for_delta = action.clone()
+        physical_invalid = ~physical_state_valid(
+            pos_w, planar_speed, tilt, action_np
+        )
+        step_failed = done_np | physical_invalid
+        newly_failed = step_failed & ~failures
 
         step_errors = []
         tangent_speeds = []
@@ -937,7 +945,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             tangent = tangent / tangent_norm if tangent_norm > 1.0e-6 else np.zeros(2, dtype=np.float32)
             tangent_speeds.append(float(np.dot(vel_world[i], tangent)))
 
-            if not failures[i] and not done_np[i]:
+            if not failures[i] and not step_failed[i]:
                 # Track actual vs reference relative to spawn
                 trajectories[i]["actual"].append(pos_w[i, :2] - start_pos[i, :2])
                 ref_xy = plan.path_w[closest_idx, :2] - start_pos[i, :2]
@@ -955,7 +963,10 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
         # Handle resets / failures
         failure_step[newly_failed] = step + 1
+        base_failures[newly_failed & done_np] = True
+        physical_sanity_failures[newly_failed & physical_invalid] = True
         failures |= done_np
+        failures |= physical_invalid
 
     # Process metrics
     tracking_errors = np.stack(tracking_errors, axis=0)  # [steps, num_envs]
@@ -1094,6 +1105,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             "preview_height_changes": int(preview_change_steps.size),
             "reference_curvature_abs_mean": mean_abs_path_curvature(path_plans[i].path_w),
             "survived": survived,
+            "base_failure": bool(base_failures[i]),
+            "physical_sanity_failure": bool(physical_sanity_failures[i]),
             "time_to_failure_s": float(failure_step[i] * dt) if failures[i] else args_cli.duration_s,
             "xy_rmse": xy_rmse,
             "height_rmse": h_rmse,
@@ -1526,6 +1539,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         ),
         "deterministic_resets": bool(args_cli.deterministic_resets),
         "overall_survival_rate": global_survival,
+        "overall_base_failure_rate": float(np.mean(base_failures)),
+        "overall_physical_sanity_failure_rate": float(np.mean(physical_sanity_failures)),
         "overall_route_completion_ratio": finite_mean(summary_rows, "route_completion_ratio"),
         "overall_route_horizon_speed_ratio": finite_mean(summary_rows, "route_horizon_speed_ratio"),
         "overall_route_arrival_rate": (

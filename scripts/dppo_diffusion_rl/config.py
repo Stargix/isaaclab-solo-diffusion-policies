@@ -33,6 +33,11 @@ class DPPOConfig:
     critic_minibatch_size: int = 4096
     critic_warmup_iterations: int = 10
     target_kl: float = 0.02
+    # Optional transition-kernel KL to the immutable actor loaded at the start
+    # of a run.  Zero preserves canonical DPPO/backwards compatibility; the
+    # path-speed v3 experiment enables it explicitly to prevent cumulative
+    # drift away from the stable path_1 gait.
+    reference_kl_coef: float = 0.0
     # Keep rare terminal outcomes intact. In a large vectorized batch, a
     # symmetric 1 % quantile clip can erase every success/fall when its event
     # rate is below 1 %.
@@ -67,6 +72,8 @@ class DPPOConfig:
             raise ValueError("value_coef and max_grad_norm must be positive.")
         if self.target_kl <= 0.0:
             raise ValueError("target_kl must be positive.")
+        if self.reference_kl_coef < 0.0:
+            raise ValueError("reference_kl_coef must be non-negative.")
         if self.update_epochs < 1 or self.minibatch_size < 1 or self.critic_minibatch_size < 1:
             raise ValueError("update epochs and minibatch sizes must be positive.")
         if self.critic_warmup_iterations < 0:

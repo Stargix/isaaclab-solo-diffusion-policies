@@ -58,9 +58,15 @@ class DPPODiffusionPolicy(torch.nn.Module):
         policy_cfg.num_inference_steps = dppo_cfg.inference_steps
         self.policy = Solo12DiffusionPolicy(policy_cfg)
         self.base_model = copy.deepcopy(self.policy.model)
+        # ``base_model`` generates the frozen early denoising transitions.
+        # ``reference_model`` instead anchors the complete actor loaded at the
+        # start of this run, so many small PPO updates cannot drift unnoticed.
+        self.reference_model = copy.deepcopy(self.policy.model)
         self.dppo_cfg = dppo_cfg
         self.base_model.requires_grad_(False)
+        self.reference_model.requires_grad_(False)
         self.base_model.eval()
+        self.reference_model.eval()
         # Attention dropout was useful for BC, but it is an unmodelled random
         # variable in PPO. Keep both denoisers in inference mode while allowing
         # gradients through the fine-tuned model.
@@ -82,14 +88,18 @@ class DPPODiffusionPolicy(torch.nn.Module):
         super().train(mode)
         self.policy.model.eval()
         self.base_model.eval()
+        self.reference_model.eval()
         return self
 
     def load_pretrained(self, state_dict: dict[str, torch.Tensor], stats: NormalizerStats | dict) -> None:
         self.policy.load_state_dict(state_dict)
         self.base_model.load_state_dict(self.policy.model.state_dict())
+        self.reference_model.load_state_dict(self.policy.model.state_dict())
         self.policy.set_normalizer_stats(stats)
         self.base_model.requires_grad_(False)
+        self.reference_model.requires_grad_(False)
         self.base_model.eval()
+        self.reference_model.eval()
         self.policy.model.eval()
 
     def load_dppo_actor(
@@ -97,12 +107,20 @@ class DPPODiffusionPolicy(torch.nn.Module):
         actor_policy_state_dict: dict[str, torch.Tensor],
         base_model_state_dict: dict[str, torch.Tensor],
         stats: NormalizerStats | dict,
+        reference_model_state_dict: dict[str, torch.Tensor] | None = None,
     ) -> None:
         self.policy.load_state_dict(actor_policy_state_dict)
         self.base_model.load_state_dict(base_model_state_dict)
+        self.reference_model.load_state_dict(
+            self.policy.model.state_dict()
+            if reference_model_state_dict is None
+            else reference_model_state_dict
+        )
         self.policy.set_normalizer_stats(stats)
         self.base_model.requires_grad_(False)
+        self.reference_model.requires_grad_(False)
         self.base_model.eval()
+        self.reference_model.eval()
         self.policy.model.eval()
 
     def actor_policy_state_dict(self) -> dict[str, torch.Tensor]:
@@ -110,6 +128,9 @@ class DPPODiffusionPolicy(torch.nn.Module):
 
     def base_model_state_dict(self) -> dict[str, torch.Tensor]:
         return self.base_model.state_dict()
+
+    def reference_model_state_dict(self) -> dict[str, torch.Tensor]:
+        return self.reference_model.state_dict()
 
     def _normalized_condition(
         self,
@@ -214,9 +235,18 @@ class DPPODiffusionPolicy(torch.nn.Module):
         graph. Tokens after the executed chunk are always irrelevant.
         """
 
+        elementwise = Normal(mean, std).log_prob(next_sample).clamp(-5.0, 2.0)
+        return self._reward_relevant_average(elementwise, final_transition)
+
+    def _reward_relevant_average(
+        self,
+        elementwise: torch.Tensor,
+        final_transition: bool | torch.Tensor,
+    ) -> torch.Tensor:
+        """Average a per-coordinate transition quantity on its causal cone."""
+
         start = self.cfg.execution_offset
         end = self.cfg.execution_offset + self.dppo_cfg.exec_horizon
-        elementwise = Normal(mean, std).log_prob(next_sample).clamp(-5.0, 2.0)
         # The paper's implementation averages rather than sums the high-
         # dimensional action likelihood and clips rare tails before the PPO
         # ratio. This avoids exponential ratios for action chunks.
@@ -313,7 +343,9 @@ class DPPODiffusionPolicy(torch.nn.Module):
         chain_previous: torch.Tensor,
         chain_next: torch.Tensor,
         local_denoising_index: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        *,
+        include_reference_kl: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Re-evaluate selected on-policy transitions under the current actor."""
 
         proprio_n, action_n, goal_n = self._normalized_condition(proprio_hist, action_hist, goal_hist)
@@ -330,8 +362,19 @@ class DPPODiffusionPolicy(torch.nn.Module):
             goal_n,
             trainable=True,
         )
+        reference_output = None
+        if include_reference_kl:
+            with torch.no_grad():
+                reference_output = self.reference_model(
+                    chain_previous,
+                    proprio_n,
+                    action_n,
+                    goal_n,
+                    timestep_values,
+                )
 
         means = torch.empty_like(chain_previous)
+        reference_means = torch.empty_like(chain_previous) if include_reference_kl else None
         stds = torch.empty(
             (len(chain_previous), 1, 1), device=chain_previous.device, dtype=chain_previous.dtype
         )
@@ -343,17 +386,29 @@ class DPPODiffusionPolicy(torch.nn.Module):
             mean, std = self._transition_mean_std(chain_previous[mask], output[mask], timestep)
             means[mask] = mean
             stds[mask] = std
+            if reference_means is not None and reference_output is not None:
+                reference_mean, _ = self._transition_mean_std(
+                    chain_previous[mask], reference_output[mask], timestep
+                )
+                reference_means[mask] = reference_mean
         final_transition = local_denoising_index == self.dppo_cfg.finetune_denoising_steps - 1
         logprob = self._reward_relevant_logprob(
             means, stds, chain_next, final_transition=final_transition
         )
         entropy = Normal(means, stds).entropy()
-        start = self.cfg.execution_offset
-        end = self.cfg.execution_offset + self.dppo_cfg.exec_horizon
-        denominator = float(end * entropy.shape[-1])
-        causal_entropy = entropy[:, :end].sum(dim=(-1, -2)) / denominator
-        executed_entropy = entropy[:, start:end].sum(dim=(-1, -2)) / denominator
-        return logprob, torch.where(final_transition, executed_entropy, causal_entropy)
+        relevant_entropy = self._reward_relevant_average(entropy, final_transition)
+        if reference_means is None:
+            return logprob, relevant_entropy
+        # Both reverse kernels use the same fixed scheduler variance, making
+        # this the exact conditional Gaussian KL at the sampled diffusion
+        # state. With equal covariance its direction is immaterial.
+        elementwise_reference_kl = (
+            means - reference_means
+        ).square() / (2.0 * stds.square())
+        reference_kl = self._reward_relevant_average(
+            elementwise_reference_kl, final_transition
+        )
+        return logprob, relevant_entropy, reference_kl
 
     @torch.no_grad()
     def predict_action(

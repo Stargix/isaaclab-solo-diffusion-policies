@@ -7,6 +7,21 @@ high-level velocity controller.
 
 ## Train
 
+Recommended v3 after the paired path_1/path_2 audit. It retains the stable
+`path_1` actor as an immutable transition-kernel reference while optimizing the
+first-arrival speed objective. The task reward weights are intentionally
+unchanged:
+
+```bash
+./isaaclab.sh -p scripts/dppo_diffusion_rl/train.py --checkpoint checkpoints_iri/checkpoints_dppo/dppo_path_1.pt --output_dir scripts/dppo_diffusion_rl/runs/dppo_path_pose_speed_reference_v3 --restart_optimization --reference_kl_coef 0.05 --num_envs 4096 --iterations 1000 --rollout_chunks 32 --route_stage 2 --route_speed_max_mps 0.6 --save_interval 25 --headless --device cuda:0 --wandb --run_name dppo_path_pose_speed_reference_v3
+```
+
+`Policy/reference_kl` measures cumulative drift from that frozen actor; it is
+different from `Policy/approximate_kl`, which only compares one PPO update to
+its rollout behavior. `0.05` is the preregistered initial coefficient, not a
+new reward term. Keep it fixed for the primary run and compare periodic
+checkpoints on the paired held-out benchmark.
+
 Warm-start task-contract v2 from the successful v1 DPPO actor (PowerShell,
 single line). The actor is retained; critic, Adam states, counters and critic
 warm-up restart because the terminal return changed:
@@ -55,7 +70,10 @@ after the robot reaches the endpoint. `task_success` evaluates final yaw,
 height and route-average speed at the first valid entry into the goal region;
 waiting can no longer repair an early arrival. Height reports separate the physical
 requirement at current route progress from the future height preview supplied
-to the policy.
+to the policy. The evaluator also rejects non-finite or clearly non-physical
+simulator states (base outside 0.08--0.50 m, planar speed above 5 m/s, or tilt
+above 60 degrees), so a PhysX escape cannot count as survival or dominate the
+height plots. These are evaluation sanity bounds, not rewards.
 
 Interactive right-angle transition:
 

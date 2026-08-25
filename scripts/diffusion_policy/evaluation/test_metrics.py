@@ -10,6 +10,7 @@ from .metrics import (
     compute_first_task_success,
     compute_route_metrics,
     point_at_progress,
+    physical_state_valid,
     project_trajectory_to_polyline,
     valid_post_step_mask,
 )
@@ -35,6 +36,18 @@ class RouteMetricsTest(unittest.TestCase):
         np.testing.assert_array_equal(
             valid_post_step_mask(3, 1), [False, False, False]
         )
+
+    def test_physical_state_guard_rejects_ballistic_and_nonfinite_states(self) -> None:
+        positions = np.asarray(
+            [[0.0, 0.0, 0.29], [0.0, 0.0, -12.0], [np.nan, 0.0, 0.29]]
+        )
+        valid = physical_state_valid(
+            positions,
+            planar_speeds_m_s=np.asarray([0.6, 48.0, 0.2]),
+            tilt_deg=np.asarray([8.0, 35.0, 2.0]),
+            actions=np.zeros((3, 12)),
+        )
+        np.testing.assert_array_equal(valid, [True, False, False])
 
     def test_perfect_schedule_scores_one(self) -> None:
         positions = np.asarray([[0.25, 0.0], [0.5, 0.0], [0.75, 0.0], [1.0, 0.0]])

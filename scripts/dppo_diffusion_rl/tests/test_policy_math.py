@@ -144,11 +144,41 @@ def test_base_is_frozen_and_dropout_is_disabled() -> None:
     policy = _policy()
     assert not policy.policy.model.training
     assert not policy.base_model.training
+    assert not policy.reference_model.training
     assert all(not parameter.requires_grad for parameter in policy.base_model.parameters())
+    assert all(not parameter.requires_grad for parameter in policy.reference_model.parameters())
     assert all(parameter.requires_grad for parameter in policy.policy.model.parameters())
     policy.train()
     assert not policy.policy.model.training
     assert not policy.base_model.training
+    assert not policy.reference_model.training
+
+
+def test_reference_transition_kl_detects_cumulative_actor_drift() -> None:
+    torch.manual_seed(17)
+    policy = _policy()
+    proprio = torch.randn(2, 2, 3)
+    actions = torch.randn(2, 2, 2).clamp(-1, 1)
+    goals = torch.randn(2, 2, 2)
+    sample = policy.sample(proprio, actions, goals)
+    batch = torch.arange(2).repeat_interleave(2)
+    denoise = torch.arange(2).repeat(2)
+    _, _, initial_kl = policy.transition_logprob(
+        proprio[batch], actions[batch], goals[batch],
+        sample.chain[batch, denoise], sample.chain[batch, denoise + 1], denoise,
+        include_reference_kl=True,
+    )
+    torch.testing.assert_close(initial_kl, torch.zeros_like(initial_kl), atol=1.0e-8, rtol=0.0)
+
+    with torch.no_grad():
+        next(policy.policy.model.parameters()).add_(0.05)
+    _, _, drifted_kl = policy.transition_logprob(
+        proprio[batch], actions[batch], goals[batch],
+        sample.chain[batch, denoise], sample.chain[batch, denoise + 1], denoise,
+        include_reference_kl=True,
+    )
+    assert torch.all(torch.isfinite(drifted_kl))
+    assert float(drifted_kl.max()) > 0.0
 
 
 def test_denoising_clip_is_monotone() -> None:
@@ -219,10 +249,15 @@ def test_one_synthetic_ppo_update_is_finite_and_preserves_base() -> None:
     )
     rollout.compute_gae(torch.zeros(2), gamma=0.99, gae_lambda=0.95)
     base_before = {name: value.clone() for name, value in policy.base_model.state_dict().items()}
+    reference_before = {
+        name: value.clone() for name, value in policy.reference_model.state_dict().items()
+    }
     metrics = DPPOUpdater(policy, critic, policy.dppo_cfg).update(rollout)
     assert all(np.isfinite(value) for value in metrics.values())
     for name, value in policy.base_model.state_dict().items():
         torch.testing.assert_close(value, base_before[name])
+    for name, value in policy.reference_model.state_dict().items():
+        torch.testing.assert_close(value, reference_before[name])
 
 
 def test_rare_positive_advantage_is_not_clipped_away() -> None:
@@ -271,6 +306,12 @@ def test_resume_reapplies_explicit_optimizer_hyperparameters() -> None:
 def test_invalid_zero_clip_schedule_rate_is_rejected() -> None:
     cfg = DPPOConfig(clip_ratio_rate=0.0)
     with pytest.raises(ValueError, match="clip_ratio_rate"):
+        cfg.validate(prediction_horizon=16, execution_offset=8)
+
+
+def test_negative_reference_kl_coefficient_is_rejected() -> None:
+    cfg = DPPOConfig(reference_kl_coef=-0.1)
+    with pytest.raises(ValueError, match="reference_kl_coef"):
         cfg.validate(prediction_horizon=16, execution_offset=8)
 
 

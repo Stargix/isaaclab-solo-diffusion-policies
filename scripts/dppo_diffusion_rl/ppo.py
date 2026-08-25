@@ -17,6 +17,8 @@ class UpdateMetrics:
     policy_loss: float = 0.0
     value_loss: float = 0.0
     approximate_kl: float = 0.0
+    reference_kl: float = 0.0
+    reference_kl_loss: float = 0.0
     clip_fraction: float = 0.0
     ratio_mean: float = 1.0
     entropy: float = 0.0
@@ -33,6 +35,8 @@ class UpdateMetrics:
             "Loss/policy": self.policy_loss / actor_divisor,
             "Loss/value": self.value_loss / critic_divisor,
             "Policy/approximate_kl": self.approximate_kl / actor_divisor,
+            "Policy/reference_kl": self.reference_kl / actor_divisor,
+            "Loss/reference_kl": self.reference_kl_loss / actor_divisor,
             "Policy/clip_fraction": self.clip_fraction / actor_divisor,
             "Policy/ratio_mean": self.ratio_mean / actor_divisor,
             "Policy/fixed_transition_entropy": self.entropy / actor_divisor,
@@ -105,14 +109,20 @@ class DPPOUpdater:
                 flat = permutation[start : start + self.cfg.minibatch_size]
                 physical_index = torch.div(flat, denoising_count, rounding_mode="floor")
                 denoising_index = flat.remainder(denoising_count)
-                new_logprob, entropy = self.policy.transition_logprob(
+                transition_statistics = self.policy.transition_logprob(
                     batch.proprio[physical_index],
                     batch.action_history[physical_index],
                     batch.goals[physical_index],
                     batch.chains[physical_index, denoising_index],
                     batch.chains[physical_index, denoising_index + 1],
                     denoising_index,
+                    include_reference_kl=self.cfg.reference_kl_coef > 0.0,
                 )
+                if self.cfg.reference_kl_coef > 0.0:
+                    new_logprob, entropy, reference_kl = transition_statistics
+                else:
+                    new_logprob, entropy = transition_statistics
+                    reference_kl = torch.zeros((), device=new_logprob.device)
                 old_logprob = batch.old_logprobs[physical_index, denoising_index]
                 logratio = new_logprob - old_logprob
                 ratio = logratio.exp()
@@ -123,7 +133,9 @@ class DPPOUpdater:
                 clip = self.policy.denoising_clip(denoising_index)
                 unclipped = -advantage * ratio
                 clipped = -advantage * torch.clamp(ratio, 1.0 - clip, 1.0 + clip)
-                loss = torch.maximum(unclipped, clipped).mean()
+                policy_loss = torch.maximum(unclipped, clipped).mean()
+                reference_kl_loss = self.cfg.reference_kl_coef * reference_kl.mean()
+                loss = policy_loss + reference_kl_loss
                 approximate_kl = ((ratio - 1.0) - logratio).mean()
                 clip_fraction = ((ratio - 1.0).abs() > clip).float().mean()
 
@@ -135,8 +147,10 @@ class DPPOUpdater:
                 if not torch.isfinite(grad_norm):
                     raise FloatingPointError("Non-finite DPPO actor gradient.")
                 self.actor_optimizer.step()
-                metrics.policy_loss += float(loss.detach())
+                metrics.policy_loss += float(policy_loss.detach())
                 metrics.approximate_kl += float(approximate_kl.detach())
+                metrics.reference_kl += float(reference_kl.mean().detach())
+                metrics.reference_kl_loss += float(reference_kl_loss.detach())
                 metrics.clip_fraction += float(clip_fraction.detach())
                 metrics.ratio_mean += float(ratio.mean().detach())
                 metrics.entropy += float(entropy.mean().detach())

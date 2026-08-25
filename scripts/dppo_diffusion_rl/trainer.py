@@ -338,6 +338,7 @@ class DPPOTrainer:
                 f"progress={metrics['Episode/progress_fraction']:.3f} "
                 f"speed_err={metrics['Episode/mean_speed_error_abs_mps']:.3f} "
                 f"kl={metrics['Policy/approximate_kl']:.5f} "
+                f"ref_kl={metrics['Policy/reference_kl']:.5f} "
                 f"sat={metrics['Rollout/action_saturation_fraction']:.3f}"
             )
         final_iteration = self.start_iteration + iterations - 1
