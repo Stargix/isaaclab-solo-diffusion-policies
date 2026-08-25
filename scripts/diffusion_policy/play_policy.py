@@ -36,7 +36,17 @@ parser.add_argument("--checkpoint", type=str, required=True)
 parser.add_argument("--guidance_scale", type=float, default=1.0, help="CFG scale (1.0 = faster, no double forward).")
 parser.add_argument("--num_envs", type=int, default=1)
 parser.add_argument("--num_inference_steps", type=int, default=None, help="Denoising steps; default from checkpoint.")
-parser.add_argument("--path_file", type=str, default=None, help="Optional .npy path [N,3] or [N,4].")
+parser.add_argument(
+    "--path_file", type=str, default=None,
+    help="Optional .npy path [N,3] or [N,4]; interpreted in the robot frame by default.",
+)
+parser.add_argument(
+    "--path_file_frame", choices=("robot", "world"), default="robot",
+    help=(
+        "Frame for --path_file. 'robot' anchors the first point to the robot pose at reset "
+        "and rotates XY/yaw with its initial yaw; 'world' preserves absolute coordinates."
+    ),
+)
 parser.add_argument("--goal_horizon_steps", type=int, default=None, help="Override the training lookahead horizon.")
 parser.add_argument("--v_req_clip", type=float, default=None)
 parser.add_argument("--desired_speed", type=float, default=0.4, help="Speed used for spatial goal lookahead.")
@@ -64,6 +74,30 @@ parser.add_argument("--no_real_time_viewer", action="store_false", dest="real_ti
 parser.add_argument("--compile_policy", action="store_true", help="Try torch.compile on the policy.")
 parser.add_argument("--torchscript_denoiser", action="store_true", help="Trace the denoiser without changing DDPM sampling.")
 parser.add_argument("--force_walk_goal", action="store_true", help="Override conditioning goals to force walk commands.")
+parser.add_argument(
+    "--visualize_path", action="store_true",
+    help="Draw the planned XYZ route in red in the Isaac Sim viewport.",
+)
+parser.add_argument(
+    "--visualize_goal", action="store_true",
+    help="Draw the current policy target as a small yellow point and planar heading arrow.",
+)
+parser.add_argument(
+    "--visualize_preview", action="store_true",
+    help="Draw the current route preview used by the policy in orange.",
+)
+parser.add_argument(
+    "--visualize_actual_path", action="store_true",
+    help="Draw the measured robot-base trace in blue.",
+)
+parser.add_argument(
+    "--visualize_height", action="store_true",
+    help="Draw subtle vertical guides from the floor to each required path height.",
+)
+parser.add_argument(
+    "--visualize_update_interval", type=int, default=2,
+    help="Refresh viewport overlays every N control steps (default: 2).",
+)
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
@@ -90,6 +124,7 @@ from train.conditioning.goal_builder import (
 )
 from train.data.normalization import NormalizerStats
 from train.data.obs_utils import proprio_from_env_tensors
+from visualization.path_debug_viz import PathDebugVisualizer, PathDebugVizCfg
 
 
 @dataclass
@@ -99,9 +134,18 @@ class PathPlan:
     cumulative_lengths: np.ndarray
     is_custom: bool
     default_path_mode: str = "walk"
+    path_file: str | None = None
+    path_file_frame: str = "world"
 
     def rebuild_from_robot(self, pos_w: np.ndarray, quat_w: np.ndarray, env_idx: int = 0) -> None:
         if self.is_custom:
+            # Custom robot-frame paths must follow the robot after an episode reset.
+            if self.path_file is not None and self.path_file_frame == "robot":
+                path_array = np.load(self.path_file)
+                self.path_w, self.yaws_w = _path_array_to_world(
+                    path_array, pos_w[env_idx], quat_w[env_idx], frame="robot"
+                )
+                self.cumulative_lengths = cumulative_xy_lengths(self.path_w)
             return
         self.path_w, self.yaws_w = build_default_path(
             pos_w[env_idx], quat_w[env_idx], mode=self.default_path_mode,
@@ -112,6 +156,71 @@ class PathPlan:
 
 def robot_yaw_w(quat_wxyz: np.ndarray) -> float:
     return yaw_from_rotmat(quat_wxyz_to_rotmat(quat_wxyz))
+
+
+def _wrap_yaw(yaw: np.ndarray | float) -> np.ndarray | float:
+    """Wrap yaw angles to [-pi, pi), preserving scalar/array use."""
+    return (np.asarray(yaw) + np.pi) % (2.0 * np.pi) - np.pi
+
+
+def _derive_path_yaws(path_xy: np.ndarray) -> np.ndarray:
+    """Estimate a tangent yaw at every path point, including the final point."""
+    if len(path_xy) < 2:
+        raise ValueError("A path must contain at least two points.")
+    deltas = np.diff(path_xy, axis=0)
+    valid = np.linalg.norm(deltas, axis=1) > 1e-7
+    if not np.any(valid):
+        return np.zeros(len(path_xy), dtype=np.float32)
+    first_valid = int(np.flatnonzero(valid)[0])
+    fallback = float(np.arctan2(deltas[first_valid, 1], deltas[first_valid, 0]))
+    yaws = np.full(len(path_xy), fallback, dtype=np.float32)
+    last_yaw = fallback
+    for idx in range(len(path_xy) - 1):
+        if valid[idx]:
+            last_yaw = float(np.arctan2(deltas[idx, 1], deltas[idx, 0]))
+        yaws[idx] = last_yaw
+    yaws[-1] = last_yaw
+    return yaws
+
+
+def _path_array_to_world(
+    path_array: np.ndarray,
+    start_pos_w: np.ndarray,
+    start_quat_w: np.ndarray,
+    *,
+    frame: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Validate a [N,3]/[N,4] path and convert it to world coordinates.
+
+    Robot-frame paths use XY metres relative to the initial base pose.  Z is
+    intentionally *not* offset: the generated routes contain absolute target
+    base heights (e.g. 0.2932 m walk and 0.1705 m crouch), matching training.
+    For [N,4] files the fourth column is a relative yaw in robot frame.
+    """
+    path_array = np.asarray(path_array, dtype=np.float32)
+    if path_array.ndim != 2 or path_array.shape[1] not in (3, 4):
+        raise ValueError(f"Path must have shape [N,3] or [N,4], got {path_array.shape}.")
+    if path_array.shape[0] < 2:
+        raise ValueError("Path must contain at least two points.")
+    if not np.all(np.isfinite(path_array)):
+        raise ValueError("Path contains NaN or infinite values.")
+    local_xy = path_array[:, :2]
+    local_yaws = path_array[:, 3] if path_array.shape[1] == 4 else _derive_path_yaws(local_xy)
+
+    if frame == "world":
+        path_w = path_array[:, :3].copy()
+        yaws_w = np.asarray(_wrap_yaw(local_yaws), dtype=np.float32)
+        return path_w, yaws_w
+
+    if frame != "robot":
+        raise ValueError(f"Unsupported path frame: {frame}")
+    base_yaw = robot_yaw_w(np.asarray(start_quat_w))
+    cos_y, sin_y = float(np.cos(base_yaw)), float(np.sin(base_yaw))
+    path_w = path_array[:, :3].copy()
+    path_w[:, 0] = float(start_pos_w[0]) + cos_y * local_xy[:, 0] - sin_y * local_xy[:, 1]
+    path_w[:, 1] = float(start_pos_w[1]) + sin_y * local_xy[:, 0] + cos_y * local_xy[:, 1]
+    yaws_w = np.asarray(_wrap_yaw(base_yaw + local_yaws), dtype=np.float32)
+    return path_w, yaws_w
 
 
 def build_default_path(
@@ -182,22 +291,26 @@ def load_or_build_path(
     start_quat: np.ndarray,
     path_file: str | None,
     default_path_mode: str,
+    path_file_frame: str = "robot",
 ) -> PathPlan:
-    if path_file is not None and os.path.exists(path_file):
-        print(f"[INFO] Loading path: {path_file}")
+    if path_file is not None:
+        if not os.path.isfile(path_file):
+            raise FileNotFoundError(f"--path_file does not exist: {path_file}")
+        path_file = os.path.abspath(path_file)
+        print(f"[INFO] Loading {path_file_frame}-frame path: {path_file}")
         path_array = np.load(path_file)
-        if path_array.shape[1] == 3:
-            yaws = [0.0]
-            for idx in range(1, len(path_array)):
-                yaws.append(
-                    np.arctan2(path_array[idx, 1] - path_array[idx - 1, 1], path_array[idx, 0] - path_array[idx - 1, 0])
-                )
-            yaws_w = np.array(yaws, dtype=np.float32)
-            path_w = path_array.astype(np.float32)
-        else:
-            path_w = path_array[:, :3].astype(np.float32)
-            yaws_w = path_array[:, 3].astype(np.float32)
-        return PathPlan(path_w, yaws_w, cumulative_xy_lengths(path_w), is_custom=True)
+        path_w, yaws_w = _path_array_to_world(
+            path_array, start_pos[0], start_quat[0], frame=path_file_frame
+        )
+        if path_file_frame == "robot":
+            print(
+                f"[INFO] Anchored local path to robot start "
+                f"({start_pos[0][0]:+.3f}, {start_pos[0][1]:+.3f}), yaw={robot_yaw_w(start_quat[0]):+.3f} rad."
+            )
+        return PathPlan(
+            path_w, yaws_w, cumulative_xy_lengths(path_w), is_custom=True,
+            path_file=path_file, path_file_frame=path_file_frame,
+        )
 
     print(f"[INFO] Generating default 3 m {default_path_mode} path aligned to robot yaw.")
     path_w, yaws_w = build_default_path(
@@ -438,6 +551,31 @@ def compute_goals(
     return goals_tensor
 
 
+def visualization_goal_index(
+    cumulative_lengths: np.ndarray,
+    *,
+    progress_index: int,
+    goal_representation: str,
+    goal_horizon_steps: int,
+    dt: float,
+    speed: float,
+) -> int:
+    """Return the world-path index represented by the visual target marker.
+
+    This mirrors the finite spatial preview used by the goal builders.  The
+    path-guidance representation has an authoritative route endpoint instead.
+    """
+
+    start = int(np.clip(progress_index, 0, len(cumulative_lengths) - 1))
+    if goal_representation == "path_guidance_se2_36":
+        return len(cumulative_lengths) - 1
+    target_arc = min(
+        float(cumulative_lengths[-1]),
+        float(cumulative_lengths[start]) + max(0.0, float(speed)) * goal_horizon_steps * dt,
+    )
+    return int(np.clip(np.searchsorted(cumulative_lengths, target_arc, side="left"), start, len(cumulative_lengths) - 1))
+
+
 def _model_cfg_from_checkpoint(config_dict: dict) -> Solo12DiffusionPolicyConfig:
     model = config_dict["model"]
     return Solo12DiffusionPolicyConfig(
@@ -472,6 +610,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
     requested_device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     device = torch.device(requested_device)
+    if args_cli.visualize_update_interval < 1:
+        raise ValueError("--visualize_update_interval must be at least one.")
     print(f"[INFO] Loading checkpoint: {checkpoint_path} ({device})")
 
     checkpoint = load_training_checkpoint(
@@ -583,8 +723,26 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         start_quat,
         args_cli.path_file,
         args_cli.default_path_mode,
+        path_file_frame=args_cli.path_file_frame,
     )
     path_progress = np.zeros(num_envs, dtype=np.int32)
+
+    debug_viz_cfg = PathDebugVizCfg(
+        show_path=args_cli.visualize_path,
+        show_goal=args_cli.visualize_goal,
+        show_preview=args_cli.visualize_preview,
+        show_actual_path=args_cli.visualize_actual_path,
+        show_height=args_cli.visualize_height,
+    )
+    debug_viz: PathDebugVisualizer | None = None
+    if debug_viz_cfg.enabled:
+        if args_cli.headless:
+            print("[WARN] Path debug visualization is disabled in --headless mode.")
+        else:
+            if num_envs != 1:
+                print("[WARN] Path debug visualization displays env_0 only; use --num_envs 1 for an unambiguous route.")
+            debug_viz = PathDebugVisualizer(debug_viz_cfg, path_plan.path_w, path_plan.yaws_w)
+            print("[INFO] Viewport path debug enabled under /World/Visuals/PathDebug.")
 
     run_warmup(
         vec_env,
@@ -611,7 +769,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         and int(checkpoint.get("dppo_task_contract_version", 1)) >= 3
     )
     speed_budget_max_mps = float(
-        checkpoint.get("dppo_task_config", {}).get("speed_budget_max_mps", 0.6)
+        checkpoint.get("dppo_task_config", {}).get("speed_budget_max_mps", 0.8)
     )
     speed_budget_start_arc = path_plan.cumulative_lengths[path_progress].astype(np.float32)
     speed_budget_target_arc = np.full(
@@ -733,6 +891,21 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             _, _, dones, _ = vec_env.step(action_step)
             speed_budget_elapsed_s += float(dt)
 
+            if debug_viz is not None and step_count % args_cli.visualize_update_interval == 0:
+                debug_goal_idx = visualization_goal_index(
+                    path_plan.cumulative_lengths,
+                    progress_index=int(path_progress[0]),
+                    goal_representation=goal_representation,
+                    goal_horizon_steps=goal_horizon_steps,
+                    dt=dt,
+                    speed=args_cli.desired_speed,
+                )
+                debug_viz.update(
+                    robot_position_w=raw_env._robot.data.root_pos_w[0].cpu().numpy(),
+                    progress_index=int(path_progress[0]),
+                    goal_index=debug_goal_idx,
+                )
+
             update_delayed_buffers(
                 proprio_buffer,
                 action_buffer,
@@ -754,6 +927,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                     reset_pos = raw_env._robot.data.root_pos_w.cpu().numpy()
                     reset_quat = raw_env._robot.data.root_quat_w.cpu().numpy()
                     path_plan.rebuild_from_robot(reset_pos, reset_quat, i)
+                    if debug_viz is not None and i == 0:
+                        debug_viz.set_plan(path_plan.path_w, path_plan.yaws_w, clear_actual=True)
                     speed_budget_start_arc[i] = 0.0
                     speed_budget_target_arc[i] = float(path_plan.cumulative_lengths[-1])
                     speed_budget_elapsed_s[i] = 0.0
@@ -824,6 +999,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 next_control_deadline = time.perf_counter()
 
     print("[INFO] Evaluation finished.")
+    if debug_viz is not None:
+        debug_viz.close()
     vec_env.close()
 
 

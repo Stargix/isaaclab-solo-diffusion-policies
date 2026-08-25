@@ -43,7 +43,7 @@ parser.add_argument(
 parser.add_argument(
     "--speed_budget_max_mps",
     type=float,
-    default=0.6,
+    default=0.8,
     help="Maximum remaining-route pace exposed to the actor; keep within the Phase-A support.",
 )
 parser.add_argument("--seed", type=int, default=42)

@@ -44,7 +44,9 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
     terminal_overshoot_m: float = 0.50
     goal_horizon_steps: int = 100
     v_req_clip: float = 2.0
-    speed_budget_max_mps: float = 0.6
+    # Keep headroom above the stage-2 nominal maximum (0.6 m/s): a delayed
+    # route at the upper nominal speed must be allowed to recover time.
+    speed_budget_max_mps: float = 0.8
     reset_x_pos = 0.0
     reset_y_pos = 0.0
     reset_yaw = 0.0

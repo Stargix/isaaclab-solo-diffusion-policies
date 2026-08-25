@@ -887,7 +887,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         and int(checkpoint.get("dppo_task_contract_version", 1)) >= 3
     )
     speed_budget_max_mps = float(
-        checkpoint.get("dppo_task_config", {}).get("speed_budget_max_mps", 0.6)
+        checkpoint.get("dppo_task_config", {}).get("speed_budget_max_mps", 0.8)
     )
     speed_budget_start_arc = np.asarray(
         [

@@ -15,7 +15,7 @@ at the nominal requested speed.  The reward is unchanged: this only makes
 accumulated timing debt observable to the actor.
 
 ```bash
-./isaaclab.sh -p scripts/dppo_diffusion_rl/train.py --checkpoint checkpoints_iri/checkpoints_dppo/dppo_path_3.pt --output_dir scripts/dppo_diffusion_rl/runs/dppo_path_4_speed_budget --run_name dppo_path_4_speed_budget --restart_optimization --reference_kl_coef 0.05 --num_envs 4096 --iterations 500 --rollout_chunks 32 --route_stage 2 --route_speed_max_mps 0.6 --speed_budget_max_mps 0.6 --save_interval 25 --headless --device cuda:0 --wandb
+./isaaclab.sh -p scripts/dppo_diffusion_rl/train.py --checkpoint checkpoints_iri/checkpoints_dppo/dppo_path_3.pt --output_dir scripts/dppo_diffusion_rl/runs/dppo_path_4_speed_budget --run_name dppo_path_4_speed_budget --restart_optimization --reference_kl_coef 0.05 --num_envs 4096 --iterations 500 --rollout_chunks 32 --route_stage 2 --route_speed_max_mps 0.6 --speed_budget_max_mps 0.8 --save_interval 25 --headless --device cuda:0 --wandb
 ```
 
 `--restart_optimization` is mandatory when loading path3: its critic and Adam
