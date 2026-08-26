@@ -38,6 +38,19 @@ parser.add_argument(
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument(
+    "--command_ui",
+    action="store_true",
+    help="Open a floating Omni.UI panel for live vx/vy/wz control (velocity-conditioned tasks).",
+)
+parser.add_argument(
+    "--command",
+    type=float,
+    nargs=3,
+    default=(1.0, 0.0, 0.0),
+    metavar=("VX", "VY", "WZ"),
+    help="Initial [vx, vy, wz] used by --command_ui.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -120,6 +133,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+    raw_env = env.unwrapped
+
+    live_command = None
+    command_window = None
+    command_window_keepalive = None
+    if args_cli.command_ui:
+        if args_cli.headless:
+            raise ValueError("--command_ui requires a graphical Isaac session; remove --headless.")
+        if args_cli.task != "solo12-bound-v0":
+            raise ValueError("--command_ui is currently supported for solo12-bound-v0 only.")
+        from live_command_ui import LiveSE2Command, build_live_command_window
+
+        for _ in range(3):
+            simulation_app.update()
+        live_command = LiveSE2Command(
+            tuple(args_cli.command),
+            bounds=((0.60, 1.50), (-0.10, 0.10), (-0.25, 0.25)),
+        )
+        command_window, command_window_keepalive = build_live_command_window(live_command)
 
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv):
@@ -177,14 +209,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     dt = env.unwrapped.step_dt
 
-    # reset environment
+    # Reset environment and, for the optional UI, refresh observations after
+    # writing the command so the actor sees the selected velocity immediately.
     obs = env.get_observations()
+    if live_command is not None:
+        def refresh_live_command():
+            command = torch.tensor(live_command.get(), device=raw_env.device, dtype=torch.float32)
+            raw_env._commands[:, :3] = command.unsqueeze(0).expand(raw_env.num_envs, -1)
+
+        refresh_live_command()
+        obs = env.get_observations()
     timestep = 0
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
         # run everything in inference mode
         with torch.inference_mode():
+            if live_command is not None:
+                refresh_live_command()
+                obs = env.get_observations()
             # agent stepping
             actions = policy(obs)
             # env stepping

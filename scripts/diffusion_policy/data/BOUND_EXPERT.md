@@ -96,6 +96,17 @@ adapter and is not part of this baseline.
   env.command_ang_vel_z_range='[0.0,0.0]'
 ```
 
+For an interactive GUI with a floating speed panel, use the RSL-RL player
+below. The panel keeps commands inside the bound training envelope and writes
+the selected command back into the observation before every actor call:
+
+```powershell
+.\isaaclab.bat -p scripts/reinforcement_learning/rsl_rl/play.py --task solo12-bound-v0 --checkpoint checkpoints_iri/checkpoints_bound/bound_v1.pt --num_envs 1 --real-time --command_ui --command 1.25 0.0 0.0 --device cuda:0
+```
+
+Do not add `--headless`. The sliders control `vx`, `vy` and `wz`; `vx` is
+limited to 0.60--1.50 m/s, matching the curriculum and avoiding an OOD probe.
+
 ## Acceptance before collecting data
 
 Do not select a checkpoint from mean reward alone. At curriculum stage 2 verify:
