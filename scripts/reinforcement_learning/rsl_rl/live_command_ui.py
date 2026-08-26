@@ -52,6 +52,9 @@ def build_live_command_window(
                 low, high = state._bounds[index]
                 with ui.HStack(spacing=8, height=30):
                     ui.Label(label, width=145)
+                    if low == high:
+                        ui.Label(f"{low:.2f} (fixed by task)", width=305)
+                        continue
                     model = ui.SimpleFloatModel(state.get()[index], min=low, max=high)
                     ui.FloatField(model, width=115)
                     ui.FloatSlider(model, min=low, max=high, width=190)
@@ -62,5 +65,5 @@ def build_live_command_window(
                         model.add_value_changed_fn(callback)
                         keepalive.append(callback)
 
-            ui.Label("The sliders are clipped to the bound training envelope.", height=18)
+            ui.Label("Editable commands are clipped to the task's training envelope.", height=18)
     return window, keepalive

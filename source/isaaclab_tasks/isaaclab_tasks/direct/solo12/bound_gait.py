@@ -64,3 +64,34 @@ def bound_stance_targets(
     """Return smooth desired contact states in FL, FR, RL, RR order."""
 
     return soft_stance_target(bound_leg_phases(phase), duty_factor, transition_width)
+
+
+def bound_pair_desynchronization(contact_probability: torch.Tensor) -> torch.Tensor:
+    """Return the mean probabilistic XOR of the front and rear pairs.
+
+    ``contact_probability`` must be ordered FL, FR, RL, RR. Unlike a simple
+    pair-agreement metric, this quantity directly penalizes one-foot support
+    inside either pair and is differentiable with respect to soft contacts.
+    """
+
+    if contact_probability.shape[-1] != 4:
+        raise ValueError(f"Expected four contact probabilities, got {contact_probability.shape}.")
+    probability = torch.clamp(contact_probability, 0.0, 1.0)
+    front_xor = probability[..., 0] * (1.0 - probability[..., 1]) + (
+        1.0 - probability[..., 0]
+    ) * probability[..., 1]
+    rear_xor = probability[..., 2] * (1.0 - probability[..., 3]) + (
+        1.0 - probability[..., 2]
+    ) * probability[..., 3]
+    return 0.5 * (front_xor + rear_xor)
+
+
+def diagonal_contact_probability(contact_probability: torch.Tensor) -> torch.Tensor:
+    """Return probability mass assigned to either diagonal two-foot pattern."""
+
+    if contact_probability.shape[-1] != 4:
+        raise ValueError(f"Expected four contact probabilities, got {contact_probability.shape}.")
+    p = torch.clamp(contact_probability, 0.0, 1.0)
+    diagonal_fl_rr = p[..., 0] * (1.0 - p[..., 1]) * (1.0 - p[..., 2]) * p[..., 3]
+    diagonal_fr_rl = (1.0 - p[..., 0]) * p[..., 1] * p[..., 2] * (1.0 - p[..., 3])
+    return diagonal_fl_rr + diagonal_fr_rl

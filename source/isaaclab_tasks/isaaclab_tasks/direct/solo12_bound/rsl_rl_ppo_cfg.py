@@ -37,3 +37,11 @@ class Solo12BoundPPORunnerCfg(Solo12PPORunnerCfg):
         desired_kl=0.01,
         max_grad_norm=0.5,
     )
+
+
+@configclass
+class Solo12BoundV2PPORunnerCfg(Solo12BoundPPORunnerCfg):
+    """Use the same PPO hyperparameters while isolating v2 checkpoints."""
+
+    experiment_name = "solo12_rsl_rl_bound_v2_runs"
+    run_name = "solo12_bound_straight_1p5_v2"

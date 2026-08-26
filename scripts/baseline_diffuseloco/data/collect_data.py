@@ -151,7 +151,7 @@ SKILL_COMMAND_RANGES: Dict[str, Dict[str, Tuple[float, float]]] = {
     "walk":   {"vx": (-1.0, 1.0), "vy": (-0.5, 0.5), "wz": (-0.5, 0.5)},
     "crouch": {"vx": (-1.0, 1.0), "vy": (-0.5, 0.5), "wz": (-0.5, 0.5)},
     "jump":   {"vx": (-1.2, 1.2),  "vy": (-0.6, 0.6),  "wz": (-0.6, 0.6)},
-    "bound":  {"vx": (1.0, 1.5), "vy": (-0.1, 0.1), "wz": (-0.25, 0.25)},
+    "bound":  {"vx": (1.0, 1.5), "vy": (0.0, 0.0), "wz": (0.0, 0.0)},
     "sprint": {"vx": (0.3, 2.5), "vy": (-0.3, 0.3), "wz": (-0.3, 0.3)},
     # two_feet was trained for a narrower, conservative command envelope.
     "two_feet": {"vx": (-0.5, 0.5), "vy": (-0.3, 0.3), "wz": (-0.5, 0.5)},

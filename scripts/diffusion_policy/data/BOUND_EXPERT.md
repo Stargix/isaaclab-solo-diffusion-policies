@@ -1,5 +1,10 @@
 # Solo12 bound expert (0.8--1.5 m/s)
 
+> `solo12-bound-v0` and this document preserve the first experiment. Its
+> checkpoint is stable and fast but was measured to have left/right splitting
+> and lateral drift, so it must not be collected as a bound expert. The corrected
+> experiment and commands are documented in `BOUND_EXPERT_V2.md`.
+
 ## Scope
 
 `solo12-bound-v0` trains one visibly distinct high-speed expert without changing
