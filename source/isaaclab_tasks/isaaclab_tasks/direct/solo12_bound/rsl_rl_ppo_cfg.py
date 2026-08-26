@@ -45,3 +45,11 @@ class Solo12BoundV2PPORunnerCfg(Solo12BoundPPORunnerCfg):
 
     experiment_name = "solo12_rsl_rl_bound_v2_runs"
     run_name = "solo12_bound_straight_1p5_v2"
+
+
+@configclass
+class Solo12BoundV3PPORunnerCfg(Solo12BoundPPORunnerCfg):
+    """Separate outputs for the from-scratch, mirror-regularized bound."""
+
+    experiment_name = "solo12_rsl_rl_bound_v3_runs"
+    run_name = "solo12_bound_mirror_1p5_v3"

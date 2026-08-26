@@ -116,9 +116,12 @@ class Solo12BoundV2Env(Solo12BoundEnv):
             raise ValueError(f"Reward tolerance must be positive, got {tolerance}.")
         return torch.clamp(torch.square(error / tolerance), max=clip)
 
-    def _get_rewards(self) -> torch.Tensor:
-        root_lin_vel_b = self._robot.data.root_lin_vel_b
-        root_ang_vel_b = self._robot.data.root_ang_vel_b
+    def _compute_command_tracking_scores(
+        self,
+        root_lin_vel_b: torch.Tensor,
+        root_ang_vel_b: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Compute v2 command scores behind an overrideable task-score hook."""
 
         forward_error = self._commands[:, 0] - root_lin_vel_b[:, 0]
         lateral_error = self._commands[:, 1] - root_lin_vel_b[:, 1]
@@ -133,8 +136,6 @@ class Solo12BoundV2Env(Solo12BoundEnv):
             -torch.square(yaw_rate_error / self.cfg.bound_yaw_rate_tracking_std_rps)
         )
 
-        # Body-frame vy=0 and wz=0 alone do not prevent a persistent heading
-        # offset.  Penalize heading relative to the configured reset direction.
         quat_w = self._robot.data.root_quat_w
         heading = torch.atan2(
             2.0 * (quat_w[:, 0] * quat_w[:, 3] + quat_w[:, 1] * quat_w[:, 2]),
@@ -145,7 +146,26 @@ class Solo12BoundV2Env(Solo12BoundEnv):
         heading_score = torch.exp(
             -torch.square(heading_error / self.cfg.bound_heading_tracking_std_rad)
         )
-        command_score = forward_score * lateral_score * yaw_rate_score * heading_score
+
+        return {
+            "forward_score": forward_score,
+            "lateral_score": lateral_score,
+            "yaw_rate_score": yaw_rate_score,
+            "heading_score": heading_score,
+            "heading_error": heading_error,
+            "command_score": forward_score * lateral_score * yaw_rate_score * heading_score,
+        }
+
+    def _get_rewards(self) -> torch.Tensor:
+        root_lin_vel_b = self._robot.data.root_lin_vel_b
+        root_ang_vel_b = self._robot.data.root_ang_vel_b
+        tracking = self._compute_command_tracking_scores(root_lin_vel_b, root_ang_vel_b)
+        forward_score = tracking["forward_score"]
+        lateral_score = tracking["lateral_score"]
+        yaw_rate_score = tracking["yaw_rate_score"]
+        heading_score = tracking["heading_score"]
+        heading_error = tracking["heading_error"]
+        command_score = tracking["command_score"]
 
         desired_contact = bound_stance_targets(
             self._bound_phase,

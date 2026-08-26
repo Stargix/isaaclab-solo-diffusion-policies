@@ -369,6 +369,7 @@ from isaaclab.utils.io import dump_yaml
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlSymmetryCfg, RslRlVecEnvWrapper
 
 import isaaclab_tasks  # noqa: F401
+from isaaclab_tasks.direct.solo12 import bound_symmetry
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
@@ -1419,7 +1420,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if symmetry_enabled:
         if agent_cfg.class_name != "OnPolicyRunner":
             raise ValueError("Symmetry mode currently requires the OnPolicyRunner / PPO path in RSL-RL.")
-        if args_cli.task in _SOLO12_DIRECT_SYMMETRY_TASKS:
+        if args_cli.task == "solo12-bound-v3":
+            symmetry_fn = bound_symmetry.compute_bound_left_right_symmetry
+        elif args_cli.task in _SOLO12_DIRECT_SYMMETRY_TASKS:
             symmetry_fn = solo12_symmetry.compute_symmetric_observations_actions
         elif args_cli.task in {
             "Isaac-Solo12-Race-Direct-v0",
@@ -1439,7 +1442,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             symmetry_fn = solo12_race_symmetry.compute_symmetric_observations_actions
         else:
             raise ValueError(
-                "Symmetry mode is implemented for Solo12 direct locomotion/base-IMU tasks "
+                "Symmetry mode is implemented for Solo12 direct locomotion/base-IMU/bound-v3 tasks "
                 "and the Isaac-Solo12-Race-* direct tasks only."
             )
         agent_cfg.algorithm.symmetry_cfg = RslRlSymmetryCfg(
@@ -1509,7 +1512,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg_py = inspect.getsourcefile(type(env_cfg))
     env_py = inspect.getsourcefile(env.unwrapped.__class__)
     agent_cfg_py = inspect.getsourcefile(type(agent_cfg))
-    symmetry_py = inspect.getsourcefile(solo12_symmetry) if symmetry_enabled else None
+    symmetry_py = inspect.getsourcefile(symmetry_fn) if symmetry_enabled else None
 
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)

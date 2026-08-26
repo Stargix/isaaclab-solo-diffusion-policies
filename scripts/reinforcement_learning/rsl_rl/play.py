@@ -141,17 +141,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.command_ui:
         if args_cli.headless:
             raise ValueError("--command_ui requires a graphical Isaac session; remove --headless.")
-        if args_cli.task not in {"solo12-bound-v0", "solo12-bound-v2"}:
+        if args_cli.task not in {"solo12-bound-v0", "solo12-bound-v2", "solo12-bound-v3"}:
             raise ValueError("--command_ui is currently supported for the Solo12 bound tasks only.")
         from live_command_ui import LiveSE2Command, build_live_command_window
 
         for _ in range(3):
             simulation_app.update()
-        command_bounds = (
-            ((0.60, 1.50), (0.0, 0.0), (0.0, 0.0))
-            if args_cli.task == "solo12-bound-v2"
-            else ((0.60, 1.50), (-0.10, 0.10), (-0.25, 0.25))
-        )
+        if args_cli.task == "solo12-bound-v3":
+            command_bounds = ((0.90, 1.50), (0.0, 0.0), (0.0, 0.0))
+        elif args_cli.task == "solo12-bound-v2":
+            command_bounds = ((0.60, 1.50), (0.0, 0.0), (0.0, 0.0))
+        else:
+            command_bounds = ((0.60, 1.50), (-0.10, 0.10), (-0.25, 0.25))
         live_command = LiveSE2Command(tuple(args_cli.command), bounds=command_bounds)
         command_window, command_window_keepalive = build_live_command_window(live_command)
 

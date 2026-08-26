@@ -1,5 +1,9 @@
 # Solo12 straight bound expert v2
 
+> Experimental result: `bound_v2_1.pt` remained in curriculum stage 0 and
+> converged to an asymmetric, under-speed gait. It is retained as a negative
+> result; the corrected design is documented in `BOUND_EXPERT_V3.md`.
+
 ## Decision and scope
 
 `solo12-bound-v2` corrects the gait objective without changing

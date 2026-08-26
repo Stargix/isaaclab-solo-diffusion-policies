@@ -2,8 +2,8 @@
 
 > `solo12-bound-v0` and this document preserve the first experiment. Its
 > checkpoint is stable and fast but was measured to have left/right splitting
-> and lateral drift, so it must not be collected as a bound expert. The corrected
-> experiment and commands are documented in `BOUND_EXPERT_V2.md`.
+> and lateral drift, so it must not be collected as a bound expert. V2 remained
+> asymmetric; the current experiment and commands are in `BOUND_EXPERT_V3.md`.
 
 ## Scope
 
