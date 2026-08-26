@@ -10,6 +10,10 @@
 import argparse
 import sys
 
+# On Windows, load RSL-RL (and its tensordict native extension) before Kit.
+# Importing it after AppLauncher can crash CPython during module initialization.
+from rsl_rl.runners import DistillationRunner, OnPolicyRunner
+
 from isaaclab.app import AppLauncher
 
 # local imports
@@ -58,7 +62,6 @@ import time
 
 import gymnasium as gym
 import torch
-from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
 from isaaclab.envs import (
     DirectMARLEnv,
