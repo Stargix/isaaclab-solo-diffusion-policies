@@ -282,6 +282,7 @@ SKILL_COMMAND_RANGES: Dict[str, Dict[str, Tuple[float, float]]] = {
     # crouch policy's stable envelope (trained up to +-1.0 / +-0.5 / +-1.0).
     "crouch": {"vx": (-0.75, 0.75), "vy": (-0.5, 0.5), "wz": (-0.5, 0.5)},
     "jump":   {"vx": (-1.2, 1.2),  "vy": (-0.6, 0.6),  "wz": (-0.6, 0.6)},
+    "bound":  {"vx": (1.0, 1.5), "vy": (-0.1, 0.1), "wz": (-0.25, 0.25)},
     "sprint": {"vx": (0.3, 2.0), "vy": (-0.2, 0.2), "wz": (-0.2, 0.2)},
 }
 SHARED_HEIGHT_COMMAND_RANGE = {"vx": (-0.75, 0.75), "vy": (-0.5, 0.5), "wz": (-0.5, 0.5)}
@@ -490,7 +491,7 @@ def resample_command(
 def infer_skill_name(checkpoint_path: str) -> str:
     """Map a checkpoint filename to one of the known skill names."""
     name = Path(checkpoint_path).stem.lower()
-    for skill in ("walk", "crouch", "jump", "crab", "sprint"):
+    for skill in ("walk", "crouch", "jump", "crab", "bound", "sprint"):
         if skill in name:
             return skill
     return name
