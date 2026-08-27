@@ -1,6 +1,13 @@
 # Phase A fast-trot data gate
 
-Status: **data accepted for a first controlled training trial; training has not been configured or started.**
+Status: **pilot data validated structurally but rejected by the temporal-fidelity gate; training has not been configured or started.**
+
+The post-collection analysis found that the frozen successful A0 artifact was
+collected with a 3 s command interval and 10% stop probability, whereas the
+fast-trot pilot used the stale 5 s / 8% recipe documented for an earlier
+dataset. Do not train from the current merged HDF5. See
+[`DATA_REVIEW.md`](DATA_REVIEW.md) for the evidence and corrected recollection
+decision.
 
 This iteration extends the frozen, successful walk/crouch Phase-A dataset with one independently collected fast-trot expert. It deliberately does not regenerate walk/crouch, add transition demonstrations, or change diffusion training code. The aim is to preserve the successful A0 experiment and isolate the effect of adding a genuinely faster action manifold.
 

@@ -1,6 +1,6 @@
 {
   "schema": "phase_a_fast_trot_data_gate_v1",
-  "status": "data_validated_training_not_started",
+  "status": "pilot_validated_temporal_fidelity_failed_recollection_required",
   "branch": "diffusion-policy-fast-trot",
   "base_commit": "719b4b7",
   "goal_representation": "hindsight_geom_avg12",
@@ -48,6 +48,8 @@
     "sampled_goals": 50000,
     "duplicate_waypoint_fraction": 0.0002,
     "stop_fraction_v_avg_lt_0p02": 0.01842,
-    "training_code_modified": false
+    "training_code_modified": false,
+    "temporal_fidelity_gate": false,
+    "recollection_required": true
   }
 }
