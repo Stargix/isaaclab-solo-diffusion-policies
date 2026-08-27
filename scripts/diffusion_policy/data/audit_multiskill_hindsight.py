@@ -134,6 +134,8 @@ def audit(args: argparse.Namespace) -> tuple[dict[str, object], dict[str, dict[s
     frame_counts: Counter[str] = Counter()
     window_counts: Counter[str] = Counter()
     demo_info: list[tuple[str, str, int, int]] = []
+    exact_terminal_xy: dict[str, list[np.ndarray]] = defaultdict(list)
+    max_abs_terminal_y: dict[str, dict[str, object]] = {}
 
     with h5py.File(dataset_path, "r") as file:
         if "data" not in file:
@@ -186,6 +188,33 @@ def audit(args: argparse.Namespace) -> tuple[dict[str, object], dict[str, dict[s
             valid_windows = max(0, length - args.goal_horizon_steps)
             window_counts[skill] += valid_windows
             demo_info.append((name, skill, length, valid_windows))
+            if valid_windows:
+                root = obs["root_pos_w"][:].astype(np.float64)
+                quaternion = obs["root_quat_w"][:].astype(np.float64)
+                if not np.isfinite(root).all() or not np.isfinite(quaternion).all():
+                    errors.append(f"{name}: non-finite root pose")
+                    continue
+                displacement_w = root[args.goal_horizon_steps :, :2] - root[: -args.goal_horizon_steps, :2]
+                yaw = _yaw_from_wxyz(quaternion[: -args.goal_horizon_steps])
+                cosine, sine = np.cos(yaw), np.sin(yaw)
+                terminal_xy = np.stack(
+                    (
+                        cosine * displacement_w[:, 0] + sine * displacement_w[:, 1],
+                        -sine * displacement_w[:, 0] + cosine * displacement_w[:, 1],
+                    ),
+                    axis=-1,
+                ).astype(np.float32)
+                exact_terminal_xy[skill].append(terminal_xy)
+                local_index = int(np.argmax(np.abs(terminal_xy[:, 1])))
+                candidate = {
+                    "demo": name,
+                    "anchor_step": local_index,
+                    "terminal_x_m": float(terminal_xy[local_index, 0]),
+                    "terminal_y_m": float(terminal_xy[local_index, 1]),
+                }
+                current = max_abs_terminal_y.get(skill)
+                if current is None or abs(candidate["terminal_y_m"]) > abs(current["terminal_y_m"]):
+                    max_abs_terminal_y[skill] = candidate
 
     expected = list(args.expected_skills) if args.expected_skills else skill_names
     if skill_names != expected:
@@ -295,6 +324,11 @@ def audit(args: argparse.Namespace) -> tuple[dict[str, object], dict[str, dict[s
         goals = item["goals"]
         command = item["command"]
         velocity = item["body_velocity"]
+        terminal_xy = (
+            np.concatenate(exact_terminal_xy[skill], axis=0)
+            if exact_terminal_xy[skill]
+            else np.empty((0, 2), dtype=np.float32)
+        )
         skill_summaries[skill] = {
             "demos": int(demo_counts[skill]),
             "frames": int(frame_counts[skill]),
@@ -313,6 +347,15 @@ def audit(args: argparse.Namespace) -> tuple[dict[str, object], dict[str, dict[s
             "hindsight_average_speed_mps": _summary(goals[:, 11]),
             "hindsight_terminal_height_m": _summary(goals[:, 10]),
             "hindsight_terminal_distance_m": _summary(np.linalg.norm(goals[:, 6:8], axis=1)),
+            "exact_hindsight_terminal_x_m": _summary(terminal_xy[:, 0]),
+            "exact_hindsight_terminal_y_m": _summary(terminal_xy[:, 1]),
+            "exact_terminal_abs_y_gt_1m_fraction": (
+                float(np.mean(np.abs(terminal_xy[:, 1]) > 1.0)) if len(terminal_xy) else 0.0
+            ),
+            "exact_terminal_backward_x_lt_0_fraction": (
+                float(np.mean(terminal_xy[:, 0] < 0.0)) if len(terminal_xy) else 0.0
+            ),
+            "max_abs_terminal_y_window": max_abs_terminal_y.get(skill),
         }
 
     nonzero_frames = [frame_counts[skill] for skill in skill_names if frame_counts[skill] > 0]
