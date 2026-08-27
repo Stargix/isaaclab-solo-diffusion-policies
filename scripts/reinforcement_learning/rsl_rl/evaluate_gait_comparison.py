@@ -64,7 +64,10 @@ FOOT_LABELS = ("FL", "FR", "RL", "RR")
 def _comparison_spec() -> tuple[str, tuple[str, str], tuple[int, int]]:
     """Return task, policy labels and observation dimensions for the selected preset."""
     if args.comparison == "walk_flying_trot":
-        return "solo12-flying-trot-v0", ("walk_final", "flying_trot"), (48, 48)
+        # Both checkpoints consume the base 48-D locomotion observation.  Run them
+        # in the already validated base Solo12 environment so the comparison only
+        # measures the learned actors, rather than differences between task wrappers.
+        return "solo12-v0", ("walk_final", "flying_trot"), (48, 48)
     return "solo12-bound-v2", ("walk_final", "bound_v2"), (48, 50)
 
 
@@ -188,10 +191,10 @@ def _rollout(checkpoints: dict[str, Path]) -> dict[str, dict[str, np.ndarray]]:
             policy_obs = observations["policy"]
             with torch.inference_mode():
                 actions = torch.cat(
-                    (
-                        actors["walk_final"](policy_obs[group_slices["walk_final"], :48]),
-                        actors["bound_v2"](policy_obs[group_slices["bound_v2"], :50]),
-                    ),
+                    [
+                        actors[label](policy_obs[group_slices[label], :obs_dim])
+                        for label, obs_dim in zip(labels, obs_dims)
+                    ],
                     dim=0,
                 )
                 observations, _, terminated, truncated, _ = env.step(actions)
@@ -280,6 +283,21 @@ def _summarize(data: dict[str, np.ndarray]) -> dict[str, object]:
     pitch_proxy = np.arcsin(np.clip(data["projected_gravity_b"][..., 0], -1.0, 1.0))
     valid_count_per_env = valid.sum(axis=0)
     representative_env = int(np.argmax(valid_count_per_env))
+    valid_pairs = valid[1:] & valid[:-1]
+    contact_transitions = contacts[1:] != contacts[:-1]
+    # Per-foot binary contact-state changes per second.  This is a model-free
+    # cadence fingerprint: a flying trot should exhibit a higher rate and a
+    # lower stance duty factor than the regular walk at the same command.
+    transition_mask = valid_pairs[..., None]
+    transition_rate_hz = float(
+        np.sum(contact_transitions & transition_mask)
+        / max(1, np.sum(transition_mask))
+        / float(data["dt"])
+    )
+    duty_factors = {
+        FOOT_LABELS[idx]: float(np.mean(_masked_flat(contacts[..., idx], valid)))
+        for idx in range(4)
+    }
 
     summary = {
         "valid_samples": int(valid.sum()),
@@ -298,6 +316,8 @@ def _summarize(data: dict[str, np.ndarray]) -> dict[str, object]:
         "flight_fraction": float(np.mean(_masked_flat(flight, valid))),
         "bound_pattern_fraction": float(np.mean(_masked_flat(bound_pattern, valid))),
         "trot_pattern_fraction": float(np.mean(_masked_flat(trot_pattern, valid))),
+        "mean_foot_duty_factor": float(np.mean(list(duty_factors.values()))),
+        "contact_transition_rate_hz": transition_rate_hz,
         "front_pair_stance_jaccard": _stance_jaccard(
             contacts[..., 0], contacts[..., 1], valid
         ),
@@ -306,10 +326,7 @@ def _summarize(data: dict[str, np.ndarray]) -> dict[str, object]:
         ),
         "fl_rr_stance_jaccard": _stance_jaccard(contacts[..., 0], contacts[..., 3], valid),
         "fr_rl_stance_jaccard": _stance_jaccard(contacts[..., 1], contacts[..., 2], valid),
-        "foot_duty_factors": {
-            FOOT_LABELS[idx]: float(np.mean(_masked_flat(contacts[..., idx], valid)))
-            for idx in range(4)
-        },
+        "foot_duty_factors": duty_factors,
         "contact_correlation": _contact_correlation(contacts, valid).tolist(),
     }
     return summary
@@ -382,8 +399,12 @@ def _plot(
     speed_ax.grid(alpha=0.25)
 
     metric_ax = axes[1, 2]
-    metric_names = ("bound_pattern_fraction", "trot_pattern_fraction", "flight_fraction")
-    metric_labels = ("bound pattern", "trot pattern", "flight")
+    if args.comparison == "walk_flying_trot":
+        metric_names = ("trot_pattern_fraction", "flight_fraction", "mean_foot_duty_factor")
+        metric_labels = ("trot pattern", "flight", "stance duty")
+    else:
+        metric_names = ("bound_pattern_fraction", "trot_pattern_fraction", "flight_fraction")
+        metric_labels = ("bound pattern", "trot pattern", "flight")
     x = np.arange(len(metric_names))
     width = 0.36
     for offset, label in zip((-width / 2, width / 2), labels):
