@@ -1,6 +1,6 @@
 {
   "schema": "phase_a_single_skill_collection_v1",
-  "description": "Reproducible command envelope for the joint walk/crouch hindsight dataset.",
+  "description": "Reproducible command envelopes for the walk/crouch baseline and additive fast-trot sprint expert.",
   "shared": {
     "route_profile": "phase_a",
     "include_warmup_frames": true,
@@ -42,5 +42,23 @@
     "phase_a_yaw_rate_abs_max": 0.35,
     "seed": 43,
     "output_name": "crouch_phase_a_balanced_slow_v2.hdf5"
+  },
+  "sprint_fast_trot": {
+    "task": "solo12-flying-trot-v0",
+    "checkpoint": "checkpoints_iri/checkpoints_bound/flying_trot.pt",
+    "skill_name": "sprint",
+    "desired_base_height": 0.28,
+    "num_envs": 1024,
+    "physics_dr_mode": "off",
+    "phase_a_forward_speed_min": 0.75,
+    "phase_a_forward_speed_max": 1.50,
+    "phase_a_arc_forward_speed_max": 1.20,
+    "phase_a_reverse_speed_abs_max": 0.0,
+    "phase_a_lateral_speed_abs_max": 0.12,
+    "phase_a_lateral_forward_speed_min": 0.75,
+    "phase_a_lateral_forward_speed_max": 1.10,
+    "phase_a_yaw_rate_abs_max": 0.30,
+    "seed": 44,
+    "output_name": "sprint_fast_trot_phase_a_v1.hdf5"
   }
 }

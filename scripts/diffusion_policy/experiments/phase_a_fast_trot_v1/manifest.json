@@ -1,0 +1,53 @@
+{
+  "schema": "phase_a_fast_trot_data_gate_v1",
+  "status": "data_validated_training_not_started",
+  "branch": "diffusion-policy-fast-trot",
+  "base_commit": "719b4b7",
+  "goal_representation": "hindsight_geom_avg12",
+  "goal_horizon_steps": 100,
+  "control_rate_hz": 50.0,
+  "inputs": {
+    "frozen_walk_crouch_dataset": {
+      "path": "scripts/diffusion_policy/data/datasets/walk_crouch_phase_a_waypoint_v3.hdf5",
+      "bytes": 680785080,
+      "sha256": "00AEA50B71D7CE3FB69C05996F51AE43F6A56623AC8A3314F7B684AE903E3A3F"
+    },
+    "fast_trot_expert": {
+      "path": "checkpoints_iri/checkpoints_bound/flying_trot.pt",
+      "bytes": 1323445,
+      "sha256": "4CE1CC3452044959A35923B24A7A2DF3A1381851F11B35B866EA6863441AF9F9"
+    }
+  },
+  "outputs": {
+    "fast_trot_dataset": {
+      "path": "scripts/diffusion_policy/data/datasets/sprint_fast_trot_phase_a_v1.hdf5",
+      "bytes": 348931617,
+      "sha256": "D369A7E560C04010794AE0D514CA89AA9F4F7B3D37E7A366AB2B12287F0B5622",
+      "demos": 3345,
+      "frames": 1000155,
+      "collection_survival_rate": 0.9994024499551838
+    },
+    "merged_dataset": {
+      "path": "scripts/diffusion_policy/data/datasets/walk_crouch_sprint_phase_a_v1.hdf5",
+      "bytes": 1021092973,
+      "sha256": "CC6BEBE9904B7AF4E961A4025C53FC118D9C94DD42A2E24D4DB49F46CAD133B2",
+      "demos": 10035,
+      "frames": 3000465,
+      "skill_names": [
+        "walk",
+        "crouch",
+        "sprint"
+      ],
+      "frames_per_skill": 1000155,
+      "shuffle_seed": 46
+    }
+  },
+  "audit": {
+    "contract_valid": true,
+    "frame_balance_min_over_max": 1.0,
+    "sampled_goals": 50000,
+    "duplicate_waypoint_fraction": 0.0002,
+    "stop_fraction_v_avg_lt_0p02": 0.01842,
+    "training_code_modified": false
+  }
+}

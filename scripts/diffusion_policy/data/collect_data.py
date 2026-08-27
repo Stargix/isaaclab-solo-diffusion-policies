@@ -167,6 +167,15 @@ parser.add_argument("--phase_a_reverse_speed_abs_max", type=float, default=0.35,
 parser.add_argument("--phase_a_lateral_speed_abs_max", type=float, default=0.35,
                     help="Legacy no-tracker Phase-A: maximum lateral speed magnitude.")
 parser.add_argument(
+    "--phase_a_lateral_forward_speed_min",
+    type=float,
+    default=0.15,
+    help=(
+        "Legacy no-tracker Phase-A: minimum forward component sampled for lateral phases. "
+        "The 0.15 m/s default exactly preserves the walk/crouch collection protocol."
+    ),
+)
+parser.add_argument(
     "--phase_a_lateral_forward_speed_max",
     type=float,
     default=0.40,
@@ -285,6 +294,7 @@ SKILL_COMMAND_RANGES: Dict[str, Dict[str, Tuple[float, float]]] = {
     "bound":  {"vx": (1.0, 1.5), "vy": (0.0, 0.0), "wz": (0.0, 0.0)},
     "sprint": {"vx": (0.3, 2.0), "vy": (-0.2, 0.2), "wz": (-0.2, 0.2)},
 }
+PHASE_A_SINGLE_SKILLS = frozenset(("walk", "crouch", "sprint"))
 SHARED_HEIGHT_COMMAND_RANGE = {"vx": (-0.75, 0.75), "vy": (-0.5, 0.5), "wz": (-0.5, 0.5)}
 
 # HDF5 convention string stored as an attribute for downstream consumers.
@@ -400,8 +410,11 @@ def _sample_phase_a_command(rng: random.Random, args: argparse.Namespace) -> tup
         raise ValueError("Require 0 < --phase_a_forward_speed_min <= --phase_a_forward_speed_max.")
     if not args.phase_a_forward_speed_min <= args.phase_a_arc_forward_speed_max:
         raise ValueError("--phase_a_arc_forward_speed_max must be at least --phase_a_forward_speed_min.")
-    if args.phase_a_lateral_forward_speed_max <= 0.0:
-        raise ValueError("--phase_a_lateral_forward_speed_max must be positive.")
+    if not 0.0 < args.phase_a_lateral_forward_speed_min <= args.phase_a_lateral_forward_speed_max:
+        raise ValueError(
+            "Require 0 < --phase_a_lateral_forward_speed_min "
+            "<= --phase_a_lateral_forward_speed_max."
+        )
     if min(args.phase_a_reverse_speed_abs_max, args.phase_a_lateral_speed_abs_max, args.phase_a_yaw_rate_abs_max) < 0.0:
         raise ValueError("Phase-A reverse/lateral/yaw limits must be non-negative.")
     if not 0.0 <= args.phase_a_stop_probability < 1.0:
@@ -410,16 +423,25 @@ def _sample_phase_a_command(rng: random.Random, args: argparse.Namespace) -> tup
         raise ValueError("--phase_a_stop_hold_s must be at least 2.0 s for the current hindsight horizon.")
 
     moving_probability = 1.0 - args.phase_a_stop_probability
+    moving_weights = {
+        "straight": 0.375,
+        "arc": 0.375,
+        "lateral": 0.150 if args.phase_a_lateral_speed_abs_max > 0.0 else 0.0,
+        "reverse": 0.100 if args.phase_a_reverse_speed_abs_max > 0.0 else 0.0,
+    }
+    moving_weight_sum = sum(moving_weights.values())
+    if moving_weight_sum <= 0.0:
+        raise ValueError("Phase-A requires at least one enabled moving command mode.")
     mode = rng.choices(
-        ("stop", "straight", "arc", "lateral", "reverse"),
+        ("stop", *moving_weights),
         # Preserve the original relative mix among moving modes, while making
         # stops a deliberate minority rather than the dominant sampled goal.
-        weights=(
-            args.phase_a_stop_probability,
-            0.375 * moving_probability,
-            0.375 * moving_probability,
-            0.150 * moving_probability,
-            0.100 * moving_probability,
+        # With all modes enabled this is bit-for-bit the old distribution. A
+        # zero capability limit now disables that unsupported mode instead of
+        # silently turning it into an extra stop command.
+        weights=(args.phase_a_stop_probability,) + tuple(
+            moving_probability * weight / moving_weight_sum
+            for weight in moving_weights.values()
         ),
         k=1,
     )[0]
@@ -444,8 +466,9 @@ def _sample_phase_a_command(rng: random.Random, args: argparse.Namespace) -> tup
     if mode == "lateral":
         direction = -1.0 if rng.random() < 0.5 else 1.0
         lateral_forward_upper = min(args.phase_a_lateral_forward_speed_max, args.phase_a_forward_speed_max)
+        lateral_forward_lower = min(args.phase_a_lateral_forward_speed_min, lateral_forward_upper)
         return (
-            rng.uniform(min(0.15, lateral_forward_upper), lateral_forward_upper),
+            rng.uniform(lateral_forward_lower, lateral_forward_upper),
             direction * rng.uniform(min(0.15, args.phase_a_lateral_speed_abs_max), args.phase_a_lateral_speed_abs_max),
             rng.uniform(-min(0.25, args.phase_a_yaw_rate_abs_max), min(0.25, args.phase_a_yaw_rate_abs_max)),
         )
@@ -1046,8 +1069,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             "The velocity-height schema is intentionally single-expert only. "
             "Collect one file per expert and merge them; chained transitions need an explicit per-skill height schedule."
         )
-    if args_cli.route_profile == "phase_a" and args_cli.skill_name not in (None, "walk", "crouch"):
-        raise ValueError("phase_a accepts exactly one named locomotion expert: --skill_name walk or crouch.")
+    if args_cli.route_profile == "phase_a" and args_cli.skill_name not in ({None} | PHASE_A_SINGLE_SKILLS):
+        raise ValueError(
+            "phase_a accepts exactly one named locomotion expert: "
+            f"--skill_name must be one of {sorted(PHASE_A_SINGLE_SKILLS)}."
+        )
     if args_cli.route_profile in {"phase_a", *CLOSED_LOOP_ROUTE_PROFILES} and not args_cli.include_warmup_frames:
         raise ValueError(
             "Phase-A route collection requires --include_warmup_frames so reset/start histories are represented."
@@ -1069,8 +1095,13 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     policy_mgr = PolicyManager(vec_env, agent_cfg, device, args_cli.mode,
                                args_cli.checkpoint, args_cli.checkpoints, args_cli.skill_name)
     skill_names = policy_mgr.skill_names
-    if args_cli.route_profile == "phase_a" and (len(skill_names) != 1 or skill_names[0] not in {"walk", "crouch"}):
-        raise ValueError(f"phase_a requires exactly one walk or crouch expert, got {skill_names}.")
+    if args_cli.route_profile == "phase_a" and (
+        len(skill_names) != 1 or skill_names[0] not in PHASE_A_SINGLE_SKILLS
+    ):
+        raise ValueError(
+            f"phase_a requires exactly one expert from {sorted(PHASE_A_SINGLE_SKILLS)}, "
+            f"got {skill_names}."
+        )
     num_envs = args_cli.num_envs
 
     state_tracker = CollectionState(num_envs, skill_names, args_cli, rng)
@@ -1129,6 +1160,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 "arc_forward_speed_max": args_cli.phase_a_arc_forward_speed_max,
                 "reverse_speed_abs_max": args_cli.phase_a_reverse_speed_abs_max,
                 "lateral_speed_abs_max": args_cli.phase_a_lateral_speed_abs_max,
+                "lateral_forward_speed_min": args_cli.phase_a_lateral_forward_speed_min,
                 "lateral_forward_speed_max": args_cli.phase_a_lateral_forward_speed_max,
                 "yaw_rate_abs_max": args_cli.phase_a_yaw_rate_abs_max,
                 "stop_probability": args_cli.phase_a_stop_probability,
