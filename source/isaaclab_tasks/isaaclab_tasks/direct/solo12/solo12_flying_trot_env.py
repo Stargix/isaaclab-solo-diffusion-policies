@@ -104,10 +104,15 @@ class Solo12FlyingTrotEnvCfg(Solo12EnvCfg):
             raise ValueError("Flying-trot mirror training assumes the symmetric vy range [-0.15, 0.15].")
         if self.command_ang_vel_z_range != (-0.35, 0.35):
             raise ValueError("Flying-trot mirror training assumes the symmetric wz range [-0.35, 0.35].")
-        if not LOCAL_GROUND_USD_PATH.is_file():
-            raise FileNotFoundError(f"Tracked local ground USD is missing: {LOCAL_GROUND_USD_PATH}")
-        self.terrain.terrain_type = "usd"
-        self.terrain.usd_path = str(LOCAL_GROUND_USD_PATH)
+        # Prefer the tracked USD when it is present (cluster checkout), but keep
+        # local evaluation portable: Isaac Lab's deterministic plane is an
+        # equivalent flat acquisition surface when the optional asset is absent.
+        if LOCAL_GROUND_USD_PATH.is_file():
+            self.terrain.terrain_type = "usd"
+            self.terrain.usd_path = str(LOCAL_GROUND_USD_PATH)
+        else:
+            self.terrain.terrain_type = "plane"
+            self.terrain.terrain_generator = None
         if "legs" in self.robot.actuators:
             self.robot.actuators["legs"].stiffness = self.kp
             self.robot.actuators["legs"].damping = self.kd

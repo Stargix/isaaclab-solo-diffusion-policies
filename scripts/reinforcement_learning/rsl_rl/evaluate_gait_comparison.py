@@ -10,6 +10,10 @@ from pathlib import Path
 
 import numpy as np
 
+# On Windows, load RSL-RL (and its tensordict native extension) before Kit.
+# Importing it after AppLauncher can crash CPython during module initialization.
+from rsl_rl.runners import DistillationRunner, OnPolicyRunner  # noqa: F401
+
 from isaaclab.app import AppLauncher
 
 
