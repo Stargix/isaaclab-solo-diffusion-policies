@@ -193,3 +193,9 @@ required for fidelity and quality:
 After recollection, rerun the exact terminal audit, compare zero-command mass
 and PCA regimes, merge with the frozen A0 HDF5 without regenerating walk or
 crouch, and stop again before changing any diffusion trainer configuration.
+
+PowerShell recollection command (single line):
+
+```powershell
+.\isaaclab.bat -p scripts/diffusion_policy/data/collect_data.py --mode single --task solo12-flying-trot-v0 --checkpoint checkpoints_iri/checkpoints_bound/flying_trot.pt --skill_name sprint --desired_base_height 0.28 --route_profile phase_a --include_warmup_frames --startup_hold_steps 25 --command_resample_time_s 3.0 --phase_a_forward_speed_min 0.75 --phase_a_forward_speed_max 1.50 --phase_a_arc_forward_speed_max 1.20 --phase_a_reverse_speed_abs_max 0.0 --phase_a_lateral_speed_abs_max 0.12 --phase_a_lateral_forward_speed_min 0.75 --phase_a_lateral_forward_speed_max 1.10 --phase_a_yaw_rate_abs_max 0.30 --phase_a_stop_probability 0.10 --phase_a_stop_hold_s 2.0 --fall_gravity_z -0.866 --num_envs 1024 --num_steps 1000000 --physics_dr_mode off --seed 46 --output_name sprint_fast_trot_phase_a_waypoint_v2.hdf5 --headless
+```
