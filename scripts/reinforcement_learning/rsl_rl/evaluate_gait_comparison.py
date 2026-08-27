@@ -14,9 +14,19 @@ from isaaclab.app import AppLauncher
 
 
 parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument(
+    "--comparison",
+    choices=("walk_bound", "walk_flying_trot"),
+    default="walk_bound",
+    help="comparison preset; flying-trot uses the compatible 48-D walk observation contract",
+)
 parser.add_argument("--walk_checkpoint", default="checkpoints/walk_final.pt")
 parser.add_argument(
     "--bound_checkpoint", default="checkpoints_iri/checkpoints_bound/bound_v2.pt"
+)
+parser.add_argument(
+    "--flying_trot_checkpoint",
+    default="checkpoints_iri/checkpoints_bound/flying_trot.pt",
 )
 parser.add_argument("--speed", type=float, default=0.8)
 parser.add_argument("--duration_s", type=float, default=8.0)
@@ -47,8 +57,16 @@ FOOT_NAMES = ("FL_calf", "FR_calf", "RL_calf", "RR_calf")
 FOOT_LABELS = ("FL", "FR", "RL", "RR")
 
 
+def _comparison_spec() -> tuple[str, tuple[str, str], tuple[int, int]]:
+    """Return task, policy labels and observation dimensions for the selected preset."""
+    if args.comparison == "walk_flying_trot":
+        return "solo12-flying-trot-v0", ("walk_final", "flying_trot"), (48, 48)
+    return "solo12-bound-v2", ("walk_final", "bound_v2"), (48, 50)
+
+
 def _configure_env():
-    cfg = load_cfg_from_registry("solo12-bound-v2", "env_cfg_entry_point")
+    task, _, _ = _comparison_spec()
+    cfg = load_cfg_from_registry(task, "env_cfg_entry_point")
     cfg.scene.num_envs = 2 * args.num_envs
     cfg.sim.device = args.device or cfg.sim.device
     cfg.seed = args.seed
@@ -115,17 +133,19 @@ def _empty_records() -> dict[str, list[np.ndarray]]:
 def _rollout(checkpoints: dict[str, Path]) -> dict[str, dict[str, np.ndarray]]:
     if args.num_envs < 1:
         raise ValueError("--num_envs must be at least one per policy.")
+    task, labels, obs_dims = _comparison_spec()
     cfg = _configure_env()
-    env = gym.make("solo12-bound-v2", cfg=cfg)
+    env = gym.make(task, cfg=cfg)
     raw_env = env.unwrapped
     try:
         device = torch.device(raw_env.device)
         actors = {
-            "walk_final": _CheckpointActor(checkpoints["walk_final"], 48, device),
-            "bound_v2": _CheckpointActor(checkpoints["bound_v2"], 50, device),
+            label: _CheckpointActor(checkpoints[label], obs_dim, device)
+            for label, obs_dim in zip(labels, obs_dims)
         }
         print(
-            f"[INFO] Shared physics: {args.num_envs} walk + {args.num_envs} bound environments",
+            f"[INFO] Shared physics: {args.num_envs} {labels[0]} + "
+            f"{args.num_envs} {labels[1]} environments",
             flush=True,
         )
         for label, checkpoint in checkpoints.items():
@@ -143,8 +163,8 @@ def _rollout(checkpoints: dict[str, Path]) -> dict[str, dict[str, np.ndarray]]:
         command = torch.tensor((args.speed, 0.0, 0.0), device=device)
         total_envs = 2 * args.num_envs
         group_slices = {
-            "walk_final": slice(0, args.num_envs),
-            "bound_v2": slice(args.num_envs, total_envs),
+            labels[0]: slice(0, args.num_envs),
+            labels[1]: slice(args.num_envs, total_envs),
         }
         active = {
             label: torch.ones(args.num_envs, dtype=torch.bool, device=device)
@@ -300,9 +320,10 @@ def _plot(
     output_path: Path,
 ) -> None:
     fig, axes = plt.subplots(2, 3, figsize=(17, 9), constrained_layout=True)
-    colors = {"walk_final": "#2878B5", "bound_v2": "#D95319"}
+    _, labels, _ = _comparison_spec()
+    colors = {labels[0]: "#2878B5", labels[1]: "#D95319"}
 
-    for col, label in enumerate(("walk_final", "bound_v2")):
+    for col, label in enumerate(labels):
         data = results[label]
         env_idx = int(summaries[label]["representative_env"])
         valid = data["valid"][:, env_idx].astype(bool)
@@ -341,7 +362,7 @@ def _plot(
                 )
 
     speed_ax = axes[0, 2]
-    for label in ("walk_final", "bound_v2"):
+    for label in labels:
         data = results[label]
         mean, std = _nan_time_stats(data["lin_vel_b"][..., 0], data["valid"].astype(bool))
         time_s = np.arange(len(mean)) * float(data["dt"])
@@ -359,7 +380,7 @@ def _plot(
     metric_labels = ("bound pattern", "trot pattern", "flight")
     x = np.arange(len(metric_names))
     width = 0.36
-    for offset, label in zip((-width / 2, width / 2), ("walk_final", "bound_v2")):
+    for offset, label in zip((-width / 2, width / 2), labels):
         values = [float(summaries[label][name]) for name in metric_names]
         metric_ax.bar(x + offset, values, width, label=label, color=colors[label])
     metric_ax.set_xticks(x, metric_labels, rotation=15)
@@ -370,7 +391,10 @@ def _plot(
     metric_ax.grid(axis="y", alpha=0.25)
 
     fig.colorbar(image, ax=axes[1, :2], shrink=0.75, label="Pearson correlation")
-    fig.suptitle(f"Solo12 gait comparison at {args.speed:.2f} m/s", fontsize=16)
+    fig.suptitle(
+        f"Solo12 gait comparison ({args.comparison}) at {args.speed:.2f} m/s",
+        fontsize=16,
+    )
     fig.savefig(output_path, dpi=180)
     plt.close(fig)
 
@@ -378,9 +402,15 @@ def _plot(
 def main() -> None:
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    _, labels, _ = _comparison_spec()
+    second_checkpoint = (
+        args.flying_trot_checkpoint
+        if args.comparison == "walk_flying_trot"
+        else args.bound_checkpoint
+    )
     checkpoints = {
-        "walk_final": Path(args.walk_checkpoint).resolve(),
-        "bound_v2": Path(args.bound_checkpoint).resolve(),
+        labels[0]: Path(args.walk_checkpoint).resolve(),
+        labels[1]: Path(second_checkpoint).resolve(),
     }
     results = _rollout(checkpoints)
     summaries = {label: _summarize(results[label]) for label in results}
@@ -390,6 +420,7 @@ def main() -> None:
         "warmup_s": args.warmup_s,
         "num_envs": args.num_envs,
         "contact_threshold_n": args.contact_threshold_n,
+        "comparison": args.comparison,
         "checkpoints": {label: str(path) for label, path in checkpoints.items()},
         "policies": summaries,
     }

@@ -48,6 +48,32 @@ criteria below.
 Do not use `--resume` together with `--warm_start_checkpoint`. Use `--resume`
 only to continue a flying-trot run from its own log directory.
 
+## Compare and visualize
+
+The gait comparison script supports the `walk_flying_trot` preset. Both
+policies are evaluated in the flying-trot environment, so their 48-D actor
+contracts are checked explicitly before rollout:
+
+```bash
+./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/evaluate_gait_comparison.py \
+  --comparison walk_flying_trot \
+  --walk_checkpoint checkpoints/walk_final.pt \
+  --flying_trot_checkpoint checkpoints_iri/checkpoints_bound/flying_trot.pt \
+  --speed 1.25 --duration_s 8 --warmup_s 2 --num_envs 16 \
+  --output_dir scripts/reinforcement_learning/rsl_rl/evaluations/walk_vs_flying_trot_125 \
+  --headless --device cuda:0
+```
+
+For interactive inspection, `play.py --command_ui` exposes vx, vy and yaw
+controls for this task (omit `--headless`):
+
+```bash
+./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/play.py \
+  --task solo12-flying-trot-v0 \
+  --checkpoint checkpoints_iri/checkpoints_bound/flying_trot.pt \
+  --num_envs 1 --command_ui --command 1.25 0.0 0.0
+```
+
 ## Acceptance criteria
 
 Evaluate deterministic checkpoints at 1.0, 1.25 and 1.5 m/s. Promote the skill
