@@ -141,13 +141,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.command_ui:
         if args_cli.headless:
             raise ValueError("--command_ui requires a graphical Isaac session; remove --headless.")
-        if args_cli.task not in {"solo12-bound-v0", "solo12-bound-v2", "solo12-bound-v3"}:
-            raise ValueError("--command_ui is currently supported for the Solo12 bound tasks only.")
+        if args_cli.task not in {"solo12-v0", "solo12-bound-v0", "solo12-bound-v2", "solo12-bound-v3"}:
+            raise ValueError("--command_ui is currently supported for the Solo12 direct locomotion tasks only.")
         from live_command_ui import LiveSE2Command, build_live_command_window
 
         for _ in range(3):
             simulation_app.update()
-        if args_cli.task == "solo12-bound-v3":
+        if args_cli.task == "solo12-v0":
+            command_bounds = ((-2.0, 2.0), (-1.0, 1.0), (-1.0, 1.0))
+        elif args_cli.task == "solo12-bound-v3":
             command_bounds = ((0.90, 1.50), (0.0, 0.0), (0.0, 0.0))
         elif args_cli.task == "solo12-bound-v2":
             command_bounds = ((0.60, 1.50), (0.0, 0.0), (0.0, 0.0))
@@ -183,7 +185,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
-    runner.load(resume_path)
+    # Inference only needs actor/critic weights. Older PPO checkpoints can
+    # contain optimizer parameter groups that no longer match the current
+    # runner configuration; restoring those groups is unnecessary and breaks
+    # playback even when the policy state itself is fully compatible.
+    runner.load(resume_path, load_optimizer=False, map_location=env.unwrapped.device)
 
     # obtain the trained policy for inference
     policy = runner.get_inference_policy(device=env.unwrapped.device)
