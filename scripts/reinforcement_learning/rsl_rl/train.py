@@ -40,6 +40,12 @@ parser.add_argument("--export_io_descriptors", action="store_true", default=Fals
 parser.add_argument(
     "--ray-proc-id", "-rid", type=int, default=None, help="Automatically configured by Ray integration, otherwise None."
 )
+parser.add_argument(
+    "--warm_start_checkpoint",
+    type=str,
+    default=None,
+    help="Initialize only actor/actor-normalizer tensors from a compatible RSL-RL checkpoint.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -104,6 +110,7 @@ from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
+from warm_start import load_actor_warm_start
 
 # import logger
 logger = logging.getLogger(__name__)
@@ -121,6 +128,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     """Train with RSL-RL agent."""
     # override configurations with non-hydra CLI arguments
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
+    if args_cli.warm_start_checkpoint is not None and (
+        agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation"
+    ):
+        raise ValueError("Actor warm-start cannot be combined with resume or distillation loading.")
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     agent_cfg.max_iterations = (
         args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
@@ -206,6 +217,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
+    if args_cli.warm_start_checkpoint is not None:
+        load_actor_warm_start(runner.alg.policy, args_cli.warm_start_checkpoint)
     # write git state to logs
     runner.add_git_repo_to_log(__file__)
     # load the checkpoint
