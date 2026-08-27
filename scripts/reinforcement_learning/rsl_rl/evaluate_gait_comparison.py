@@ -139,8 +139,10 @@ def _rollout(checkpoints: dict[str, Path]) -> dict[str, dict[str, np.ndarray]]:
         raise ValueError("--num_envs must be at least one per policy.")
     task, labels, obs_dims = _comparison_spec()
     cfg = _configure_env()
+    print(f"[INFO] Creating evaluation environment: {task} ({2 * args.num_envs} envs)", flush=True)
     env = gym.make(task, cfg=cfg)
     raw_env = env.unwrapped
+    print("[INFO] Evaluation environment created", flush=True)
     try:
         device = torch.device(raw_env.device)
         actors = {
