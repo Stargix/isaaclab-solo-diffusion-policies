@@ -1,0 +1,118 @@
+{
+  "speed_command_mps": 1.25,
+  "duration_s": 6.0,
+  "warmup_s": 2.0,
+  "num_envs": 4,
+  "contact_threshold_n": 1.0,
+  "comparison": "walk_flying_trot",
+  "checkpoints": {
+    "walk_final": "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\checkpoints\\walk_final.pt",
+    "flying_trot": "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\checkpoints_iri\\checkpoints_bound\\flying_trot.pt"
+  },
+  "policies": {
+    "walk_final": {
+      "valid_samples": 1200,
+      "survival_rate": 1.0,
+      "representative_env": 0,
+      "mean_forward_speed_mps": 1.3046351671218872,
+      "forward_speed_rmse_mps": 0.07784981280565262,
+      "mean_abs_lateral_speed_mps": 0.007371712476015091,
+      "mean_abs_yaw_rate_rps": 0.1191139966249466,
+      "base_height_std_m": 0.0009175057639367878,
+      "pitch_rms_rad": 0.08015646785497665,
+      "flight_fraction": 0.0,
+      "bound_pattern_fraction": 0.0,
+      "trot_pattern_fraction": 0.9025,
+      "mean_foot_duty_factor": 0.524375,
+      "contact_transition_rate_hz": 33.403010033444815,
+      "front_pair_stance_jaccard": 0.0975,
+      "rear_pair_stance_jaccard": 0.0,
+      "fl_rr_stance_jaccard": 0.9259259259259259,
+      "fr_rl_stance_jaccard": 0.8968609865470852,
+      "foot_duty_factors": {
+        "FL": 0.54,
+        "FR": 0.5575,
+        "RL": 0.5,
+        "RR": 0.5
+      },
+      "contact_correlation": [
+        [
+          1.0,
+          -0.8222733928784147,
+          -0.9229582069908966,
+          0.9229582069908966
+        ],
+        [
+          -0.8222733928784147,
+          1.0,
+          0.8909107548425778,
+          -0.8909107548425778
+        ],
+        [
+          -0.9229582069908966,
+          0.8909107548425778,
+          1.0,
+          -1.0
+        ],
+        [
+          0.9229582069908966,
+          -0.8909107548425778,
+          -1.0,
+          1.0
+        ]
+      ]
+    },
+    "flying_trot": {
+      "valid_samples": 1200,
+      "survival_rate": 1.0,
+      "representative_env": 0,
+      "mean_forward_speed_mps": 1.3119187355041504,
+      "forward_speed_rmse_mps": 0.07082386314868927,
+      "mean_abs_lateral_speed_mps": 0.031193088740110397,
+      "mean_abs_yaw_rate_rps": 0.0696389228105545,
+      "base_height_std_m": 0.004193125758320093,
+      "pitch_rms_rad": 0.08699081093072891,
+      "flight_fraction": 0.005833333333333334,
+      "bound_pattern_fraction": 0.02,
+      "trot_pattern_fraction": 0.8825,
+      "mean_foot_duty_factor": 0.4741666666666666,
+      "contact_transition_rate_hz": 22.198996655518393,
+      "front_pair_stance_jaccard": 0.020134228187919462,
+      "rear_pair_stance_jaccard": 0.0,
+      "fl_rr_stance_jaccard": 0.8643790849673203,
+      "fr_rl_stance_jaccard": 0.8760330578512396,
+      "foot_duty_factors": {
+        "FL": 0.5091666666666667,
+        "FR": 0.5041666666666667,
+        "RL": 0.44166666666666665,
+        "RR": 0.44166666666666665
+      },
+      "contact_correlation": [
+        [
+          1.0,
+          -0.9470114857486404,
+          -0.9058650231039513,
+          0.8698911349616654
+        ],
+        [
+          -0.9470114857486404,
+          1.0,
+          0.8820258816230802,
+          -0.8968498460201085
+        ],
+        [
+          -0.9058650231039513,
+          0.8820258816230802,
+          1.0,
+          -0.7910447761194006
+        ],
+        [
+          0.8698911349616654,
+          -0.8968498460201085,
+          -0.7910447761194006,
+          1.0
+        ]
+      ]
+    }
+  }
+}
