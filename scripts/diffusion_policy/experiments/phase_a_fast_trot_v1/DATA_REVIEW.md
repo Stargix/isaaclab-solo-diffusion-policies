@@ -1,5 +1,8 @@
 # Fast-trot dataset review before diffusion training
 
+> Historical pilot review. The issues below were corrected in v4; the
+> authoritative decision is [`FINAL_DATA_GATE.md`](FINAL_DATA_GATE.md).
+
 Date: 2026-08-27
 
 Decision: **do not train the final diffusion policy from the current pilot merge.**

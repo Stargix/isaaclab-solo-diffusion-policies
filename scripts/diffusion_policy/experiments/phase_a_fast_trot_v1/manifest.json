@@ -1,8 +1,7 @@
 {
-  "schema": "phase_a_fast_trot_data_gate_v1",
-  "status": "pilot_validated_temporal_fidelity_failed_recollection_required",
+  "schema": "phase_a_fast_trot_data_gate_v2",
+  "status": "final_dataset_accepted_for_a1_training",
   "branch": "diffusion-policy-fast-trot",
-  "base_commit": "719b4b7",
   "goal_representation": "hindsight_geom_avg12",
   "goal_horizon_steps": 100,
   "control_rate_hz": 50.0,
@@ -20,36 +19,47 @@
   },
   "outputs": {
     "fast_trot_dataset": {
-      "path": "scripts/diffusion_policy/data/datasets/sprint_fast_trot_phase_a_v1.hdf5",
+      "path": "scripts/diffusion_policy/data/datasets/sprint_fast_trot_phase_a_waypoint_v4.hdf5",
       "bytes": 348931617,
-      "sha256": "D369A7E560C04010794AE0D514CA89AA9F4F7B3D37E7A366AB2B12287F0B5622",
+      "sha256": "B45FA70FD3BCEF9946C7833ED62AD9048F197AD4EFD8D1786D0161DA663B45F5",
       "demos": 3345,
       "frames": 1000155,
-      "collection_survival_rate": 0.9994024499551838
+      "valid_two_second_windows": 665655,
+      "attempted_demos": 3353,
+      "guardrail_discards": 8,
+      "simulator_discards": 0,
+      "collection_survival_rate": 0.9976140769460184
     },
     "merged_dataset": {
-      "path": "scripts/diffusion_policy/data/datasets/walk_crouch_sprint_phase_a_v1.hdf5",
+      "path": "scripts/diffusion_policy/data/datasets/walk_crouch_sprint_phase_a_waypoint_v4.hdf5",
       "bytes": 1021092973,
-      "sha256": "CC6BEBE9904B7AF4E961A4025C53FC118D9C94DD42A2E24D4DB49F46CAD133B2",
+      "sha256": "4E323BD426CCB6F503E70EE255B397899E0DA2F847EB60FA6A21F147F7A6B730",
       "demos": 10035,
       "frames": 3000465,
-      "skill_names": [
-        "walk",
-        "crouch",
-        "sprint"
-      ],
+      "skill_names": ["walk", "crouch", "sprint"],
       "frames_per_skill": 1000155,
-      "shuffle_seed": 46
+      "valid_two_second_windows_per_skill": 665655,
+      "shuffle_seed": 47
     }
   },
   "audit": {
     "contract_valid": true,
     "frame_balance_min_over_max": 1.0,
     "sampled_goals": 50000,
-    "duplicate_waypoint_fraction": 0.0002,
-    "stop_fraction_v_avg_lt_0p02": 0.01842,
-    "training_code_modified": false,
-    "temporal_fidelity_gate": false,
-    "recollection_required": true
+    "duplicate_waypoint_fraction": 0.00008,
+    "stop_fraction_v_avg_lt_0p02": 0.01902,
+    "fast_trot_max_projected_gravity_xy": 0.437735,
+    "fast_trot_first_frame_xy_jump_max_m": 0.002791,
+    "reset_state_contamination": false,
+    "temporal_fidelity_gate": true,
+    "terminal_support_gate": true,
+    "approved_for_training": true
+  },
+  "training": {
+    "start_mode": "from_scratch",
+    "config": "scripts/diffusion_policy/train/configs/walk_crouch_sprint_hindsight_geom_avg12_a0_faithful_k10.json",
+    "reference_checkpoint": "checkpoints_iri/real_walk_crouch_hindsight.pt",
+    "reference_checkpoint_epoch_zero_based": 43,
+    "reference_checkpoint_val_loss": 0.004842201533558016
   }
 }

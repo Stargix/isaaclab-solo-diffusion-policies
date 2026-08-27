@@ -1320,7 +1320,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 # For active falls the simulator missed, reset the env BEFORE finalizing
                 # so that _finalize_episode's skill-specific command resample is applied
                 # AFTER the env's own _resample_commands (otherwise it gets overwritten).
-                if is_fall and not dones_np[i]:
+                manually_reset = bool(is_fall and not dones_np[i])
+                if manually_reset:
                     with torch.inference_mode():
                         raw_env._reset_idx(torch.as_tensor([i], device=device))
                 _finalize_episode(
@@ -1330,9 +1331,19 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 )
                 if args_cli.route_profile in {"phase_a", *CLOSED_LOOP_ROUTE_PROFILES}:
                     state_next["command"][i] = 0.0
-                # The cached state for a manually-reset env is now stale (pre-reset
-                # fallen state), but warmup prevents it from ever being recorded and
-                # the next state_next queries refresh it.
+                if manually_reset:
+                    # ``state_next`` was queried before the manual reset.  Keeping
+                    # that pre-reset row would make the fallen terminal state the
+                    # first frame of the next demonstration whenever warmup frames
+                    # are intentionally retained.  Refresh only the affected env;
+                    # querying every environment here is unnecessarily expensive.
+                    fresh_state = query_raw_state(
+                        raw_env,
+                        joint_ids,
+                        np.asarray([i], dtype=np.int64),
+                    )
+                    for key in state_next:
+                        state_next[key][i] = fresh_state[key][0]
 
         # Decrement blending counters at the very end of the step.
         if args_cli.mode == "chained" and args_cli.transition_blend_steps > 0:

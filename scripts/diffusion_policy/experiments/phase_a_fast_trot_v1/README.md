@@ -1,6 +1,10 @@
 # Phase A fast-trot data gate
 
-Status: **pilot data validated structurally but rejected by the temporal-fidelity gate; training has not been configured or started.**
+Status: **the corrected v4 dataset passed the final gate and is ready for one A1 training run.**
+
+This README records the original pilot. Its conclusions and commands are
+superseded by [`FINAL_DATA_GATE.md`](FINAL_DATA_GATE.md); do not train from the
+pilot `*_v1`, `*_v2` or `*_v3` files.
 
 The post-collection analysis found that the frozen successful A0 artifact was
 collected with a 3 s command interval and 10% stop probability, whereas the
