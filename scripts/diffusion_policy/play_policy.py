@@ -119,6 +119,7 @@ from train.conditioning.geometry import cumulative_xy_lengths, quat_wxyz_to_rotm
 from train.conditioning.goal_builder import (
     build_goal_batch_from_path,
     build_geometric_hindsight_goal_batch_from_path,
+    build_geometric_height_profile_goal_batch_from_path,
     build_holonomic_goal_batch_from_path,
     build_path_guidance_goal_batch_from_path,
 )
@@ -502,6 +503,12 @@ def compute_goals(
             goal_horizon_steps=goal_horizon_steps, dt=dt, speed=speed,
             path_progress=path_progress, v_avg_clip=v_req_clip,
         )
+    elif goal_representation == "hindsight_geom_profile16":
+        goals = build_geometric_height_profile_goal_batch_from_path(
+            path_w, cumulative_lengths, yaws_w, pos_w, quat_w,
+            goal_horizon_steps=goal_horizon_steps, dt=dt, speed=speed,
+            path_progress=path_progress, v_avg_clip=v_req_clip,
+        )
     else:
         goals = build_goal_batch_from_path(
             path_w, cumulative_lengths, yaws_w, pos_w, quat_w,
@@ -519,8 +526,8 @@ def compute_goals(
             speed_budget_start_arc, speed_budget_target_arc, speed_budget_elapsed_s
         )):
             raise ValueError("All dynamic speed-budget arrays must be provided together.")
-        if goal_representation != "hindsight_geom_avg12":
-            raise ValueError("Dynamic speed budget requires hindsight_geom_avg12.")
+        if goal_representation not in {"hindsight_geom_avg12", "hindsight_geom_profile16"}:
+            raise ValueError("Dynamic speed budget requires a geometric average-speed goal schema.")
         from scripts.dppo_diffusion_rl.conditioning import remaining_speed_budget
 
         current_arc = cumulative_lengths[path_progress]
@@ -617,7 +624,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     checkpoint = load_training_checkpoint(
         checkpoint_path,
         device,
-        expected_policy_kind=("spatial_time_preview_ddpm", "spatial_reference_path_ddpm", "holonomic_reference_path_ddpm", "path_guidance_terminal_ddpm", "spatial_hindsight_geometry_ddpm"),
+        expected_policy_kind=("spatial_time_preview_ddpm", "spatial_reference_path_ddpm", "holonomic_reference_path_ddpm", "path_guidance_terminal_ddpm", "spatial_hindsight_geometry_ddpm", "spatial_hindsight_height_profile_ddpm"),
         allow_dppo=True,
     )
     config_dict = checkpoint["config"]
@@ -831,6 +838,14 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                         dx = latest_goal[env_idx, 6].item()
                         target_height = latest_goal[env_idx, 10].item()
                         v_req = latest_goal[env_idx, 11].item()
+                    elif goal_representation == "hindsight_geom_profile16":
+                        dx = latest_goal[env_idx, 9].item()
+                        target_height = latest_goal[env_idx, 12].item()
+                        v_req = latest_goal[env_idx, 15].item()
+                        profile_heights = latest_goal[env_idx, [2, 5, 8, 11]]
+                        assert bool(torch.all((profile_heights >= 0.10) & (profile_heights <= 0.40))), (
+                            f"Env {env_idx}: height profile outside the physical range"
+                        )
                     else:
                         dx = latest_goal[env_idx, 6].item()
                         target_height = latest_goal[env_idx, 8].item()
@@ -975,6 +990,10 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 target_dx = current_goal[0, 6].item()
                 target_height = current_goal[0, 10].item()
                 v_req_val = current_goal[0, 11].item()
+            elif goal_representation == "hindsight_geom_profile16":
+                target_dx = current_goal[0, 9].item()
+                target_height = current_goal[0, 12].item()
+                v_req_val = current_goal[0, 15].item()
             else:
                 target_dx = current_goal[0, 6].item()
                 target_height = current_goal[0, 8].item()

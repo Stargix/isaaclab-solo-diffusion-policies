@@ -13,6 +13,7 @@ from ..conditioning.goal_builder import (
     HOLONOMIC_REFERENCE_GOAL_SCHEMA_NAME,
     PATH_GUIDANCE_GOAL_SCHEMA_NAME,
     GEOMETRIC_HINDSIGHT_GOAL_SCHEMA_NAME,
+    GEOMETRIC_HEIGHT_PROFILE_GOAL_SCHEMA_NAME,
 )
 
 
@@ -42,7 +43,7 @@ def load_training_checkpoint(
     schema_version = checkpoint.get("schema_version", config.get("schema_version"))
     policy_kind = checkpoint.get("policy_kind", config.get("policy_kind"))
     goal_schema = config.get("goal_schema")
-    if schema_version not in {3, 4, 5, 6, 7}:
+    if schema_version not in {3, 4, 5, 6, 7, 8}:
         raise ValueError(
             f"Checkpoint {path} uses unsupported schema_version={schema_version!r}. "
             "Retrain with a supported temporal-preview conditioning contract."
@@ -55,7 +56,8 @@ def load_training_checkpoint(
             f"Checkpoint {path} has policy_kind={policy_kind!r}; expected one of {sorted(expected_kinds)!r}."
         )
     expected_goal_schema = (
-        GEOMETRIC_HINDSIGHT_GOAL_SCHEMA_NAME if schema_version == 7
+        GEOMETRIC_HEIGHT_PROFILE_GOAL_SCHEMA_NAME if schema_version == 8
+        else GEOMETRIC_HINDSIGHT_GOAL_SCHEMA_NAME if schema_version == 7
         else PATH_GUIDANCE_GOAL_SCHEMA_NAME if schema_version == 6
         else HOLONOMIC_REFERENCE_GOAL_SCHEMA_NAME if schema_version == 5
         else REFERENCE_GOAL_SCHEMA_NAME if schema_version == 4

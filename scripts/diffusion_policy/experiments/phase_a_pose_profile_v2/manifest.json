@@ -1,0 +1,37 @@
+{
+  "schema": "phase_a_pose_profile_v2",
+  "status": "ready_for_offline_a_wc_training",
+  "branch": "path-pose-profile-v2",
+  "goal_representation": "hindsight_geom_profile16",
+  "checkpoint_schema_version": 8,
+  "policy_kind": "spatial_hindsight_height_profile_ddpm",
+  "goal_horizon_steps": 100,
+  "control_rate_hz": 50.0,
+  "dataset": {
+    "path": "scripts/diffusion_policy/data/datasets/walk_crouch_phase_a_waypoint_v3.hdf5",
+    "bytes": 680785080,
+    "sha256": "00AEA50B71D7CE3FB69C05996F51AE43F6A56623AC8A3314F7B684AE903E3A3F"
+  },
+  "training": {
+    "start_mode": "from_scratch",
+    "config": "scripts/diffusion_policy/train/configs/walk_crouch_hindsight_geom_profile16_a0_faithful_k10.json",
+    "output": "scripts/diffusion_policy/runs/walk_crouch_hindsight_geom_profile16_a_wc_v1_k10",
+    "paired_baseline_checkpoint": "checkpoints_iri/real_walk_crouch_hindsight.pt"
+  },
+  "pretrain_audit": {
+    "sampled_goals": 50000,
+    "demos": 6690,
+    "demos_per_skill": 3345,
+    "terminal_distance_p95_m": 1.0938668131828309,
+    "average_speed_p95_m_s": 0.5546848922967911,
+    "duplicate_waypoint_fraction": 0.00026,
+    "within_preview_height_change_fraction": 0.0,
+    "future_height_differs_from_current_fraction": 0.0,
+    "interpretation": "Deliberately disjoint A-WC ablation; mixed height profiles are held-out composition, not in-distribution imitation."
+  },
+  "forbidden_main_method_inputs": [
+    "skill_idx",
+    "gait_label",
+    "contact_pattern"
+  ]
+}

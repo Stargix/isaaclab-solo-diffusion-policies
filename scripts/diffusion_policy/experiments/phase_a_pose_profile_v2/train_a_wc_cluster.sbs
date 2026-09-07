@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+#SBATCH --job-name=solo_profile16
+#SBATCH --output=/home/sflores/i2r/slurm_logs/slurm-%x-%j.out
+#SBATCH --error=/home/sflores/i2r/slurm_logs/slurm-%x-%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=50G
+#SBATCH --time=72:00:00
+#SBATCH --gres=gpu:lovelace:1
+
+set -Eeuo pipefail
+
+if [[ -f "${HOME}/miniconda3/etc/profile.d/conda.sh" ]]; then
+  CONDA_SH="${HOME}/miniconda3/etc/profile.d/conda.sh"
+elif [[ -f "/etc/profile.d/conda.sh" ]]; then
+  CONDA_SH="/etc/profile.d/conda.sh"
+else
+  CONDA_SH="$(conda info --base)/etc/profile.d/conda.sh"
+fi
+
+set +eu
+source "${CONDA_SH}"
+conda activate env_isaaclab
+set -eu
+
+ISAACLAB_DIR="${HOME}/i2r/isaaclab-solo-diffusion-policies"
+cd "${ISAACLAB_DIR}"
+export PYTHONPATH="${ISAACLAB_DIR}:${PYTHONPATH:-}"
+export HDF5_USE_FILE_LOCKING=FALSE
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+DATASET="scripts/diffusion_policy/data/datasets/walk_crouch_phase_a_waypoint_v3.hdf5"
+CONFIG="scripts/diffusion_policy/train/configs/walk_crouch_hindsight_geom_profile16_a0_faithful_k10.json"
+EXPECTED_SHA="00aea50b71d7ce3fb69c05996f51ae43f6a56623ac8a3314f7b684ae903e3a3f"
+OUTPUT="scripts/diffusion_policy/runs/walk_crouch_hindsight_geom_profile16_a_wc_v1_k10"
+
+[[ -f "${DATASET}" ]] || { echo "Missing dataset: ${DATASET}" >&2; exit 2; }
+[[ -f "${CONFIG}" ]] || { echo "Missing config: ${CONFIG}" >&2; exit 2; }
+if [[ -d "${OUTPUT}" ]] && [[ -n "$(find "${OUTPUT}" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+  echo "Refusing to mix runs in non-empty output directory: ${OUTPUT}" >&2
+  exit 4
+fi
+ACTUAL_SHA="$(sha256sum "${DATASET}" | awk '{print $1}')"
+[[ "${ACTUAL_SHA}" == "${EXPECTED_SHA}" ]] || {
+  echo "Dataset SHA mismatch: expected ${EXPECTED_SHA}, got ${ACTUAL_SHA}" >&2
+  exit 3
+}
+
+echo "SLURM_JOB_ID=${SLURM_JOB_ID:-N/A}"
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-N/A}"
+echo "dataset_sha256=${ACTUAL_SHA}"
+nvidia-smi
+
+python scripts/diffusion_policy/train/train.py \
+  --config "${CONFIG}" \
+  --datasets "${DATASET}" \
+  --output_dir "${OUTPUT}" \
+  --run_name walk_crouch_hindsight_geom_profile16_a_wc_v1_k10 \
+  --device cuda \
+  --wandb_project solo12-diffusion-policy

@@ -49,6 +49,7 @@ class DemoSequence:
     root_quat_w: np.ndarray
     cumulative_xy: np.ndarray
     skill_idx: np.ndarray | None
+    desired_base_height: np.ndarray | None = None
     reference_pos_w: np.ndarray | None = None
     reference_yaw_w: np.ndarray | None = None
     reference_command_b: np.ndarray | None = None
@@ -81,6 +82,7 @@ def _validate_hdf5(
     require_reference_path: bool,
     require_holonomic_reference: bool = False,
     require_path_guidance_reference: bool = False,
+    require_desired_height_profile: bool = False,
 ) -> None:
     with h5py.File(path, "r") as file:
         if "data" not in file:
@@ -134,6 +136,10 @@ def _validate_hdf5(
                     )
             if require_path_guidance_reference and "guidance_pos_w" not in obs:
                 raise KeyError(f"{path}/{demo_name}: path-guidance data require obs/guidance_pos_w.")
+            if require_desired_height_profile and "desired_base_height" not in obs:
+                raise KeyError(
+                    f"{path}/{demo_name}: hindsight_geom_profile16 requires obs/desired_base_height."
+                )
             length = int(demo["actions"].shape[0])
             if length == 0:
                 raise ValueError(f"{path}/{demo_name}: empty demonstration.")
@@ -146,6 +152,8 @@ def _validate_hdf5(
                         raise ValueError(f"{path}/{demo_name}: obs/{key} length mismatch.")
             if require_path_guidance_reference and int(obs["guidance_pos_w"].shape[0]) != length:
                 raise ValueError(f"{path}/{demo_name}: obs/guidance_pos_w length mismatch.")
+            if require_desired_height_profile and int(obs["desired_base_height"].shape[0]) != length:
+                raise ValueError(f"{path}/{demo_name}: obs/desired_base_height length mismatch.")
             dones = demo["dones"][:]
             if len(dones) != length or (length and not bool(dones[-1])) or np.any(dones[:-1]):
                 raise ValueError(f"{path}/{demo_name}: dones must be false except at the final sample.")
@@ -165,6 +173,10 @@ def _validate_hdf5(
                             raise ValueError(f"{path}/{demo_name}: non-finite obs/{key}.")
                 if require_path_guidance_reference and not np.isfinite(obs["guidance_pos_w"][start:end]).all():
                     raise ValueError(f"{path}/{demo_name}: non-finite obs/guidance_pos_w.")
+                if require_desired_height_profile and not np.isfinite(
+                    obs["desired_base_height"][start:end]
+                ).all():
+                    raise ValueError(f"{path}/{demo_name}: non-finite obs/desired_base_height.")
                 expected = np.empty_like(actions)
                 if start == 0:
                     expected[0] = 0.0
@@ -226,9 +238,10 @@ class SpatialHindsightDataset(Dataset):
             raise ValueError("step_stride must be >= 1.")
         if goal_source not in {"achieved", "reference"}:
             raise ValueError("goal_source must be 'achieved' or 'reference'.")
-        if goal_representation == "hindsight_geom_avg12" and goal_source != "achieved":
-            raise ValueError("hindsight_geom_avg12 requires goal_source='achieved'.")
-        if goal_source != "reference" and goal_representation not in {"path11", "hindsight_geom_avg12"}:
+        geometric_representations = {"hindsight_geom_avg12", "hindsight_geom_profile16"}
+        if goal_representation in geometric_representations and goal_source != "achieved":
+            raise ValueError(f"{goal_representation} requires goal_source='achieved'.")
+        if goal_source != "reference" and goal_representation not in {"path11", *geometric_representations}:
             raise ValueError("SE(2) route representations require goal_source='reference'.")
         if startup_sample_multiplier < 1:
             raise ValueError("startup_sample_multiplier must be >= 1.")
@@ -274,6 +287,7 @@ class SpatialHindsightDataset(Dataset):
             require_reference_path=self.goal_source == "reference",
             require_holonomic_reference=self.goal_representation == "holonomic_se2_32",
             require_path_guidance_reference=self.goal_representation == "path_guidance_se2_36",
+            require_desired_height_profile=self.goal_representation == "hindsight_geom_profile16",
         )
         resolved = str(Path(path).resolve())
         with h5py.File(path, "r") as file:
@@ -308,6 +322,11 @@ class SpatialHindsightDataset(Dataset):
                     if self.goal_representation == "path_guidance_se2_36"
                     else None
                 )
+                desired_base_height = (
+                    obs["desired_base_height"][:].astype(np.float32).reshape(-1)
+                    if self.goal_representation == "hindsight_geom_profile16"
+                    else None
+                )
                 terminal_step = None
                 if self.goal_representation == "path_guidance_se2_36":
                     moving = np.flatnonzero(np.linalg.norm(reference_command_b, axis=-1) > 1.0e-4)
@@ -322,6 +341,7 @@ class SpatialHindsightDataset(Dataset):
                         root_quat_w=obs["root_quat_w"][:].astype(np.float32),
                         cumulative_xy=cumulative_xy_lengths(obs["root_pos_w"][:].astype(np.float32)),
                         skill_idx=demo["skill_idx"][:].astype(np.int16) if "skill_idx" in demo else None,
+                        desired_base_height=desired_base_height,
                         reference_pos_w=reference_pos_w,
                         reference_yaw_w=reference_yaw_w,
                         reference_command_b=reference_command_b,
@@ -400,6 +420,7 @@ class SpatialHindsightDataset(Dataset):
             waypoint_time_offsets_s=self.waypoint_time_offsets_s,
             v_req_clip=self.v_req_clip,
             goal_representation=self.goal_representation,
+            height_profile_w=demo.desired_base_height,
         )
 
     def _goal_history(self, sample: HindsightSample) -> np.ndarray:

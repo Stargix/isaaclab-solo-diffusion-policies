@@ -117,6 +117,7 @@ from train.conditioning.goal_builder import (
     build_goal_from_path,
     build_goal_vector,
     build_geometric_hindsight_goal_from_path,
+    build_geometric_height_profile_goal_from_path,
     build_holonomic_goal_from_path,
     build_path_guidance_goal_from_path,
 )
@@ -433,6 +434,9 @@ def compute_vectorized_goals(
                 v_req_clip=v_req_clip,
                 goal_representation=goal_representation,
                 reference_command_b=plan.reference_command_b,
+                height_profile_w=(
+                    plan.path_w[:, 2] if goal_representation == "hindsight_geom_profile16" else None
+                ),
                 )
             )
             continue
@@ -477,6 +481,21 @@ def compute_vectorized_goals(
                     v_avg_clip=v_req_clip,
                 )
             )
+        elif goal_representation == "hindsight_geom_profile16":
+            goals.append(
+                build_geometric_height_profile_goal_from_path(
+                    plan.path_w,
+                    plan.cumulative_lengths,
+                    plan.yaws_w,
+                    pos_w[i],
+                    quat_w[i],
+                    goal_horizon_steps=goal_horizon_steps,
+                    dt=dt,
+                    speed=speeds[i],
+                    start_idx=start_idx,
+                    v_avg_clip=v_req_clip,
+                )
+            )
         else:
             goals.append(
                 build_goal_from_path(
@@ -497,8 +516,10 @@ def compute_vectorized_goals(
     if speed_budget_target_arc is not None or speed_budget_start_arc is not None:
         if speed_budget_target_arc is None or speed_budget_start_arc is None:
             raise ValueError("Both speed-budget arc arrays must be provided together.")
-        if goal_representation != "hindsight_geom_avg12" or any(plan.time_indexed for plan in path_plans):
-            raise ValueError("Dynamic speed budget currently requires analytic hindsight_geom_avg12 routes.")
+        if goal_representation not in {"hindsight_geom_avg12", "hindsight_geom_profile16"} or any(
+            plan.time_indexed for plan in path_plans
+        ):
+            raise ValueError("Dynamic speed budget currently requires an analytic geometric average-speed route.")
         from scripts.dppo_diffusion_rl.conditioning import remaining_speed_budget
 
         current_arc = np.asarray(
@@ -627,6 +648,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         expected_policy_kind=(
             "spatial_time_preview_ddpm", "spatial_reference_path_ddpm", "holonomic_reference_path_ddpm",
             "path_guidance_terminal_ddpm", "spatial_hindsight_geometry_ddpm",
+            "spatial_hindsight_height_profile_ddpm",
         ),
         allow_dppo=True,
     )
@@ -751,7 +773,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     waypoint_time_offsets_s = tuple(config["dataset"]["waypoint_time_offsets_s"])
     v_req_clip = config["dataset"].get("v_req_clip", 2.0)
     goal_representation = config["dataset"].get("goal_representation", "path11")
-    if args_cli.height_profile in {"interleaved", "random"} and goal_representation not in {"path11", "hindsight_geom_avg12"}:
+    if args_cli.height_profile in {"interleaved", "random"} and goal_representation not in {
+        "path11", "hindsight_geom_avg12", "hindsight_geom_profile16"
+    }:
         raise ValueError(
             "The selected height profile requires a goal schema with a terminal height "
             f"(got {goal_representation!r})."
@@ -925,6 +949,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     tilts = []
     action_deltas = []
     commanded_heights = []
+    conditioned_height_profiles = []
     required_heights = []
     failures = np.zeros(num_envs, dtype=bool)
     base_failures = np.zeros(num_envs, dtype=bool)
@@ -963,6 +988,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             )
             if goal_representation == "hindsight_geom_avg12":
                 commanded_heights.append(goals[:, 10].detach().cpu().numpy())
+            elif goal_representation == "hindsight_geom_profile16":
+                commanded_heights.append(goals[:, 11].detach().cpu().numpy())
+                conditioned_height_profiles.append(
+                    goals[:, [2, 5, 8, 11]].detach().cpu().numpy()
+                )
             elif goal_representation == "path11":
                 commanded_heights.append(goals[:, 8].detach().cpu().numpy())
             _, _, dones, _ = vec_env.step(action)
@@ -1061,6 +1091,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     # progress, matching the online task reward. The terminal-preview command
     # is retained separately to diagnose anticipatory causal response.
     target_heights = np.stack(required_heights, axis=0)
+    height_profile_previews = (
+        np.stack(conditioned_height_profiles, axis=0)
+        if conditioned_height_profiles
+        else np.empty((duration_steps, num_envs, 0), dtype=np.float32)
+    )
 
     if args_cli.save_timeseries:
         # Keep the trace opt-in: broad evaluations otherwise only need the
@@ -1075,6 +1110,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             planar_speed_m_s=achieved_planar_speeds,
             required_height_m=target_heights,
             commanded_height_m=preview_target_heights,
+            conditioned_height_profile_m=height_profile_previews,
             valid=trace_valid,
             requested_speed_m_s=speeds,
             failure_step=failure_step,
@@ -1122,6 +1158,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         target_h = target_heights[:, i][mask]
         preview_target_h = preview_target_heights[:, i][mask]
         h_rmse = float(np.sqrt(np.mean(np.square(hgts - target_h)))) if hgts.size else math.nan
+        height_abs_error = np.abs(hgts - target_h)
         preview_h_rmse = (
             float(np.sqrt(np.mean(np.square(hgts - preview_target_h))))
             if hgts.size else math.nan
@@ -1224,6 +1261,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             "xy_rmse": xy_rmse,
             "height_rmse": h_rmse,
             "height_abs_error_mean": float(np.mean(np.abs(hgts - target_h))) if hgts.size else math.nan,
+            "height_abs_error_p95": float(np.percentile(height_abs_error, 95)) if hgts.size else math.nan,
+            "height_within_0p03_fraction": float(np.mean(height_abs_error <= 0.03)) if hgts.size else math.nan,
             "preview_height_rmse": preview_h_rmse,
             "preview_height_abs_error_mean": (
                 float(np.mean(np.abs(hgts - preview_target_h))) if hgts.size else math.nan
@@ -1451,6 +1490,16 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             alpha=0.8,
             label=f"policy preview ({label})",
         )
+        if height_profile_previews.shape[-1] == 4:
+            for slot in range(3):
+                ax.plot(
+                    time_axis,
+                    height_profile_previews[:, i, slot],
+                    linestyle=":",
+                    linewidth=0.7,
+                    alpha=0.28,
+                    label=f"profile {25 * (slot + 1)}%" if not plotted else None,
+                )
         ax.plot(time_axis, measured, linewidth=1.5, alpha=0.9, label=f"actual ({label})")
         plotted = True
     if plotted:

@@ -17,6 +17,7 @@ REFERENCE_GOAL_SCHEMA_NAME = "spatial_reference_path11_v1"
 HOLONOMIC_REFERENCE_GOAL_SCHEMA_NAME = "holonomic_reference_se2_32_v1"
 PATH_GUIDANCE_GOAL_SCHEMA_NAME = "path_guidance_se2_terminal36_v1"
 GEOMETRIC_HINDSIGHT_GOAL_SCHEMA_NAME = "hindsight_geometric_average12_v1"
+GEOMETRIC_HEIGHT_PROFILE_GOAL_SCHEMA_NAME = "hindsight_geometric_height_profile16_v1"
 WAYPOINT_TIME_OFFSETS_S = (0.5, 1.0, 1.5)
 GEOMETRIC_WAYPOINT_FRACTIONS = (0.25, 0.50, 0.75)
 # The t=0 token makes the instantaneous cross-track/yaw error observable to
@@ -25,7 +26,11 @@ GEOMETRIC_WAYPOINT_FRACTIONS = (0.25, 0.50, 0.75)
 HOLONOMIC_TOKEN_TIMES_S = (0.0, 0.5, 1.0, 1.5)
 PATH_GUIDANCE_FRACTIONS = tuple(float(value) for value in np.linspace(0.0, 1.0, 7))
 REFERENCE_GOAL_REPRESENTATIONS = (
-    "path11", "holonomic_se2_32", "path_guidance_se2_36", "hindsight_geom_avg12",
+    "path11",
+    "holonomic_se2_32",
+    "path_guidance_se2_36",
+    "hindsight_geom_avg12",
+    "hindsight_geom_profile16",
 )
 
 
@@ -40,6 +45,8 @@ def goal_dimension(goal_representation: str) -> int:
         return 36
     if goal_representation == "hindsight_geom_avg12":
         return 12
+    if goal_representation == "hindsight_geom_profile16":
+        return 16
     raise ValueError(f"Unsupported goal representation {goal_representation!r}.")
 
 
@@ -58,6 +65,12 @@ def goal_schema_name(goal_representation: str, *, reference: bool) -> str:
         if reference:
             raise ValueError("hindsight_geom_avg12 requires achieved-future relabeling, not a reference route.")
         return GEOMETRIC_HINDSIGHT_GOAL_SCHEMA_NAME
+    if goal_representation == "hindsight_geom_profile16":
+        if reference:
+            raise ValueError(
+                "hindsight_geom_profile16 requires achieved-future relabeling, not a reference route."
+            )
+        return GEOMETRIC_HEIGHT_PROFILE_GOAL_SCHEMA_NAME
     return REFERENCE_GOAL_SCHEMA_NAME if reference else GOAL_SCHEMA_NAME
 
 
@@ -322,6 +335,68 @@ def build_geometric_hindsight_goal_vector(
     return np.asarray(values, dtype=np.float32)
 
 
+def build_geometric_height_profile_goal_vector(
+    pos_w: np.ndarray,
+    cumulative_xy: np.ndarray,
+    height_profile_w: np.ndarray,
+    step_idx: int,
+    end_idx: int,
+    origin_w: np.ndarray,
+    quat_origin: np.ndarray,
+    *,
+    quat_w: np.ndarray | None = None,
+    yaws_w: np.ndarray | None = None,
+    dt: float,
+    v_avg_clip: float,
+    duration_s: float | None = None,
+) -> np.ndarray:
+    """Encode route geometry plus the task height at each spatial preview.
+
+    Layout (16D): four ``[x, y, h_required]`` tokens at 25/50/75/100%
+    of the look-ahead arc, followed by the height required at the robot's
+    current route progress, terminal ``sin/cos(dyaw)``, and average speed.
+
+    ``height_profile_w`` is deliberately separate from ``pos_w[:, 2]``.  For
+    hindsight training it must be the recorded task condition
+    ``obs/desired_base_height`` rather than measured base height, otherwise
+    gait oscillation and tracking error leak into the command semantics.  At
+    deployment it is the Z component of the requested route.
+    """
+
+    if quat_w is None and yaws_w is None:
+        raise ValueError("Geometric height-profile hindsight requires terminal orientation data.")
+    path = np.asarray(pos_w, dtype=np.float32)
+    cumulative = np.asarray(cumulative_xy, dtype=np.float32).reshape(-1)
+    heights = np.asarray(height_profile_w, dtype=np.float32).reshape(-1)
+    if path.ndim != 2 or path.shape[1] != 3 or cumulative.shape != (len(path),):
+        raise ValueError("Geometric height profile requires path positions (T,3) and cumulative arc length (T,).")
+    if heights.shape != (len(path),) or not np.isfinite(heights).all():
+        raise ValueError("height_profile_w must be a finite vector with one task height per path sample.")
+
+    step = int(np.clip(step_idx, 0, len(path) - 1))
+    terminal = int(np.clip(end_idx, step, len(path) - 1))
+    sample_indices = [
+        *_arc_fraction_indices(cumulative, step, terminal, GEOMETRIC_WAYPOINT_FRACTIONS),
+        terminal,
+    ]
+    values: list[float] = []
+    for index in sample_indices:
+        local = transform_point_to_yaw_frame(path[index], origin_w, quat_origin)
+        values.extend((float(local[0]), float(local[1]), float(heights[index])))
+
+    if quat_w is not None:
+        dyaw = relative_yaw(quat_origin, quat_w[terminal])
+    else:
+        dyaw = relative_yaw(quat_origin, yaw_to_quat_wxyz(float(yaws_w[terminal])))
+    duration = max(
+        float(terminal - step) * float(dt) if duration_s is None else float(duration_s),
+        float(dt),
+    )
+    v_avg = float(np.clip((float(cumulative[terminal]) - float(cumulative[step])) / duration, 0.0, v_avg_clip))
+    values.extend((float(heights[step]), math.sin(float(dyaw)), math.cos(float(dyaw)), v_avg))
+    return np.asarray(values, dtype=np.float32)
+
+
 def _planned_temporal_preview(
     path_w: np.ndarray,
     cumulative_xy: np.ndarray,
@@ -387,6 +462,7 @@ def build_goal_vector(
     guidance_pos_w: np.ndarray | None = None,
     guidance_cumulative_xy: np.ndarray | None = None,
     terminal_idx: int | None = None,
+    height_profile_w: np.ndarray | None = None,
 ) -> np.ndarray:
     """Build a declared goal vector shared by the DataLoader and inference."""
 
@@ -417,6 +493,13 @@ def build_goal_vector(
     if goal_representation == "hindsight_geom_avg12":
         return build_geometric_hindsight_goal_vector(
             pos_w, cumulative_xy, step_idx, end_idx, origin_w, quat_origin,
+            quat_w=quat_w, yaws_w=yaws_w, dt=dt, v_avg_clip=v_req_clip,
+        )
+    if goal_representation == "hindsight_geom_profile16":
+        if height_profile_w is None:
+            raise ValueError("hindsight_geom_profile16 requires height_profile_w.")
+        return build_geometric_height_profile_goal_vector(
+            pos_w, cumulative_xy, height_profile_w, step_idx, end_idx, origin_w, quat_origin,
             quat_w=quat_w, yaws_w=yaws_w, dt=dt, v_avg_clip=v_req_clip,
         )
     if goal_representation != "path11":
@@ -540,6 +623,42 @@ def build_geometric_hindsight_goal_from_path(
     return build_geometric_hindsight_goal_vector(
         path_w, cumulative_xy, start_idx, end_idx, robot_pos_w, robot_quat_w,
         yaws_w=yaws_w, dt=dt, v_avg_clip=v_avg_clip,
+        duration_s=float(goal_horizon_steps) * float(dt),
+    )
+
+
+def build_geometric_height_profile_goal_from_path(
+    path_w: np.ndarray,
+    cumulative_xy: np.ndarray,
+    yaws_w: np.ndarray,
+    robot_pos_w: np.ndarray,
+    robot_quat_w: np.ndarray,
+    *,
+    goal_horizon_steps: int,
+    dt: float,
+    speed: float,
+    start_idx: int | None = None,
+    v_avg_clip: float = 2.0,
+) -> np.ndarray:
+    """Deployment counterpart of :func:`build_geometric_height_profile_goal_vector`."""
+
+    if start_idx is None:
+        start_idx = closest_path_index(path_w, robot_pos_w)
+    start_idx = int(np.clip(start_idx, 0, len(path_w) - 1))
+    end_idx = resolve_end_idx(
+        cumulative_xy, start_idx, goal_horizon_steps=goal_horizon_steps, dt=dt, speed=speed,
+    )
+    return build_geometric_height_profile_goal_vector(
+        path_w,
+        cumulative_xy,
+        np.asarray(path_w, dtype=np.float32)[:, 2],
+        start_idx,
+        end_idx,
+        robot_pos_w,
+        robot_quat_w,
+        yaws_w=yaws_w,
+        dt=dt,
+        v_avg_clip=v_avg_clip,
         duration_s=float(goal_horizon_steps) * float(dt),
     )
 
@@ -686,6 +805,43 @@ def build_geometric_hindsight_goal_batch_from_path(
         goals.append(build_geometric_hindsight_goal_from_path(
             path_w, cumulative_xy, yaws_w, robot_pos_w[index], robot_quat_w[index],
             goal_horizon_steps=goal_horizon_steps, dt=dt, speed=speed, start_idx=start_idx,
+            v_avg_clip=v_avg_clip,
+        ))
+    return np.stack(goals, axis=0).astype(np.float32)
+
+
+def build_geometric_height_profile_goal_batch_from_path(
+    path_w: np.ndarray,
+    cumulative_xy: np.ndarray,
+    yaws_w: np.ndarray,
+    robot_pos_w: np.ndarray,
+    robot_quat_w: np.ndarray,
+    *,
+    goal_horizon_steps: int,
+    dt: float,
+    speed: float,
+    path_progress: np.ndarray | None = None,
+    v_avg_clip: float = 2.0,
+) -> np.ndarray:
+    """Batch deployment builder for the geometry-and-height-profile contract."""
+
+    num_envs = robot_pos_w.shape[0]
+    if path_progress is None:
+        path_progress = np.zeros(num_envs, dtype=np.int32)
+    goals = []
+    for index in range(num_envs):
+        start_idx = advance_path_progress(path_w, robot_pos_w[index], int(path_progress[index]))
+        path_progress[index] = start_idx
+        goals.append(build_geometric_height_profile_goal_from_path(
+            path_w,
+            cumulative_xy,
+            yaws_w,
+            robot_pos_w[index],
+            robot_quat_w[index],
+            goal_horizon_steps=goal_horizon_steps,
+            dt=dt,
+            speed=speed,
+            start_idx=start_idx,
             v_avg_clip=v_avg_clip,
         ))
     return np.stack(goals, axis=0).astype(np.float32)

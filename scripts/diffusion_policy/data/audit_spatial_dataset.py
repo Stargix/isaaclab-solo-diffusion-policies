@@ -45,6 +45,14 @@ GEOMETRIC_FEATURE_NAMES = (
     "terminal_sin_dyaw", "terminal_cos_dyaw", "terminal_height_abs", "average_path_speed",
 )
 
+HEIGHT_PROFILE_FEATURE_NAMES = (
+    "waypoint_25_x", "waypoint_25_y", "waypoint_25_height_abs",
+    "waypoint_50_x", "waypoint_50_y", "waypoint_50_height_abs",
+    "waypoint_75_x", "waypoint_75_y", "waypoint_75_height_abs",
+    "terminal_x", "terminal_y", "terminal_height_abs", "current_height_abs",
+    "terminal_sin_dyaw", "terminal_cos_dyaw", "average_path_speed",
+)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -70,6 +78,16 @@ def summary(values: np.ndarray) -> dict[str, float]:
 
 
 def planned_straight_goal(speed: float, height: float, goal_representation: str) -> np.ndarray:
+    if goal_representation == "hindsight_geom_profile16":
+        return np.asarray(
+            [
+                0.5 * speed, 0.0, height,
+                1.0 * speed, 0.0, height,
+                1.5 * speed, 0.0, height,
+                2.0 * speed, 0.0, height,
+                height, 0.0, 1.0, speed,
+            ], dtype=np.float32,
+        )
     if goal_representation == "hindsight_geom_avg12":
         return np.asarray(
             [
@@ -170,6 +188,7 @@ def main() -> None:
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     if checkpoint.get("policy_kind") not in {
         "spatial_time_preview_ddpm", "spatial_reference_path_ddpm", "spatial_hindsight_geometry_ddpm",
+        "spatial_hindsight_height_profile_ddpm",
     }:
         raise ValueError("Checkpoint is not a supported spatial diffusion policy.")
     config = checkpoint["config"]
@@ -193,7 +212,11 @@ def main() -> None:
     sample_indices = rng.choice(len(dataset.samples), sample_count, replace=False)
 
     goal_representation = str(dataset_cfg.get("goal_representation", "path11"))
-    feature_names = GEOMETRIC_FEATURE_NAMES if goal_representation == "hindsight_geom_avg12" else TEMPORAL_FEATURE_NAMES
+    feature_names = (
+        HEIGHT_PROFILE_FEATURE_NAMES if goal_representation == "hindsight_geom_profile16"
+        else GEOMETRIC_FEATURE_NAMES if goal_representation == "hindsight_geom_avg12"
+        else TEMPORAL_FEATURE_NAMES
+    )
     goals = np.empty((sample_count, len(feature_names)), dtype=np.float32)
     action_rms = np.empty(sample_count, dtype=np.float32)
     height_delta = np.empty(sample_count, dtype=np.float32)
@@ -206,7 +229,12 @@ def main() -> None:
         action_rms[output_index] = float(torch.sqrt(torch.mean(torch.square(action_hist))).item())
         state_step = sample.anchor_step - 1
         target_step = state_step + dataset.goal_horizon_steps
-        height_delta[output_index] = float(demo.root_pos_w[target_step, 2] - demo.root_pos_w[state_step, 2])
+        height_source = (
+            demo.desired_base_height
+            if goal_representation == "hindsight_geom_profile16" and demo.desired_base_height is not None
+            else demo.root_pos_w[:, 2]
+        )
+        height_delta[output_index] = float(height_source[target_step] - height_source[state_step])
         if demo.skill_idx is not None:
             skill_boundary[output_index] = demo.skill_idx[state_step] != demo.skill_idx[target_step]
 

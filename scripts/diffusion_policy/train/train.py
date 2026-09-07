@@ -103,7 +103,8 @@ def parse_args() -> argparse.Namespace:
         choices=REFERENCE_GOAL_REPRESENTATIONS,
         default=DATASET_DEFAULTS.goal_representation,
         help=("path11 is the legacy temporal preview; hindsight_geom_avg12 uses achieved geometric waypoints "
-              "plus terminal pose and average speed; holonomic_se2_32 exposes route SE(2) tokens; "
+              "plus terminal pose and average speed; hindsight_geom_profile16 adds spatially aligned "
+              "task-height previews; holonomic_se2_32 exposes route SE(2) tokens; "
               "path_guidance_se2_36 uses a stored guide plus terminal pose."),
     )
     parser.add_argument("--step_stride", type=int, default=DATASET_DEFAULTS.step_stride, help="Temporal stride to sub-sample step windows.")
@@ -205,8 +206,8 @@ def make_config(args: argparse.Namespace) -> TrainConfig:
             "Waypoint jitter is the simple hindsight-path augmentation and requires "
             "--goal_source achieved --goal_representation path11."
         )
-    if args.goal_representation == "hindsight_geom_avg12" and args.goal_source != "achieved":
-        raise ValueError("hindsight_geom_avg12 requires --goal_source achieved.")
+    if args.goal_representation in {"hindsight_geom_avg12", "hindsight_geom_profile16"} and args.goal_source != "achieved":
+        raise ValueError(f"{args.goal_representation} requires --goal_source achieved.")
     return TrainConfig(
         dataset=DatasetConfig(
             hdf5_paths=args.datasets,
@@ -260,11 +261,13 @@ def make_config(args: argparse.Namespace) -> TrainConfig:
         run_name=args.run_name,
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
-        schema_version=(7 if args.goal_representation == "hindsight_geom_avg12"
+        schema_version=(8 if args.goal_representation == "hindsight_geom_profile16"
+                        else 7 if args.goal_representation == "hindsight_geom_avg12"
                         else 6 if args.goal_representation == "path_guidance_se2_36"
                         else 5 if args.goal_representation == "holonomic_se2_32"
                         else 4 if is_reference else 3),
-        policy_kind=("spatial_hindsight_geometry_ddpm" if args.goal_representation == "hindsight_geom_avg12"
+        policy_kind=("spatial_hindsight_height_profile_ddpm" if args.goal_representation == "hindsight_geom_profile16"
+                     else "spatial_hindsight_geometry_ddpm" if args.goal_representation == "hindsight_geom_avg12"
                      else "holonomic_reference_path_ddpm" if args.goal_representation == "holonomic_se2_32"
                      else "path_guidance_terminal_ddpm" if args.goal_representation == "path_guidance_se2_36"
                      else "spatial_reference_path_ddpm" if is_reference else "spatial_time_preview_ddpm"),

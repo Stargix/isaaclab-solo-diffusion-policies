@@ -19,6 +19,7 @@ from train.conditioning.goal_builder import (
     GOAL_SCHEMA_NAME, REFERENCE_GOAL_SCHEMA_NAME, HOLONOMIC_REFERENCE_GOAL_SCHEMA_NAME,
     PATH_GUIDANCE_GOAL_SCHEMA_NAME, PATH_GUIDANCE_FRACTIONS,
     GEOMETRIC_HINDSIGHT_GOAL_SCHEMA_NAME, GEOMETRIC_WAYPOINT_FRACTIONS,
+    GEOMETRIC_HEIGHT_PROFILE_GOAL_SCHEMA_NAME,
     HOLONOMIC_TOKEN_TIMES_S, REFERENCE_GOAL_REPRESENTATIONS, WAYPOINT_TIME_OFFSETS_S,
 )
 from train.data.dataset import SpatialHindsightDataset
@@ -273,6 +274,14 @@ GEOMETRIC_FEATURE_NAMES = (
     "terminal_height_abs", "average_path_speed",
 )
 
+HEIGHT_PROFILE_FEATURE_NAMES = (
+    "waypoint_25_x", "waypoint_25_y", "waypoint_25_height_abs",
+    "waypoint_50_x", "waypoint_50_y", "waypoint_50_height_abs",
+    "waypoint_75_x", "waypoint_75_y", "waypoint_75_height_abs",
+    "terminal_x", "terminal_y", "terminal_height_abs",
+    "current_height_abs", "terminal_sin_dyaw", "terminal_cos_dyaw", "average_path_speed",
+)
+
 
 def geometric_derived(values: np.ndarray) -> dict[str, float]:
     points = values[:, :8].reshape(-1, 4, 2)
@@ -314,6 +323,53 @@ def make_geometric_plots(values: np.ndarray, output: Path) -> None:
         axis.grid(True, alpha=0.2)
     figure.tight_layout()
     figure.savefig(output / "hindsight_geom_avg12_coverage.png", dpi=180)
+    plt.close(figure)
+
+
+def height_profile_derived(values: np.ndarray) -> dict[str, float]:
+    tokens = values[:, :12].reshape(-1, 4, 3)
+    points = tokens[:, :, :2]
+    increments = np.linalg.norm(np.diff(points, axis=1), axis=-1)
+    profile_changes = np.any(np.abs(np.diff(tokens[:, :, 2], axis=1)) > 1.0e-4, axis=-1)
+    current_to_future = np.any(np.abs(tokens[:, :, 2] - values[:, 12:13]) > 1.0e-4, axis=-1)
+    return {
+        "terminal_distance_p05_m": float(np.percentile(np.linalg.norm(points[:, -1], axis=-1), 5)),
+        "terminal_distance_p50_m": float(np.percentile(np.linalg.norm(points[:, -1], axis=-1), 50)),
+        "terminal_distance_p95_m": float(np.percentile(np.linalg.norm(points[:, -1], axis=-1), 95)),
+        "average_speed_p05_m_s": float(np.percentile(values[:, 15], 5)),
+        "average_speed_p50_m_s": float(np.percentile(values[:, 15], 50)),
+        "average_speed_p95_m_s": float(np.percentile(values[:, 15], 95)),
+        "stop_fraction_v_avg_lt_0p02": float(np.mean(values[:, 15] < 0.02)),
+        "duplicate_waypoint_fraction": float(np.mean(np.any(increments < 1.0e-4, axis=-1))),
+        "within_preview_height_change_fraction": float(np.mean(profile_changes)),
+        "future_height_differs_from_current_fraction": float(np.mean(current_to_future)),
+    }
+
+
+def make_height_profile_plots(values: np.ndarray, output: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    tokens = values[:, :12].reshape(-1, 4, 3)
+    points = tokens[:, :, :2]
+    figure, axes = plt.subplots(2, 2, figsize=(11, 8))
+    axes[0, 0].scatter(points[:, -1, 0], points[:, -1, 1], c=values[:, 15], s=4, alpha=0.2)
+    axes[0, 0].set(title="Terminal XY support", xlabel="terminal x [m]", ylabel="terminal y [m]")
+    axes[0, 0].axis("equal")
+    axes[0, 1].hist(values[:, 12], bins=60, alpha=0.7, label="required now")
+    axes[0, 1].hist(tokens[:, -1, 2], bins=60, alpha=0.5, label="terminal preview")
+    axes[0, 1].set(title="Task-height support", xlabel="height [m]", ylabel="count")
+    axes[0, 1].legend(fontsize=8)
+    axes[1, 0].boxplot(tokens[:, :, 2], tick_labels=("25%", "50%", "75%", "terminal"), showfliers=False)
+    axes[1, 0].set(title="Required height by spatial preview", ylabel="height [m]")
+    axes[1, 1].scatter(values[:, 15], np.linalg.norm(points[:, -1], axis=-1), s=4, alpha=0.2)
+    axes[1, 1].set(title="Average speed and terminal reach", xlabel="v_avg [m/s]", ylabel="terminal distance [m]")
+    for axis in axes.flat:
+        axis.grid(True, alpha=0.2)
+    figure.tight_layout()
+    figure.savefig(output / "hindsight_geom_profile16_coverage.png", dpi=180)
     plt.close(figure)
 
 
@@ -361,19 +417,22 @@ def main() -> None:
     holonomic = args.goal_representation == "holonomic_se2_32"
     path_guidance = args.goal_representation == "path_guidance_se2_36"
     geometric = args.goal_representation == "hindsight_geom_avg12"
+    height_profile = args.goal_representation == "hindsight_geom_profile16"
     names = (
         path_guidance_feature_names() if path_guidance else holonomic_feature_names() if holonomic
+        else HEIGHT_PROFILE_FEATURE_NAMES if height_profile
         else GEOMETRIC_FEATURE_NAMES if geometric else FEATURE_NAMES
     )
     summary = {
-        "goal_schema": (GEOMETRIC_HINDSIGHT_GOAL_SCHEMA_NAME if geometric
+        "goal_schema": (GEOMETRIC_HEIGHT_PROFILE_GOAL_SCHEMA_NAME if height_profile
+                        else GEOMETRIC_HINDSIGHT_GOAL_SCHEMA_NAME if geometric
                         else PATH_GUIDANCE_GOAL_SCHEMA_NAME if path_guidance
                         else HOLONOMIC_REFERENCE_GOAL_SCHEMA_NAME if holonomic
                         else REFERENCE_GOAL_SCHEMA_NAME if args.goal_source == "reference" else GOAL_SCHEMA_NAME),
         "waypoint_time_offsets_s": WAYPOINT_TIME_OFFSETS_S,
         "holonomic_token_times_s": HOLONOMIC_TOKEN_TIMES_S if holonomic else None,
         "path_guidance_fractions": PATH_GUIDANCE_FRACTIONS if path_guidance else None,
-        "geometric_waypoint_fractions": GEOMETRIC_WAYPOINT_FRACTIONS if geometric else None,
+        "geometric_waypoint_fractions": GEOMETRIC_WAYPOINT_FRACTIONS if (geometric or height_profile) else None,
         "goal_horizon_steps": args.goal_horizon_steps,
         "goal_source": args.goal_source,
         "goal_representation": args.goal_representation,
@@ -384,7 +443,8 @@ def main() -> None:
         "sampled_goals": sample_count,
         "skill_demo_counts": skill_demo_counts,
         "feature_stats": feature_stats(values, names),
-        "derived": (geometric_derived(values) if geometric
+        "derived": (height_profile_derived(values) if height_profile
+                    else geometric_derived(values) if geometric
                     else path_guidance_derived(values) if path_guidance
                     else holonomic_derived(values) if holonomic else derived_metrics(values)),
     }
@@ -399,6 +459,8 @@ def main() -> None:
         make_holonomic_plots(values, output)
     elif geometric:
         make_geometric_plots(values, output)
+    elif height_profile:
+        make_height_profile_plots(values, output)
     else:
         make_plots(values, output)
     print(f"[DONE] Spatial coverage report: {output.resolve()}")

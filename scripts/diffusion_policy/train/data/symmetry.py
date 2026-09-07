@@ -66,6 +66,13 @@ def _reflect_proprio_y(proprio_hist: torch.Tensor) -> torch.Tensor:
 
 def _reflect_goal_x(goal_hist: torch.Tensor) -> torch.Tensor:
     goal = goal_hist.clone()
+    if goal.shape[-1] == 16:
+        # Four [x, y, h_required] tokens, current h_required,
+        # terminal sin/cos(dyaw), and average speed.
+        token = goal[..., :12].reshape(*goal.shape[:-1], 4, 3)
+        token *= _device_tensor(torch.tensor([1.0, -1.0, 1.0]), token)
+        goal[..., 13] *= -1.0
+        return goal
     if goal.shape[-1] == 36:
         # Seven [dir_x, dir_y, log_distance, arc_offset] tokens followed by
         # [x_terminal, y_terminal, sin(dyaw), cos(dyaw), z, t_go, terminal_phase, guide_error].
@@ -99,6 +106,11 @@ def _reflect_goal_x(goal_hist: torch.Tensor) -> torch.Tensor:
 
 def _reflect_goal_y(goal_hist: torch.Tensor) -> torch.Tensor:
     goal = goal_hist.clone()
+    if goal.shape[-1] == 16:
+        token = goal[..., :12].reshape(*goal.shape[:-1], 4, 3)
+        token *= _device_tensor(torch.tensor([-1.0, 1.0, 1.0]), token)
+        goal[..., 14] *= -1.0
+        return goal
     if goal.shape[-1] == 36:
         token = goal[..., :28].reshape(*goal.shape[:-1], 7, 4)
         token *= _device_tensor(torch.tensor([-1.0, 1.0, 1.0, 1.0]), token)

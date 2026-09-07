@@ -18,8 +18,16 @@ sys.path.insert(0, str(_PACKAGE_ROOT / "data"))
 
 from train.data.dataset import SpatialHindsightDataset
 from train.data.episode_split import split_episode_indices
-from train.conditioning.goal_builder import advance_path_progress, build_goal_vector
+from train.conditioning.geometry import cumulative_xy_lengths
+from train.conditioning.goal_builder import (
+    advance_path_progress,
+    build_geometric_height_profile_goal_from_path,
+    build_geometric_height_profile_goal_vector,
+    build_goal_vector,
+    resolve_end_idx,
+)
 from train.data.symmetry import apply_symmetry
+from train.runtime.checkpoint import load_training_checkpoint
 from capability_routes import CapabilityLimits, generate_waypoint_guidance_route
 from model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
 
@@ -55,6 +63,10 @@ def write_dataset(path: Path, *, demos: int = 3, length: int = 240) -> None:
             root_quat[:, 0] = 1.0
             obs.create_dataset("root_pos_w", data=root_pos)
             obs.create_dataset("root_quat_w", data=root_quat)
+            desired_height = np.where(
+                (np.arange(length) // 40) % 2 == 0, 0.2932, 0.1705
+            ).astype(np.float32)
+            obs.create_dataset("desired_base_height", data=desired_height[:, None])
             reference_pos = root_pos.copy()
             # Deliberately diverge from achieved motion so the test catches an
             # accidental fallback to hindsight positions.
@@ -161,6 +173,114 @@ class SpatialContractTests(unittest.TestCase):
         policy.set_normalizer_stats(dataset.build_normalizer_stats([0, 1], max_stats_samples=50))
         batch = {key: value.unsqueeze(0) for key, value in item.items()}
         self.assertTrue(torch.isfinite(policy.compute_loss(batch)))
+
+    def test_height_profile_goal_uses_task_condition_not_measured_base_height(self) -> None:
+        dataset = SpatialHindsightDataset(
+            [str(self.path)],
+            goal_horizon_steps=100,
+            goal_source="achieved",
+            goal_representation="hindsight_geom_profile16",
+            symmetry_mode="none",
+        )
+        item = dataset[0]
+        self.assertEqual(tuple(item["goal_hist"].shape), (8, 16))
+        demo = dataset.demos[0]
+        expected = build_geometric_height_profile_goal_vector(
+            demo.root_pos_w,
+            demo.cumulative_xy,
+            demo.desired_base_height,
+            1,
+            101,
+            demo.root_pos_w[1],
+            demo.root_quat_w[1],
+            quat_w=demo.root_quat_w,
+            dt=0.02,
+            v_avg_clip=2.0,
+        )
+        np.testing.assert_allclose(item["goal_hist"][0], expected, atol=1e-6)
+        profile = item["goal_hist"][0, [2, 5, 8, 11, 12]].numpy()
+        self.assertTrue(np.all(np.isin(np.round(profile, 4), [0.1705, 0.2932])))
+        measured_z = demo.root_pos_w[:102, 2]
+        self.assertFalse(np.all(np.isin(np.round(measured_z, 4), [0.1705, 0.2932])))
+
+        reflected_x = apply_symmetry(
+            torch.zeros((8, 30)), torch.zeros((8, 12)), item["goal_hist"], torch.zeros((16, 12)),
+            index=1, mode="quadruped",
+        )[2]
+        np.testing.assert_allclose(reflected_x[:, [2, 5, 8, 11, 12, 14, 15]], item["goal_hist"][:, [2, 5, 8, 11, 12, 14, 15]])
+        np.testing.assert_allclose(reflected_x[:, [1, 4, 7, 10, 13]], -item["goal_hist"][:, [1, 4, 7, 10, 13]])
+
+        policy = Solo12DiffusionPolicy(Solo12DiffusionPolicyConfig(
+            goal_dim=16, d_model=32, nhead=4, num_layers=1, p_drop_attn=0.0,
+            num_train_timesteps=2, num_inference_steps=2,
+        ))
+        policy.set_normalizer_stats(dataset.build_normalizer_stats([0, 1], max_stats_samples=50))
+        batch = {key: value.unsqueeze(0) for key, value in item.items()}
+        loss = policy.compute_loss(batch)
+        self.assertTrue(torch.isfinite(loss))
+        loss.backward()
+
+    def test_height_profile_training_and_deployment_builders_match(self) -> None:
+        samples = 151
+        path = np.zeros((samples, 3), dtype=np.float32)
+        path[:, 0] = np.linspace(0.0, 1.2, samples)
+        path[:, 1] = 0.15 * np.sin(np.linspace(0.0, np.pi, samples))
+        path[:, 2] = np.where(np.arange(samples) < 70, 0.2932, 0.1705)
+        cumulative = cumulative_xy_lengths(path)
+        yaws = np.zeros(samples, dtype=np.float32)
+        quat = np.zeros((samples, 4), dtype=np.float32)
+        quat[:, 0] = 1.0
+        start = 0
+        end = resolve_end_idx(cumulative, start, goal_horizon_steps=100, dt=0.02, speed=0.6)
+        training = build_geometric_height_profile_goal_vector(
+            path, cumulative, path[:, 2], start, end, path[start], quat[start],
+            yaws_w=yaws, dt=0.02, v_avg_clip=2.0, duration_s=2.0,
+        )
+        deployment = build_geometric_height_profile_goal_from_path(
+            path, cumulative, yaws, path[start], quat[start],
+            goal_horizon_steps=100, dt=0.02, speed=0.6, start_idx=start, v_avg_clip=2.0,
+        )
+        np.testing.assert_allclose(deployment, training, atol=1e-6)
+
+    def test_height_profile_metadata_is_required_only_by_new_schema(self) -> None:
+        with h5py.File(self.path, "r+") as file:
+            for demo in file["data"].values():
+                del demo["obs"]["desired_base_height"]
+        legacy = SpatialHindsightDataset(
+            [str(self.path)],
+            goal_horizon_steps=100,
+            goal_representation="hindsight_geom_avg12",
+            symmetry_mode="none",
+        )
+        self.assertEqual(legacy.goal_dim, 12)
+        with self.assertRaisesRegex(KeyError, "desired_base_height"):
+            SpatialHindsightDataset(
+                [str(self.path)],
+                goal_horizon_steps=100,
+                goal_representation="hindsight_geom_profile16",
+                symmetry_mode="none",
+            )
+
+    def test_schema8_checkpoint_contract_loads_without_relaxing_legacy_checks(self) -> None:
+        checkpoint_path = Path(self.tempdir.name) / "schema8.pt"
+        torch.save(
+            {
+                "schema_version": 8,
+                "policy_kind": "spatial_hindsight_height_profile_ddpm",
+                "config": {
+                    "goal_schema": "hindsight_geometric_height_profile16_v1",
+                    "schema_version": 8,
+                    "policy_kind": "spatial_hindsight_height_profile_ddpm",
+                },
+            },
+            checkpoint_path,
+        )
+        loaded = load_training_checkpoint(
+            checkpoint_path,
+            "cpu",
+            expected_policy_kind="spatial_hindsight_height_profile_ddpm",
+        )
+        self.assertEqual(loaded["schema_version"], 8)
 
     def test_progress_search_does_not_jump_to_crossing_branch(self) -> None:
         path = np.zeros((120, 3), dtype=np.float32)
