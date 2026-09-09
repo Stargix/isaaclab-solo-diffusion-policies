@@ -5,6 +5,7 @@ import torch
 
 from scripts.dppo_diffusion_rl.checkpointing import (
     DPPO_TASK_CONTRACT_VERSION,
+    checkpoint_goal_representation,
     load_policy_checkpoint,
     training_resume_state,
 )
@@ -38,7 +39,9 @@ def test_generic_loader_rejects_hybrid_dppo_checkpoint(tmp_path) -> None:
 
 def test_dppo_loader_rejects_checkpoint_without_padded_starts(monkeypatch) -> None:
     checkpoint = {
+        "policy_kind": "spatial_hindsight_geometry_ddpm",
         "config": {
+            "model": {"goal_dim": 12},
             "dataset": {
                 "goal_representation": "hindsight_geom_avg12",
                 "include_padded_starts": False,
@@ -51,6 +54,38 @@ def test_dppo_loader_rejects_checkpoint_without_padded_starts(monkeypatch) -> No
     )
     with pytest.raises(ValueError, match="include_padded_starts=true"):
         load_policy_checkpoint("unused.pt", torch.device("cpu"), DPPOConfig())
+
+
+@pytest.mark.parametrize(
+    ("representation", "policy_kind", "goal_dim"),
+    (
+        ("hindsight_geom_avg12", "spatial_hindsight_geometry_ddpm", 12),
+        ("hindsight_geom_profile16", "spatial_hindsight_height_profile_ddpm", 16),
+    ),
+)
+def test_checkpoint_goal_contract_accepts_both_geometric_schemas(
+    representation: str, policy_kind: str, goal_dim: int
+) -> None:
+    checkpoint = {
+        "policy_kind": policy_kind,
+        "config": {
+            "model": {"goal_dim": goal_dim},
+            "dataset": {"goal_representation": representation},
+        },
+    }
+    assert checkpoint_goal_representation(checkpoint) == representation
+
+
+def test_checkpoint_goal_contract_rejects_dimension_aliasing() -> None:
+    checkpoint = {
+        "policy_kind": "spatial_hindsight_height_profile_ddpm",
+        "config": {
+            "model": {"goal_dim": 12},
+            "dataset": {"goal_representation": "hindsight_geom_profile16"},
+        },
+    }
+    with pytest.raises(ValueError, match="requires goal_dim=16"):
+        checkpoint_goal_representation(checkpoint)
 
 
 def test_legacy_task_contract_requires_clean_optimization_restart() -> None:

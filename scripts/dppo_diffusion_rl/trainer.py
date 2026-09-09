@@ -103,6 +103,13 @@ class DPPOTrainer:
         self.num_envs = self.raw_env.num_envs
         self.device = torch.device(self.raw_env.device)
         self.history = self.policy.cfg.history
+        goal = self.raw_env.get_goal()
+        expected_goal_shape = (self.num_envs, self.policy.cfg.goal_dim)
+        if tuple(goal.shape) != expected_goal_shape:
+            raise ValueError(
+                f"Environment goal shape {tuple(goal.shape)} does not match "
+                f"the checkpoint contract {expected_goal_shape}."
+            )
         self.proprio_history = torch.zeros(
             self.num_envs, self.history, self.policy.cfg.proprio_dim, device=self.device
         )
@@ -299,6 +306,7 @@ class DPPOTrainer:
             metrics=metrics,
             best_score=self.best_score,
             task_config={
+                "goal_representation": self.raw_env.cfg.goal_representation,
                 "speed_budget_max_mps": float(self.raw_env.cfg.speed_budget_max_mps),
                 "route_stage": int(self.raw_env.cfg.route_stage),
                 "route_speed_max_mps": self.raw_env.cfg.route_speed_max_mps,

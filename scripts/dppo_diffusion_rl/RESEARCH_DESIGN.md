@@ -8,17 +8,26 @@ the geometric and height behavior learned from small random-command datasets?
 
 This branch tests direct DPPO. It does not test residual PPO and it does not add
 a high-level velocity policy. The input remains the Phase-A history plus the
-12-D geometric path/terminal-pose/average-speed condition. The output remains a
-16-step joint-action trajectory, of which indices 8:12 are executed.
+checkpoint-declared geometric path/terminal-pose/average-speed condition. The
+legacy actor uses 12 dimensions; the profile actor uses 16 dimensions by
+attaching required height to all four spatial samples and adding the current
+height requirement. The output remains a 16-step joint-action trajectory, of
+which indices 8:12 are executed.
 
 The implementation follows [DPPO (Ren et al., ICLR 2025)](https://openreview.net/forum?id=mEpqHvbD2h)
 and its [official implementation](https://github.com/irom-princeton/dppo).
 
-## Why this checkpoint, and its real limitation
+## Starting checkpoints and their real limitations
 
-The v2 starting actor is `checkpoints_iri/checkpoints_dppo/dppo_path_1.pt`,
-itself fine-tuned from `real_walk_crouch_hindsight.pt`. This is deliberately a
-warm start rather than a return to Phase A: its evaluation already showed about
+The profile16 experiment starts directly from
+`checkpoints_iri/checkpoints_dp/wct_diffusion_policy_baseline.pt`. This is the
+schema-8 Phase-A actor: DPPO selects the 16-D route contract from its checkpoint
+metadata and does not transplant weights or introduce a skill index.
+
+For comparison, the earlier scalar-height v2 experiment started from
+`checkpoints_iri/checkpoints_dppo/dppo_path_1.pt`, itself fine-tuned from
+`real_walk_crouch_hindsight.pt`. That was deliberately a warm start rather than
+a return to Phase A: its evaluation already showed about
 98.7% survival, 93.3% arrival and 0.042 m cross-track RMSE, so rewriting the
 actor condition or discarding its online geometric correction would add risk
 without addressing the observed failure.
@@ -52,6 +61,14 @@ actor does not. Changing the actor input would invalidate the pretrained
 checkpoint contract, so this iteration does not hide that change inside DPPO.
 If terminal timing alone remains unlearnable, an explicit speed/time adapter is
 the next architecture ablation rather than another reward rewrite.
+
+The profile16 extension removes a separate observability limitation found in
+the height-transition audit. A single terminal height aliases routes that end
+at the same posture but require different posture along the lookahead. Schema 8
+therefore supplies `[x,y,h_required]` at 25/50/75/100% of the spatial horizon
+plus `h_now`. This is task geometry, not a skill label: no gait identity or
+expert index is exposed. DPPO replaces only the final average-speed scalar with
+the remaining-route pace budget, exactly as for schema 7.
 
 ## Relationship to adjacent work
 

@@ -99,6 +99,7 @@ from isaaclab.terrains import TerrainGeneratorCfg
 from isaaclab_tasks.utils import parse_env_cfg
 
 from scripts.dppo_diffusion_rl.checkpointing import (
+    checkpoint_goal_representation,
     load_policy_checkpoint,
     restore_training_state,
     training_resume_state,
@@ -153,6 +154,14 @@ def main() -> None:
     output_dir = _output_directory()
     dppo_cfg = _dppo_config()
 
+    # The actor contract must configure the task before Gym constructs it.
+    # Loading first also prevents a schema mismatch from starting simulation.
+    requested_device = torch.device(args_cli.device)
+    source_checkpoint, policy, _ = load_policy_checkpoint(
+        checkpoint_path, requested_device, dppo_cfg
+    )
+    goal_representation = checkpoint_goal_representation(source_checkpoint)
+
     env_cfg = parse_env_cfg(
         args_cli.task,
         device=args_cli.device,
@@ -166,6 +175,7 @@ def main() -> None:
     env_cfg.route_stage = int(args_cli.route_stage)
     env_cfg.route_speed_max_mps = args_cli.route_speed_max_mps
     env_cfg.speed_budget_max_mps = float(args_cli.speed_budget_max_mps)
+    env_cfg.goal_representation = goal_representation
     # Use a generated flat mesh rather than the remote Grid USD.  Physics is
     # equivalent, while local and cluster runs no longer depend on asset-cache
     # state or network availability during scene creation.
@@ -181,9 +191,8 @@ def main() -> None:
     )
     env = gym.make(args_cli.task, cfg=env_cfg)
     device = torch.device(env.unwrapped.device)
-    source_checkpoint, policy, _ = load_policy_checkpoint(
-        checkpoint_path, device, dppo_cfg
-    )
+    if device != requested_device:
+        policy = policy.to(device)
     start_iteration, initial_total_physics_steps, restore_optimization = training_resume_state(
         source_checkpoint, restart_optimization=args_cli.restart_optimization
     )
@@ -225,6 +234,7 @@ def main() -> None:
         "start_iteration": start_iteration,
         "initial_total_physics_steps": initial_total_physics_steps,
         "restored_optimization_state": restore_optimization,
+        "goal_representation": goal_representation,
         "critic_input_dim": critic_input_dim,
     }
     with (output_dir / "run_config.json").open("w", encoding="utf-8") as stream:

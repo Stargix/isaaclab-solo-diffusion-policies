@@ -240,3 +240,68 @@ class RouteBank:
             self.height[rows, end_idx, None],
             local_average_speed[:, None],
         ), dim=1)
+
+    def geometric_height_profile_goal(
+        self,
+        position_local: torch.Tensor,
+        robot_yaw: torch.Tensor,
+        *,
+        horizon_s: float,
+        v_clip: float,
+    ) -> torch.Tensor:
+        """Torch equivalent of Phase A's geometric height-profile goal16.
+
+        ``[x25,y25,h25, ..., x100,y100,h100, h_now, sin(yaw), cos(yaw), v_avg]``.
+
+        This intentionally follows the schema-8 NumPy builder exactly.  The
+        legacy goal12 uses a small search tolerance retained for checkpoint
+        compatibility, whereas schema 8 resolves the terminal route sample
+        first and then takes arc fractions of that discrete segment.
+        """
+
+        if horizon_s <= 0.0:
+            raise ValueError("horizon_s must be positive")
+        start_s = self.progress
+        requested_end_s = torch.minimum(start_s + self.speed * horizon_s, self.length)
+        end_idx = torch.searchsorted(
+            self.arc.contiguous(), requested_end_s[:, None].contiguous()
+        ).squeeze(1).clamp_max(self.points - 1)
+        rows = torch.arange(self.num_envs, device=self.device)
+        end_s = self.arc[rows, end_idx]
+        fractions = torch.tensor((0.25, 0.5, 0.75), device=self.device)
+        target_s = start_s[:, None] + fractions[None, :] * (end_s - start_s)[:, None]
+        preview_idx = torch.searchsorted(
+            self.arc.contiguous(), target_s.contiguous()
+        ).clamp_max(self.points - 1)
+        sample_idx = torch.cat((preview_idx, end_idx[:, None]), dim=1)
+        required_height = self.height[rows[:, None], sample_idx]
+        sampled_xy = self.xy[rows[:, None], sample_idx]
+        c, s = torch.cos(robot_yaw), torch.sin(robot_yaw)
+        delta = sampled_xy - position_local[:, None, :]
+        local_xy = torch.stack(
+            (
+                c[:, None] * delta[..., 0] + s[:, None] * delta[..., 1],
+                -s[:, None] * delta[..., 0] + c[:, None] * delta[..., 1],
+            ),
+            dim=2,
+        )
+        dyaw = torch.atan2(
+            torch.sin(self.yaw[rows, end_idx] - robot_yaw),
+            torch.cos(self.yaw[rows, end_idx] - robot_yaw),
+        )
+        local_average_speed = (
+            (end_s - self.arc[rows, self.progress_idx]).clamp_min(0.0) / horizon_s
+        ).clamp(0.0, v_clip)
+
+        spatial_tokens = torch.cat((local_xy, required_height[..., None]), dim=2)
+        current_height = self.height[rows, self.progress_idx, None]
+        return torch.cat(
+            (
+                spatial_tokens.reshape(self.num_envs, 12),
+                current_height,
+                torch.sin(dyaw)[:, None],
+                torch.cos(dyaw)[:, None],
+                local_average_speed[:, None],
+            ),
+            dim=1,
+        )

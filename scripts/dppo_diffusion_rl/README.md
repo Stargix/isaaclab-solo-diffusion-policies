@@ -5,7 +5,30 @@ Policy Optimization (DPPO).  The actor is the existing geometric-hindsight
 Diffusion Policy; it is not a residual policy and it does not contain a
 high-level velocity controller.
 
+The environment selects its actor observation contract from checkpoint
+metadata. Both the original `hindsight_geom_avg12` checkpoints and the new
+`hindsight_geom_profile16` checkpoints are supported; mixing a policy kind,
+goal name and dimension is rejected before simulation starts. In schema 16,
+the four route samples are `[x,y,h_required]` tokens and `h_now` is appended
+before terminal yaw and average speed. Rewards and DPPO likelihood mathematics
+are unchanged.
+
 ## Train
+
+Profile16 first online gate, initialized from the three-skill Phase-A actor.
+Stage 1 deliberately targets the observed blocker: binary walk/crouch height
+sections on straight, S and right-angle routes. It does not yet claim sprint
+allocation. A Phase-A checkpoint starts with fresh critic and Adam states, so
+`--restart_optimization` must not be supplied:
+
+```bash
+./isaaclab.sh -p scripts/dppo_diffusion_rl/train.py --checkpoint checkpoints_iri/checkpoints_dp/wct_diffusion_policy_baseline.pt --output_dir scripts/dppo_diffusion_rl/runs/dppo_wct_profile16_stage1_v1 --run_name dppo_wct_profile16_stage1_v1 --num_envs 4096 --iterations 500 --rollout_chunks 32 --route_stage 1 --route_speed_max_mps 0.5 --speed_budget_max_mps 0.8 --save_interval 25 --headless --device cuda:0 --wandb
+```
+
+Do not start the stage-2/sprint-allocation run until a held-out evaluation of
+stage 1 demonstrates survival and sustained height tracking. This makes a
+failed transition experiment cheap and interpretable instead of confounding
+height-profile learning with high-speed gait allocation.
 
 Recommended v4 continuation from `dppo_path_3`.  Task-contract v3 keeps the
 12-D geometric goal but replaces its final local `v_avg` scalar with the

@@ -10,6 +10,7 @@ import torch
 
 from isaaclab_tasks.direct.solo12.solo12_env import Solo12Env
 from isaaclab_tasks.direct.solo12.solo12_env_cfg import Solo12EnvCfg
+from scripts.diffusion_policy.train.conditioning.goal_builder import goal_dimension
 from scripts.diffusion_policy.train.data.obs_utils import proprio_from_env_tensors
 from scripts.residual_diffusion_rl.routes import RouteBank, RouteState
 
@@ -33,6 +34,7 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
     route_points: int = 101
     route_length_m: float = 4.0
     height_segment_m: float = 0.8
+    goal_representation: str = "hindsight_geom_avg12"
     route_stage: int = 2
     route_speed_max_mps: float | None = None
     stratified_route_sampling: bool = True
@@ -67,6 +69,13 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
 
         if self.route_stage not in (0, 1, 2):
             raise ValueError("route_stage must be 0, 1 or 2.")
+        if self.goal_representation not in {
+            "hindsight_geom_avg12",
+            "hindsight_geom_profile16",
+        }:
+            raise ValueError(
+                "DPPO supports only hindsight_geom_avg12 and hindsight_geom_profile16."
+            )
         if self.route_speed_max_mps is not None and self.route_speed_max_mps < 0.2:
             raise ValueError("route_speed_max_mps must be at least 0.2 m/s when set.")
         if self.route_speed_max_mps is not None and self.route_speed_max_mps > self.v_req_clip:
@@ -106,7 +115,11 @@ class DPPODiffusionEnv(Solo12Env):
         )
         self._reward_weights = TaskRewardWeights()
         self._route_state: RouteState | None = None
-        self._goal = torch.zeros(self.num_envs, 12, device=self.device)
+        self._goal = torch.zeros(
+            self.num_envs,
+            goal_dimension(cfg.goal_representation),
+            device=self.device,
+        )
         self._task_step = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._success = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._arrival_failure = torch.zeros_like(self._success)
@@ -139,13 +152,18 @@ class DPPODiffusionEnv(Solo12Env):
 
     def _update_route_and_goal(self) -> RouteState:
         self._route_state = self._routes.update(self._local_position())
-        self._goal = self._routes.geometric_goal(
+        goal_builder = (
+            self._routes.geometric_height_profile_goal
+            if self.cfg.goal_representation == "hindsight_geom_profile16"
+            else self._routes.geometric_goal
+        )
+        self._goal = goal_builder(
             self._local_position(),
             self._robot_yaw(),
             horizon_s=self.cfg.goal_horizon_steps * self.step_dt,
             v_clip=self.cfg.v_req_clip,
         )
-        # Preserve the Phase-A 12-D goal layout and its nominal geometric
+        # Preserve the selected Phase-A goal layout and its nominal geometric
         # preview.  Only the final v_avg scalar becomes closed-loop: it is the
         # pace required to meet the route-level first-arrival time from the
         # current progress.  This makes accumulated timing debt observable to

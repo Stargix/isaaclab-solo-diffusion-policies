@@ -11,6 +11,7 @@ import torch
 
 from scripts.diffusion_policy.model.solo12_diffusion_policy import Solo12DiffusionPolicyConfig
 from scripts.diffusion_policy.train.data.normalization import NormalizerStats
+from scripts.diffusion_policy.train.conditioning.goal_builder import goal_dimension
 from scripts.diffusion_policy.train.runtime.checkpoint import load_training_checkpoint
 
 from .config import DPPOConfig
@@ -21,6 +22,43 @@ from .ppo import DPPOUpdater
 
 DPPO_CHECKPOINT_VERSION = 1
 DPPO_TASK_CONTRACT_VERSION = 3
+DPPO_GOAL_CONTRACTS = {
+    "hindsight_geom_avg12": "spatial_hindsight_geometry_ddpm",
+    "hindsight_geom_profile16": "spatial_hindsight_height_profile_ddpm",
+}
+
+
+def checkpoint_goal_representation(checkpoint: dict[str, Any]) -> str:
+    """Return and validate the Phase-A goal contract consumed by DPPO."""
+
+    config = checkpoint.get("config")
+    if not isinstance(config, dict):
+        raise ValueError("DPPO checkpoint is missing its training config.")
+    dataset = config.get("dataset")
+    model = config.get("model")
+    if not isinstance(dataset, dict) or not isinstance(model, dict):
+        raise ValueError("DPPO checkpoint config must contain dataset and model sections.")
+    representation = dataset.get("goal_representation")
+    if representation not in DPPO_GOAL_CONTRACTS:
+        raise ValueError(
+            "DPPO Phase B requires a geometric hindsight checkpoint; got "
+            f"goal_representation={representation!r}."
+        )
+    expected_kind = DPPO_GOAL_CONTRACTS[representation]
+    policy_kind = checkpoint.get("policy_kind", config.get("policy_kind"))
+    if policy_kind != expected_kind:
+        raise ValueError(
+            f"Goal representation {representation!r} requires policy_kind={expected_kind!r}; "
+            f"got {policy_kind!r}."
+        )
+    expected_dim = goal_dimension(representation)
+    actual_dim = int(model.get("goal_dim", -1))
+    if actual_dim != expected_dim:
+        raise ValueError(
+            f"Goal representation {representation!r} requires goal_dim={expected_dim}; "
+            f"got {actual_dim}."
+        )
+    return representation
 
 
 def training_resume_state(
@@ -103,12 +141,11 @@ def load_policy_checkpoint(
     checkpoint = load_training_checkpoint(
         path,
         device,
-        expected_policy_kind="spatial_hindsight_geometry_ddpm",
+        expected_policy_kind=tuple(DPPO_GOAL_CONTRACTS.values()),
         allow_dppo=True,
     )
     config = checkpoint["config"]
-    if config["dataset"].get("goal_representation") != "hindsight_geom_avg12":
-        raise ValueError("DPPO Phase B requires the geometric hindsight goal12 checkpoint.")
+    checkpoint_goal_representation(checkpoint)
     if not config["dataset"].get("include_padded_starts", False):
         raise ValueError(
             "DPPO Phase B requires a checkpoint trained with include_padded_starts=true; "
