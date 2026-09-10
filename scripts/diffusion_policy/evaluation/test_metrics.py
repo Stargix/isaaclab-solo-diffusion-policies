@@ -12,6 +12,7 @@ from .metrics import (
     point_at_progress,
     physical_state_valid,
     project_trajectory_to_polyline,
+    truncate_path_to_arc_length,
     valid_post_step_mask,
 )
 
@@ -120,6 +121,19 @@ class RouteMetricsTest(unittest.TestCase):
         self.assertLess(progress[0], 0.01)
         self.assertTrue(np.all(np.diff(progress) >= -1.0e-6))
 
+    def test_truncate_path_ends_at_exact_arc_length(self) -> None:
+        path = np.asarray(
+            [[0.0, 0.0, 0.2], [1.0, 0.0, 0.2], [1.0, 2.0, 0.3]],
+            dtype=np.float32,
+        )
+        truncated, yaws = truncate_path_to_arc_length(
+            path, np.asarray([0.0, np.pi / 2.0, np.pi / 2.0]), 2.0
+        )
+
+        self.assertEqual(truncated.shape, (3, 3))
+        np.testing.assert_allclose(truncated[-1], [1.0, 1.0, 0.25], atol=1.0e-6)
+        self.assertAlmostEqual(float(yaws[-1]), np.pi / 2.0, places=6)
+
     def test_task_success_requires_joint_terminal_constraints(self) -> None:
         positions = np.asarray([[0.25, 0.0], [0.5, 0.0], [0.75, 0.0], [1.0, 0.0]])
         result = compute_first_task_success(
@@ -151,6 +165,36 @@ class RouteMetricsTest(unittest.TestCase):
             start_position_xy=np.asarray([0.0, 0.0]),
         )
         self.assertFalse(wrong_pose.success)
+
+    def test_task_success_requires_sustained_profile_height_for_contract_v4(self) -> None:
+        positions = np.asarray([[0.25, 0.0], [0.5, 0.0], [0.75, 0.0], [1.0, 0.0]])
+        required_height = np.full(4, 0.1705)
+        # The terminal height is correct, but most of the traversed route is at
+        # walk height. A terminal-only evaluator would report a false success.
+        achieved_height = np.asarray([0.2932, 0.2932, 0.2932, 0.1705])
+        result = compute_first_task_success(
+            positions,
+            self.path,
+            yaws_rad=np.zeros(4),
+            heights_m=achieved_height,
+            requested_speed_m_s=0.5,
+            target_progress_m=1.0,
+            target_yaw_rad=0.0,
+            target_height_m=0.1705,
+            dt=0.5,
+            start_position_xy=np.asarray([0.0, 0.0]),
+            target_heights_m=required_height,
+            profile_height_mae_tolerance_m=0.04,
+        )
+
+        self.assertTrue(result.arrived)
+        self.assertTrue(result.terminal_height_ok)
+        self.assertFalse(result.profile_height_ok)
+        self.assertFalse(result.success)
+        self.assertAlmostEqual(result.profile_height_mae_m, 0.092025, places=6)
+        self.assertAlmostEqual(
+            result.profile_height_within_tolerance_fraction, 0.25, places=6
+        )
 
     def test_task_success_cannot_recover_from_training_corridor_failure(self) -> None:
         positions = np.asarray([[0.25, 0.7], [0.5, 0.0], [0.75, 0.0], [1.0, 0.0]])

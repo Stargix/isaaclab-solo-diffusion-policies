@@ -37,12 +37,19 @@ class RouteMetrics:
 class TaskSuccessMetrics:
     """Task result evaluated at the first valid entry into the goal region."""
 
+    arrived: bool
     success: bool
     time_s: float
     position_error_m: float
     yaw_error_rad: float
     height_error_m: float
     mean_speed_error_m_s: float
+    profile_height_mae_m: float
+    profile_height_within_tolerance_fraction: float
+    yaw_ok: bool
+    terminal_height_ok: bool
+    mean_speed_ok: bool
+    profile_height_ok: bool
 
     def to_dict(self) -> dict[str, float | bool]:
         return asdict(self)
@@ -127,6 +134,42 @@ def _validate_polyline(path_xy: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.
         raise ValueError("path_xy contains a zero-length segment.")
     cumulative = np.concatenate(([0.0], np.cumsum(lengths)))
     return path, segments, cumulative
+
+
+def truncate_path_to_arc_length(
+    path_w: np.ndarray,
+    yaws_w: np.ndarray,
+    length_m: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return a 3-D path ending exactly at the requested XY arc length."""
+
+    path = np.asarray(path_w, dtype=np.float32)
+    yaws = np.asarray(yaws_w, dtype=np.float32).reshape(-1)
+    if path.ndim != 2 or path.shape[1] != 3 or len(path) < 2:
+        raise ValueError("path_w must have shape (N, 3) with N >= 2.")
+    if len(path) != len(yaws):
+        raise ValueError("path_w and yaws_w must have matching lengths.")
+    if length_m <= 0.0:
+        raise ValueError("length_m must be positive.")
+    _, _, arc = _validate_polyline(path[:, :2])
+    if length_m > float(arc[-1]) + 1.0e-5:
+        raise ValueError(
+            f"Requested route length {length_m:.3f} m exceeds generated path "
+            f"length {float(arc[-1]):.3f} m."
+        )
+    if length_m >= float(arc[-1]) - 1.0e-6:
+        return path.copy(), yaws.copy()
+    upper = int(np.clip(np.searchsorted(arc, length_m, side="left"), 1, len(path) - 1))
+    lower = upper - 1
+    segment_length = max(float(arc[upper] - arc[lower]), 1.0e-8)
+    alpha = float((length_m - arc[lower]) / segment_length)
+    terminal = path[lower] + alpha * (path[upper] - path[lower])
+    segment = path[upper, :2] - path[lower, :2]
+    terminal_yaw = float(np.arctan2(segment[1], segment[0]))
+    return (
+        np.concatenate((path[:upper], terminal[None, :]), axis=0),
+        np.concatenate((yaws[:upper], np.asarray([terminal_yaw], dtype=np.float32))),
+    )
 
 
 def point_at_progress(path_xy: np.ndarray, progress_m: float) -> np.ndarray:
@@ -301,6 +344,8 @@ def compute_first_task_success(
     target_height_m: float,
     dt: float,
     start_position_xy: np.ndarray,
+    target_heights_m: np.ndarray | None = None,
+    profile_height_mae_tolerance_m: float | None = None,
     position_tolerance_m: float = 0.15,
     yaw_tolerance_rad: float = 0.40,
     height_tolerance_m: float = 0.05,
@@ -312,7 +357,9 @@ def compute_first_task_success(
     A prior corridor or overshoot violation is absorbing, as it is during
     training. Position defines the first arrival event. Pose, height and mean
     route speed are evaluated exactly once at that event, so arriving early
-    and waiting at the endpoint cannot turn a failed attempt into success.
+    and waiting at the endpoint cannot turn a failed attempt into success. If
+    ``target_heights_m`` is supplied, the distance-weighted height-profile MAE
+    is accumulated up to first arrival exactly as in DPPO task contract v4.
     """
 
     positions = np.asarray(positions_xy, dtype=np.float64)
@@ -322,6 +369,20 @@ def compute_first_task_success(
         raise ValueError("positions_xy must have shape (T, 2) with T >= 1.")
     if len(yaws) != len(positions) or len(heights) != len(positions):
         raise ValueError("positions, yaws and heights must have the same length.")
+    target_heights = None
+    if target_heights_m is not None:
+        target_heights = np.asarray(target_heights_m, dtype=np.float64).reshape(-1)
+        if len(target_heights) != len(positions):
+            raise ValueError("target_heights_m must have the same length as positions.")
+        if profile_height_mae_tolerance_m is None:
+            raise ValueError(
+                "profile_height_mae_tolerance_m is required with target_heights_m."
+            )
+    if (
+        profile_height_mae_tolerance_m is not None
+        and profile_height_mae_tolerance_m <= 0.0
+    ):
+        raise ValueError("profile_height_mae_tolerance_m must be positive.")
     if requested_speed_m_s <= 0.0 or target_progress_m <= 0.0 or dt <= 0.0:
         raise ValueError("speed, target progress and dt must be positive.")
     tolerances = (
@@ -368,18 +429,61 @@ def compute_first_task_success(
     )
     candidates = np.flatnonzero(valid_arrival)
     if not candidates.size:
-        return TaskSuccessMetrics(False, *(float("nan"),) * 5)
+        return TaskSuccessMetrics(
+            False,
+            False,
+            *(float("nan"),) * 7,
+            False,
+            False,
+            False,
+            False,
+        )
     index = int(candidates[0])
+    yaw_ok = bool(yaw_error[index] <= yaw_tolerance_rad)
+    terminal_height_ok = bool(height_error[index] <= height_tolerance_m)
+    mean_speed_ok = bool(abs(arrival_speed_error[index]) <= mean_speed_tolerance_m_s)
+    profile_height_mae = float("nan")
+    profile_height_within_tolerance = float("nan")
+    profile_height_ok = True
+    if target_heights is not None:
+        progress_delta = np.diff(np.concatenate(([0.0], progress))).clip(min=0.0)
+        distance = progress_delta[: index + 1]
+        distance_sum = float(np.sum(distance))
+        if distance_sum <= 1.0e-6:
+            profile_height_ok = False
+        else:
+            profile_error = np.abs(
+                heights[: index + 1] - target_heights[: index + 1]
+            )
+            profile_height_mae = float(np.sum(profile_error * distance) / distance_sum)
+            profile_height_within_tolerance = float(
+                np.sum(
+                    (profile_error <= profile_height_mae_tolerance_m).astype(np.float64)
+                    * distance
+                )
+                / distance_sum
+            )
+            profile_height_ok = bool(
+                profile_height_mae <= profile_height_mae_tolerance_m
+            )
     success = bool(
-        yaw_error[index] <= yaw_tolerance_rad
-        and height_error[index] <= height_tolerance_m
-        and abs(arrival_speed_error[index]) <= mean_speed_tolerance_m_s
+        yaw_ok
+        and terminal_height_ok
+        and mean_speed_ok
+        and profile_height_ok
     )
     return TaskSuccessMetrics(
+        True,
         success,
         float(elapsed[index]),
         float(position_error[index]),
         float(yaw_error[index]),
         float(height_error[index]),
         float(arrival_speed_error[index]),
+        profile_height_mae,
+        profile_height_within_tolerance,
+        yaw_ok,
+        terminal_height_ok,
+        mean_speed_ok,
+        profile_height_ok,
     )

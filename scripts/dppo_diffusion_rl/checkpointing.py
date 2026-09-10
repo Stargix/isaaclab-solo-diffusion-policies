@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -93,6 +94,49 @@ def training_resume_state(
         int(checkpoint.get("total_physics_steps", 0)),
         True,
     )
+
+
+def validate_resume_task_config(
+    checkpoint: dict[str, Any], requested: dict[str, Any]
+) -> None:
+    """Reject optimizer resume when the rollout task distribution changed."""
+
+    saved = checkpoint.get("dppo_task_config")
+    if not isinstance(saved, dict):
+        raise ValueError(
+            "DPPO checkpoint is missing dppo_task_config; use "
+            "--restart_optimization in a new output directory."
+        )
+    saved = dict(saved)
+    requested = dict(requested)
+    # Checkpoints written before the curricula were decoupled implicitly used
+    # the geometry stage for their height distribution.
+    saved.setdefault("height_profile_stage", saved.get("route_stage"))
+    requested.setdefault("height_profile_stage", requested.get("route_stage"))
+    mismatches: list[str] = []
+    for key, requested_value in requested.items():
+        if key not in saved:
+            mismatches.append(f"{key}: missing -> {requested_value!r}")
+            continue
+        saved_value = saved[key]
+        if isinstance(requested_value, float) or isinstance(saved_value, float):
+            equal = (
+                requested_value is not None
+                and saved_value is not None
+                and math.isclose(
+                    float(saved_value), float(requested_value), rel_tol=0.0, abs_tol=1.0e-9
+                )
+            )
+        else:
+            equal = saved_value == requested_value
+        if not equal:
+            mismatches.append(f"{key}: {saved_value!r} -> {requested_value!r}")
+    if mismatches:
+        raise ValueError(
+            "Cannot restore critic/Adam state after changing the DPPO task: "
+            + ", ".join(mismatches)
+            + ". Use --restart_optimization and a new output directory."
+        )
 
 
 def sha256_file(path: str | Path) -> str:

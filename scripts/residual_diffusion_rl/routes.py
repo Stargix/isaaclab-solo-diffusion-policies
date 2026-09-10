@@ -72,8 +72,14 @@ class RouteBank:
         *,
         stratified: bool = False,
         speed_max: float | None = None,
+        height_stage: int | None = None,
     ) -> None:
-        """Sample routes; stages implement fixed-to-random curriculum."""
+        """Sample routes with independently selectable geometry and height stages.
+
+        ``height_stage=None`` preserves the historical coupling to ``stage``.
+        Supplying it lets DPPO expose intermediate posture targets without
+        simultaneously changing route geometry and speed difficulty.
+        """
 
         count = len(env_ids)
         if count == 0:
@@ -113,13 +119,16 @@ class RouteBank:
         tangent = torch.cat((delta, delta[:, -1:]), dim=1)
         yaw = torch.atan2(tangent[..., 1], tangent[..., 0])
 
-        if stage <= 0:
+        profile_stage = stage if height_stage is None else int(height_stage)
+        if profile_stage not in (0, 1, 2):
+            raise ValueError("height_stage must be 0, 1, 2 or None.")
+        if profile_stage <= 0:
             values = torch.randint(0, 2, (count, 1), device=self.device) * 3
             height = self.height_values[values].expand(-1, self.points)
         else:
             section = torch.floor(arc / self.height_segment_m).long()
             num_sections = int(torch.ceil(arc.max() / self.height_segment_m).item()) + 1
-            if stage == 1:
+            if profile_stage == 1:
                 choices = torch.randint(0, 2, (count, num_sections), device=self.device) * 3
             else:
                 choices = torch.randint(0, len(self.height_values), (count, num_sections), device=self.device)

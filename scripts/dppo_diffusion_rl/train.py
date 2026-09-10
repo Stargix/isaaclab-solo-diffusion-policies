@@ -38,6 +38,17 @@ parser.add_argument(
 )
 parser.add_argument("--route_stage", type=int, choices=(0, 1, 2), default=2)
 parser.add_argument(
+    "--height_profile_stage",
+    type=int,
+    choices=(0, 1, 2),
+    default=None,
+    help=(
+        "Height curriculum independent of route geometry: 0 constant walk/crouch, "
+        "1 section-wise walk/crouch, 2 section-wise four-level profile. "
+        "Defaults to --route_stage for backward compatibility."
+    ),
+)
+parser.add_argument(
     "--route_speed_max_mps",
     type=float,
     default=None,
@@ -115,6 +126,7 @@ from scripts.dppo_diffusion_rl.checkpointing import (
     load_policy_checkpoint,
     restore_training_state,
     training_resume_state,
+    validate_resume_task_config,
 )
 from scripts.dppo_diffusion_rl.config import DPPOConfig
 from scripts.dppo_diffusion_rl.critic import ValueCritic
@@ -191,6 +203,7 @@ def main() -> None:
         args_cli.profile_height_reward_weight
     )
     env_cfg.route_stage = int(args_cli.route_stage)
+    env_cfg.height_profile_stage = args_cli.height_profile_stage
     env_cfg.route_speed_max_mps = args_cli.route_speed_max_mps
     env_cfg.speed_budget_max_mps = float(args_cli.speed_budget_max_mps)
     env_cfg.goal_representation = goal_representation
@@ -214,6 +227,28 @@ def main() -> None:
     start_iteration, initial_total_physics_steps, restore_optimization = training_resume_state(
         source_checkpoint, restart_optimization=args_cli.restart_optimization
     )
+    if restore_optimization:
+        validate_resume_task_config(
+            source_checkpoint,
+            {
+                "goal_representation": goal_representation,
+                "speed_budget_max_mps": float(env_cfg.speed_budget_max_mps),
+                "route_stage": int(env_cfg.route_stage),
+                "height_profile_stage": (
+                    env_cfg.height_profile_stage
+                    if env_cfg.height_profile_stage is not None
+                    else int(env_cfg.route_stage)
+                ),
+                "route_speed_max_mps": env_cfg.route_speed_max_mps,
+                "episode_length_s": float(env_cfg.episode_length_s),
+                "profile_height_mae_tolerance_m": float(
+                    env_cfg.profile_height_mae_tolerance_m
+                ),
+                "profile_height_reward_weight": float(
+                    env_cfg.profile_height_reward_weight
+                ),
+            },
+        )
     if args_cli.restart_optimization:
         # A new task contract is a new optimization run.  Anchor conservative
         # KL regularization to the warm-start actor itself (e.g. path_3), not

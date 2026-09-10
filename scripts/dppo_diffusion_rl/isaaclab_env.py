@@ -36,6 +36,9 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
     height_segment_m: float = 0.8
     goal_representation: str = "hindsight_geom_avg12"
     route_stage: int = 2
+    # None preserves the historical route-stage coupling. Set to 2 to expose
+    # all four height levels while keeping a simpler geometry curriculum.
+    height_profile_stage: int | None = None
     route_speed_max_mps: float | None = None
     stratified_route_sampling: bool = True
     corridor_half_width_m: float = 0.60
@@ -74,6 +77,8 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
 
         if self.route_stage not in (0, 1, 2):
             raise ValueError("route_stage must be 0, 1 or 2.")
+        if self.height_profile_stage is not None and self.height_profile_stage not in (0, 1, 2):
+            raise ValueError("height_profile_stage must be 0, 1, 2 or None.")
         if self.goal_representation not in {
             "hindsight_geom_avg12",
             "hindsight_geom_profile16",
@@ -136,6 +141,10 @@ class DPPODiffusionEnv(Solo12Env):
         )
         self._task_step = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._success = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._position_arrival = torch.zeros_like(self._success)
+        self._terminal_yaw_success = torch.zeros_like(self._success)
+        self._terminal_height_success = torch.zeros_like(self._success)
+        self._terminal_mean_speed_success = torch.zeros_like(self._success)
         self._arrival_failure = torch.zeros_like(self._success)
         self._time_out_failure = torch.zeros_like(self._success)
         self._base_contact_failure = torch.zeros_like(self._success)
@@ -167,6 +176,7 @@ class DPPODiffusionEnv(Solo12Env):
             cfg.route_stage,
             stratified=cfg.stratified_route_sampling,
             speed_max=cfg.route_speed_max_mps,
+            height_stage=cfg.height_profile_stage,
         )
         self._update_route_and_goal()
 
@@ -315,17 +325,24 @@ class DPPODiffusionEnv(Solo12Env):
         arrival_speed_error = (
             self._routes.length / elapsed_s.clamp_min(self.step_dt) - self._routes.speed
         )
+        terminal_yaw_ok = (
+            terminal_yaw_error.abs() <= self.cfg.terminal_yaw_tolerance_rad
+        )
+        terminal_height_ok = (
+            (self._base_height() - self._routes.height[:, -1]).abs()
+            <= self.cfg.terminal_height_tolerance_m
+        )
+        terminal_mean_speed_ok = (
+            arrival_speed_error.abs() <= self.cfg.terminal_mean_speed_tolerance_mps
+        )
         profile_constraint_active = (
             self.cfg.goal_representation == "hindsight_geom_profile16"
         )
         success = (
             arrival
-            & (terminal_yaw_error.abs() <= self.cfg.terminal_yaw_tolerance_rad)
-            & (
-                (self._base_height() - self._routes.height[:, -1]).abs()
-                <= self.cfg.terminal_height_tolerance_m
-            )
-            & (arrival_speed_error.abs() <= self.cfg.terminal_mean_speed_tolerance_mps)
+            & terminal_yaw_ok
+            & terminal_height_ok
+            & terminal_mean_speed_ok
             & (profile_height_ok if profile_constraint_active else True)
             & ~contact
             & ~corridor
@@ -336,6 +353,10 @@ class DPPODiffusionEnv(Solo12Env):
         terminated = contact | corridor | overshoot | arrival
         time_out_failure = timeout & ~terminated
         self._success.copy_(success)
+        self._position_arrival.copy_(arrival)
+        self._terminal_yaw_success.copy_(arrival & terminal_yaw_ok)
+        self._terminal_height_success.copy_(arrival & terminal_height_ok)
+        self._terminal_mean_speed_success.copy_(arrival & terminal_mean_speed_ok)
         self._arrival_failure.copy_(arrival_failure)
         self._time_out_failure.copy_(time_out_failure)
         self._base_contact_failure.copy_(contact)
@@ -455,6 +476,18 @@ class DPPODiffusionEnv(Solo12Env):
             if len(completed_ids) > 0 and self._route_state is not None:
                 episode_snapshot = {
                     "success": float(self._success[completed_ids].float().mean()),
+                    "position_arrival": float(
+                        self._position_arrival[completed_ids].float().mean()
+                    ),
+                    "terminal_yaw_success": float(
+                        self._terminal_yaw_success[completed_ids].float().mean()
+                    ),
+                    "terminal_height_success": float(
+                        self._terminal_height_success[completed_ids].float().mean()
+                    ),
+                    "terminal_mean_speed_success": float(
+                        self._terminal_mean_speed_success[completed_ids].float().mean()
+                    ),
                     "arrival_failure": float(self._arrival_failure[completed_ids].float().mean()),
                     "time_out": float(self._time_out_failure[completed_ids].float().mean()),
                     "base_contact": float(self._base_contact_failure[completed_ids].float().mean()),
@@ -482,6 +515,18 @@ class DPPODiffusionEnv(Solo12Env):
                 episode_event = {
                     "env_ids": completed_ids.clone(),
                     "success": self._success[completed_ids].float().clone(),
+                    "position_arrival": self._position_arrival[
+                        completed_ids
+                    ].float().clone(),
+                    "terminal_yaw_success": self._terminal_yaw_success[
+                        completed_ids
+                    ].float().clone(),
+                    "terminal_height_success": self._terminal_height_success[
+                        completed_ids
+                    ].float().clone(),
+                    "terminal_mean_speed_success": self._terminal_mean_speed_success[
+                        completed_ids
+                    ].float().clone(),
                     "arrival_failure": self._arrival_failure[completed_ids].float().clone(),
                     "time_out": self._time_out_failure[completed_ids].float().clone(),
                     "base_contact": self._base_contact_failure[completed_ids].float().clone(),
@@ -524,9 +569,14 @@ class DPPODiffusionEnv(Solo12Env):
             self.cfg.route_stage,
             stratified=self.cfg.stratified_route_sampling,
             speed_max=self.cfg.route_speed_max_mps,
+            height_stage=self.cfg.height_profile_stage,
         )
         self._task_step[env_ids] = 0
         self._success[env_ids] = False
+        self._position_arrival[env_ids] = False
+        self._terminal_yaw_success[env_ids] = False
+        self._terminal_height_success[env_ids] = False
+        self._terminal_mean_speed_success[env_ids] = False
         self._arrival_failure[env_ids] = False
         self._time_out_failure[env_ids] = False
         self._base_contact_failure[env_ids] = False

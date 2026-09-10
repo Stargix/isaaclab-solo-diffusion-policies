@@ -43,6 +43,15 @@ parser.add_argument(
 )
 parser.add_argument("--repeats", type=int, default=3, help="Stochastic repeats per scenario condition.")
 parser.add_argument("--duration_s", type=float, default=50.0)
+parser.add_argument(
+    "--route_length_m",
+    type=float,
+    default=None,
+    help=(
+        "Truncate every analytic route to this arc length. Use 4.0 to match "
+        "the finite DPPO training task at every requested speed."
+    ),
+)
 parser.add_argument("--path_height", type=float, default=None,
                     help="Route height in metres. Defaults to the checkpoint dataset's desired_base_height.")
 parser.add_argument(
@@ -128,6 +137,7 @@ from evaluation.metrics import (
     point_at_progress,
     physical_state_valid,
     project_trajectory_to_polyline,
+    truncate_path_to_arc_length,
     valid_post_step_mask,
 )
 from evaluation.plots import plot_route_outcomes
@@ -653,6 +663,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         allow_dppo=True,
     )
     config = checkpoint["config"]
+    dppo_task_contract_version = int(checkpoint.get("dppo_task_contract_version", 0))
+    dppo_task_config = checkpoint.get("dppo_task_config", {})
+    profile_height_mae_tolerance_m = float(
+        dppo_task_config.get("profile_height_mae_tolerance_m", 0.04)
+    )
     if args_cli.exec_horizon is None:
         args_cli.exec_horizon = (
             int(checkpoint["dppo_config"]["exec_horizon"])
@@ -695,6 +710,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             raise ValueError("--height_segment_m must be positive.")
         if len(args_cli.height_cycle) < 2 or any(not 0.10 <= value <= 0.40 for value in args_cli.height_cycle):
             raise ValueError("--height_cycle needs at least two physical heights in [0.10, 0.40].")
+    if args_cli.route_length_m is not None:
+        if args_cli.route_length_m <= 0.0:
+            raise ValueError("--route_length_m must be positive.")
+        if args_cli.reference_replay_dataset:
+            raise ValueError("--route_length_m is only valid for analytic paths.")
     if len(path_heights) > 1 and (
         args_cli.height_profile != "constant" or args_cli.transition_fractions is not None
     ):
@@ -773,6 +793,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     waypoint_time_offsets_s = tuple(config["dataset"]["waypoint_time_offsets_s"])
     v_req_clip = config["dataset"].get("v_req_clip", 2.0)
     goal_representation = config["dataset"].get("goal_representation", "path11")
+    profile_task_active = goal_representation == "hindsight_geom_profile16"
     if args_cli.height_profile in {"interleaved", "random"} and goal_representation not in {
         "path11", "hindsight_geom_avg12", "hindsight_geom_profile16"
     }:
@@ -826,6 +847,10 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             )
         else:
             raise ValueError(f"Unknown shape: {s.path_shape}")
+        if args_cli.route_length_m is not None and replay_fragments is None:
+            pts, yaws = truncate_path_to_arc_length(
+                pts, yaws, float(args_cli.route_length_m)
+            )
         # Analytic route builders use walk height by default. For transition
         # studies, introduce a deliberate walk->crouch height change at the
         # requested fraction of travelled arc length.
@@ -933,7 +958,10 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         dtype=np.float32,
     )
     if dynamic_speed_budget:
-        print("[INFO] Actor conditioning: closed-loop remaining-route speed budget (task contract v3).")
+        print(
+            "[INFO] Actor conditioning: closed-loop remaining-route speed budget "
+            f"(checkpoint task contract v{dppo_task_contract_version})."
+        )
 
     # Track metrics
     trajectories = {i: {"ref": [], "actual": []} for i in range(num_envs)}
@@ -1108,6 +1136,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             progress_m=progress_m,
             tangent_speed_m_s=achieved_tangent_speeds,
             planar_speed_m_s=achieved_planar_speeds,
+            achieved_height_m=achieved_heights,
+            achieved_yaw_rad=achieved_yaws,
             required_height_m=target_heights,
             commanded_height_m=preview_target_heights,
             conditioned_height_profile_m=height_profile_previews,
@@ -1234,6 +1264,10 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 target_height_m=float(plan.path_w[terminal_index, 2]),
                 dt=dt,
                 start_position_xy=rollout_start_pos[i, :2],
+                target_heights_m=target_h if profile_task_active else None,
+                profile_height_mae_tolerance_m=(
+                    profile_height_mae_tolerance_m if profile_task_active else None
+                ),
             ).to_dict()
 
         summary_rows.append({
@@ -1288,6 +1322,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             "route_cross_track_p95_m": route_values.get("cross_track_p95_m", math.nan),
             "route_terminal_position_error_m": route_values.get("terminal_position_error_m", math.nan),
             "task_success_applicable": task_success_applicable,
+            "task_arrived": task_values.get("arrived", False),
             "task_success": task_values.get("success", False),
             "task_success_time_s": task_values.get("time_s", math.nan),
             "task_success_position_error_m": task_values.get("position_error_m", math.nan),
@@ -1295,6 +1330,20 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             "task_success_height_error_m": task_values.get("height_error_m", math.nan),
             "task_success_mean_speed_error_m_s": task_values.get(
                 "mean_speed_error_m_s", math.nan
+            ),
+            "task_success_profile_height_mae_m": task_values.get(
+                "profile_height_mae_m", math.nan
+            ),
+            "task_success_profile_height_within_tolerance_fraction": task_values.get(
+                "profile_height_within_tolerance_fraction", math.nan
+            ),
+            "task_success_yaw_ok": task_values.get("yaw_ok", False),
+            "task_success_terminal_height_ok": task_values.get(
+                "terminal_height_ok", False
+            ),
+            "task_success_mean_speed_ok": task_values.get("mean_speed_ok", False),
+            "task_success_profile_height_ok": task_values.get(
+                "profile_height_ok", False
             ),
             "final_relative_x_m": float(final_relative_xy[0]),
             "final_relative_y_m": float(final_relative_xy[1]),
@@ -1672,6 +1721,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         if np.isfinite(float(row["route_target_progress_m"]))
     ]
     task_rows = [row for row in summary_rows if row["task_success_applicable"]]
+    arrived_task_rows = [row for row in task_rows if row["task_arrived"]]
     overall_summary = {
         "timestamp": datetime.now().isoformat(),
         "task": args_cli.task,
@@ -1682,8 +1732,13 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         "config": config,
         "dataset_sha256": dataset_hashes(config),
         "policy_kind": checkpoint.get("policy_kind", "unknown"),
+        "dppo_task_contract_version": dppo_task_contract_version,
+        "profile_height_mae_tolerance_m": (
+            profile_height_mae_tolerance_m if profile_task_active else None
+        ),
         "seed": args_cli.seed,
         "duration_s": args_cli.duration_s,
+        "route_length_m": args_cli.route_length_m,
         "num_scenarios": len(scenarios),
         "num_inference_steps": inference_steps,
         "exec_horizon": args_cli.exec_horizon,
@@ -1719,6 +1774,38 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             if task_rows else None
         ),
         "task_success_scenarios": len(task_rows),
+        "overall_task_arrival_rate": (
+            len(arrived_task_rows) / len(task_rows) if task_rows else None
+        ),
+        "arrival_conditional_yaw_success_rate": (
+            sum(bool(row["task_success_yaw_ok"]) for row in arrived_task_rows)
+            / len(arrived_task_rows)
+            if arrived_task_rows else None
+        ),
+        "arrival_conditional_terminal_height_success_rate": (
+            sum(
+                bool(row["task_success_terminal_height_ok"])
+                for row in arrived_task_rows
+            )
+            / len(arrived_task_rows)
+            if arrived_task_rows else None
+        ),
+        "arrival_conditional_mean_speed_success_rate": (
+            sum(bool(row["task_success_mean_speed_ok"]) for row in arrived_task_rows)
+            / len(arrived_task_rows)
+            if arrived_task_rows else None
+        ),
+        "arrival_conditional_profile_height_success_rate": (
+            sum(
+                bool(row["task_success_profile_height_ok"])
+                for row in arrived_task_rows
+            )
+            / len(arrived_task_rows)
+            if arrived_task_rows else None
+        ),
+        "arrival_profile_height_mae_m": finite_mean(
+            arrived_task_rows, "task_success_profile_height_mae_m"
+        ),
         "overall_route_cross_track_rmse_m": finite_mean(summary_rows, "route_cross_track_rmse_m"),
         "overall_route_terminal_position_error_m": finite_mean(
             summary_rows, "route_terminal_position_error_m"

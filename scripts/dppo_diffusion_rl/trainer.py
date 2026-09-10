@@ -21,6 +21,10 @@ from .ppo import DPPOUpdater
 class EpisodeAccumulator:
     count: float = 0.0
     success: float = 0.0
+    position_arrival: float = 0.0
+    terminal_yaw_success: float = 0.0
+    terminal_height_success: float = 0.0
+    terminal_mean_speed_success: float = 0.0
     base_contact: float = 0.0
     corridor_failure: float = 0.0
     terminal_overshoot: float = 0.0
@@ -47,6 +51,10 @@ class EpisodeAccumulator:
         self.count += count
         for name in (
             "success",
+            "position_arrival",
+            "terminal_yaw_success",
+            "terminal_height_success",
+            "terminal_mean_speed_success",
             "base_contact",
             "corridor_failure",
             "terminal_overshoot",
@@ -67,6 +75,12 @@ class EpisodeAccumulator:
         return {
             "Episode/completed": self.count,
             "Episode/success_rate": self.success / divisor,
+            "Episode/position_arrival_rate": self.position_arrival / divisor,
+            "Episode/terminal_yaw_success_rate": self.terminal_yaw_success / divisor,
+            "Episode/terminal_height_success_rate": self.terminal_height_success / divisor,
+            "Episode/terminal_mean_speed_success_rate": (
+                self.terminal_mean_speed_success / divisor
+            ),
             "Episode/base_contact_rate": self.base_contact / divisor,
             "Episode/corridor_failure_rate": self.corridor_failure / divisor,
             "Episode/terminal_overshoot_rate": self.terminal_overshoot / divisor,
@@ -340,6 +354,7 @@ class DPPOTrainer:
                 "goal_representation": self.raw_env.cfg.goal_representation,
                 "speed_budget_max_mps": float(self.raw_env.cfg.speed_budget_max_mps),
                 "route_stage": int(self.raw_env.cfg.route_stage),
+                "height_profile_stage": self.raw_env.cfg.height_profile_stage,
                 "route_speed_max_mps": self.raw_env.cfg.route_speed_max_mps,
                 "episode_length_s": float(self.raw_env.cfg.episode_length_s),
                 "profile_height_mae_tolerance_m": float(
@@ -384,6 +399,7 @@ class DPPOTrainer:
             print(
                 f"[DPPO {iteration:05d}] reward={metrics['Rollout/reward_mean']:+.3f} "
                 f"success={metrics['Episode/success_rate']:.3f} "
+                f"arrival={metrics['Episode/position_arrival_rate']:.3f} "
                 f"arrival_fail={metrics['Episode/arrival_failure_rate']:.3f} "
                 f"fall={metrics['Episode/base_contact_rate']:.3f} "
                 f"progress={metrics['Episode/progress_fraction']:.3f} "

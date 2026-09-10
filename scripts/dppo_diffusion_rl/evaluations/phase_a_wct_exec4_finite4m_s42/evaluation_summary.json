@@ -1,0 +1,159 @@
+{
+  "timestamp": "2026-09-11T02:09:27.797052",
+  "task": "solo12-v0",
+  "checkpoint": "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\checkpoints_iri\\checkpoints_dp\\wct_diffusion_policy_baseline.pt",
+  "checkpoint_sha256": "B8FCFA1D8794ED6AE71058EE231B67E53B274A10130B22F5225D11DDC27FC968",
+  "git_commit": "cb820599b094c3a8dd76ab87c212aed77d2f752d",
+  "git_dirty_before_evaluation": true,
+  "config": {
+    "dataset": {
+      "hdf5_paths": [
+        "scripts/diffusion_policy/data/datasets/walk_crouch_sprint_phase_a_waypoint_v4.hdf5"
+      ],
+      "history": 8,
+      "prediction_horizon": 16,
+      "execution_offset": 8,
+      "goal_horizon_steps": 100,
+      "waypoint_time_offsets_s": [
+        0.5,
+        1.0,
+        1.5
+      ],
+      "step_stride": 1,
+      "dt": 0.02,
+      "v_req_clip": 2.0,
+      "goal_source": "achieved",
+      "goal_representation": "hindsight_geom_profile16",
+      "waypoint_noise_std_m": 0.0,
+      "waypoint_noise_clip_m": 0.0,
+      "include_padded_starts": true,
+      "startup_sample_multiplier": 1,
+      "symmetry_mode": "quadruped",
+      "max_stats_samples": 20000,
+      "val_fraction": 0.05
+    },
+    "model": {
+      "proprio_dim": 30,
+      "action_hist_dim": 12,
+      "goal_dim": 16,
+      "action_dim": 12,
+      "d_model": 128,
+      "nhead": 4,
+      "num_layers": 4,
+      "dim_feedforward": 512,
+      "p_drop_emb": 0.0,
+      "p_drop_attn": 0.3,
+      "separate_goal_conditioning": true
+    },
+    "diffusion": {
+      "num_train_timesteps": 10,
+      "num_inference_steps": 10,
+      "beta_start": 0.0001,
+      "beta_end": 0.02,
+      "beta_schedule": "squaredcos_cap_v2",
+      "prediction_type": "epsilon",
+      "variance_type": "fixed_small",
+      "clip_sample": true,
+      "cfg_dropout_prob": 0.0
+    },
+    "optim": {
+      "batch_size": 4096,
+      "epochs": 50,
+      "learning_rate": 0.0001,
+      "weight_decay": 0.001,
+      "grad_clip_norm": 1.0,
+      "ema_decay": 0.9999,
+      "lr_warmup_steps": 10000,
+      "num_workers": 4,
+      "seed": 42,
+      "mixed_precision": true,
+      "save_every": 5,
+      "log_every": 50
+    },
+    "output_dir": "scripts/diffusion_policy/runs/walk_crouch_sprint_hindsight_geom_profile16_a_wcs_v1_k10",
+    "run_name": "walk_crouch_sprint_hindsight_geom_profile16_a_wcs_v1_k10",
+    "wandb_project": "solo12-diffusion-policy",
+    "wandb_entity": null,
+    "schema_version": 8,
+    "policy_kind": "spatial_hindsight_height_profile_ddpm",
+    "goal_schema": "hindsight_geometric_height_profile16_v1"
+  },
+  "dataset_sha256": {
+    "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\scripts\\diffusion_policy\\data\\datasets\\walk_crouch_sprint_phase_a_waypoint_v4.hdf5": "4E323BD426CCB6F503E70EE255B397899E0DA2F847EB60FA6A21F147F7A6B730"
+  },
+  "policy_kind": "spatial_hindsight_height_profile_ddpm",
+  "dppo_task_contract_version": 0,
+  "profile_height_mae_tolerance_m": 0.04,
+  "seed": 42,
+  "duration_s": 24.0,
+  "route_length_m": 4.0,
+  "num_scenarios": 45,
+  "num_inference_steps": 10,
+  "exec_horizon": 4,
+  "goal_horizon_steps": 100,
+  "goal_representation": "hindsight_geom_profile16",
+  "dynamic_speed_budget": false,
+  "speed_budget_max_mps": null,
+  "waypoint_time_offsets_s": [
+    0.5,
+    1.0,
+    1.5
+  ],
+  "speeds_evaluated": [
+    0.2,
+    0.35,
+    0.5
+  ],
+  "heights_evaluated": [
+    0.2800000011920929
+  ],
+  "transition_fractions": [],
+  "height_profile": "random",
+  "height_segment_m": 0.8,
+  "height_cycle": [
+    0.2932,
+    0.25,
+    0.21,
+    0.1705
+  ],
+  "reference_replay_dataset": null,
+  "deterministic_resets": false,
+  "overall_survival_rate": 0.0,
+  "overall_base_failure_rate": 0.13333333333333333,
+  "overall_physical_sanity_failure_rate": 0.8666666666666667,
+  "overall_route_completion_ratio": 0.11560924609944687,
+  "overall_route_horizon_speed_ratio": 0.06825536902422312,
+  "overall_route_arrival_rate": 0.0,
+  "overall_route_arrival_speed_ratio": null,
+  "overall_task_success_rate": 0.0,
+  "task_success_scenarios": 45,
+  "overall_task_arrival_rate": 0.0,
+  "arrival_conditional_yaw_success_rate": null,
+  "arrival_conditional_terminal_height_success_rate": null,
+  "arrival_conditional_mean_speed_success_rate": null,
+  "arrival_conditional_profile_height_success_rate": null,
+  "arrival_profile_height_mae_m": null,
+  "overall_route_cross_track_rmse_m": 0.10376997114055686,
+  "overall_route_terminal_position_error_m": 3.1670541681031414,
+  "survival_by_path": {
+    "circle": 0.0,
+    "random_polyline": 0.0,
+    "right_angle": 0.0,
+    "s_curve": 0.0,
+    "straight": 0.0
+  },
+  "arrival_rate_by_path": {
+    "circle": 0.0,
+    "random_polyline": 0.0,
+    "right_angle": 0.0,
+    "s_curve": 0.0,
+    "straight": 0.0
+  },
+  "mean_xy_rmse_by_path": {
+    "circle": NaN,
+    "random_polyline": NaN,
+    "right_angle": NaN,
+    "s_curve": NaN,
+    "straight": NaN
+  }
+}

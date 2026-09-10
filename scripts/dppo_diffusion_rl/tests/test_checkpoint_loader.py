@@ -8,6 +8,7 @@ from scripts.dppo_diffusion_rl.checkpointing import (
     checkpoint_goal_representation,
     load_policy_checkpoint,
     training_resume_state,
+    validate_resume_task_config,
 )
 from scripts.dppo_diffusion_rl.config import DPPOConfig
 from scripts.diffusion_policy.train.conditioning.goal_builder import (
@@ -107,3 +108,27 @@ def test_current_task_contract_resumes_optimizer_and_counters() -> None:
         "total_physics_steps": 3456,
     }
     assert training_resume_state(current, restart_optimization=False) == (13, 3456, True)
+
+
+def test_optimizer_resume_rejects_changed_height_distribution() -> None:
+    saved = {
+        "dppo_task_config": {
+            "route_stage": 1,
+            "height_profile_stage": 1,
+            "route_speed_max_mps": 0.5,
+        }
+    }
+    with pytest.raises(ValueError, match="height_profile_stage"):
+        validate_resume_task_config(
+            saved,
+            {
+                "route_stage": 1,
+                "height_profile_stage": 2,
+                "route_speed_max_mps": 0.5,
+            },
+        )
+
+
+def test_legacy_height_stage_is_inferred_from_route_stage() -> None:
+    config = {"route_stage": 1, "route_speed_max_mps": 0.5}
+    validate_resume_task_config({"dppo_task_config": config}, config)
