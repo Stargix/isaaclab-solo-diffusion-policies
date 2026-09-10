@@ -4,6 +4,7 @@ import torch
 
 from scripts.dppo_diffusion_rl.conditioning import remaining_speed_budget
 from scripts.dppo_diffusion_rl.rewards import (
+    TaskRewardWeights,
     average_speed_error,
     bounded_huber,
     path_task_reward,
@@ -206,3 +207,14 @@ def test_tracking_costs_are_bounded_and_paid_only_while_advancing() -> None:
     assert torch.isfinite(moving).all()
     bounded = bounded_huber(huge, 0.1)
     assert torch.all((bounded >= 0.0) & (bounded <= 1.0))
+
+
+def test_profile_height_weight_stays_distance_bounded() -> None:
+    huge = torch.full((2,), 1.0e6)
+    reward, terms = _reward(
+        progress_delta=torch.ones(2),
+        height_error=huge,
+        weights=TaskRewardWeights(height=2.0),
+    )
+    torch.testing.assert_close(terms["height"], torch.full((2,), -2.0))
+    assert torch.isfinite(reward).all()

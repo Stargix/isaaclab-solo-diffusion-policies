@@ -1,0 +1,150 @@
+{
+  "timestamp": "2026-09-10T14:38:34.210813",
+  "task": "solo12-v0",
+  "checkpoint": "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\checkpoints_iri\\checkpoints_dppo\\dppo_wct_100_potxo.pt",
+  "checkpoint_sha256": "8FB653533B1C35F9786075F1C0317F25F0CA62CFFBC2EAC20F464C245661CB9B",
+  "git_commit": "3d954de28d39963d32a427e7b5bab85be4622e70",
+  "git_dirty_before_evaluation": true,
+  "config": {
+    "dataset": {
+      "hdf5_paths": [
+        "scripts/diffusion_policy/data/datasets/walk_crouch_sprint_phase_a_waypoint_v4.hdf5"
+      ],
+      "history": 8,
+      "prediction_horizon": 16,
+      "execution_offset": 8,
+      "goal_horizon_steps": 100,
+      "waypoint_time_offsets_s": [
+        0.5,
+        1.0,
+        1.5
+      ],
+      "step_stride": 1,
+      "dt": 0.02,
+      "v_req_clip": 2.0,
+      "goal_source": "achieved",
+      "goal_representation": "hindsight_geom_profile16",
+      "waypoint_noise_std_m": 0.0,
+      "waypoint_noise_clip_m": 0.0,
+      "include_padded_starts": true,
+      "startup_sample_multiplier": 1,
+      "symmetry_mode": "quadruped",
+      "max_stats_samples": 20000,
+      "val_fraction": 0.05
+    },
+    "model": {
+      "proprio_dim": 30,
+      "action_hist_dim": 12,
+      "goal_dim": 16,
+      "action_dim": 12,
+      "d_model": 128,
+      "nhead": 4,
+      "num_layers": 4,
+      "dim_feedforward": 512,
+      "p_drop_emb": 0.0,
+      "p_drop_attn": 0.3,
+      "separate_goal_conditioning": true
+    },
+    "diffusion": {
+      "num_train_timesteps": 10,
+      "num_inference_steps": 10,
+      "beta_start": 0.0001,
+      "beta_end": 0.02,
+      "beta_schedule": "squaredcos_cap_v2",
+      "prediction_type": "epsilon",
+      "variance_type": "fixed_small",
+      "clip_sample": true,
+      "cfg_dropout_prob": 0.0
+    },
+    "optim": {
+      "batch_size": 4096,
+      "epochs": 50,
+      "learning_rate": 0.0001,
+      "weight_decay": 0.001,
+      "grad_clip_norm": 1.0,
+      "ema_decay": 0.9999,
+      "lr_warmup_steps": 10000,
+      "num_workers": 4,
+      "seed": 42,
+      "mixed_precision": true,
+      "save_every": 5,
+      "log_every": 50
+    },
+    "output_dir": "scripts/diffusion_policy/runs/walk_crouch_sprint_hindsight_geom_profile16_a_wcs_v1_k10",
+    "run_name": "walk_crouch_sprint_hindsight_geom_profile16_a_wcs_v1_k10",
+    "wandb_project": "solo12-diffusion-policy",
+    "wandb_entity": null,
+    "schema_version": 8,
+    "policy_kind": "spatial_hindsight_height_profile_ddpm",
+    "goal_schema": "hindsight_geometric_height_profile16_v1"
+  },
+  "dataset_sha256": {
+    "C:\\Users\\11ser\\OneDrive\\Escritorio\\Coding\\Projectes\\Isaac\\isaaclab-solo\\scripts\\diffusion_policy\\data\\datasets\\walk_crouch_sprint_phase_a_waypoint_v4.hdf5": "4E323BD426CCB6F503E70EE255B397899E0DA2F847EB60FA6A21F147F7A6B730"
+  },
+  "policy_kind": "spatial_hindsight_height_profile_ddpm",
+  "seed": 42,
+  "duration_s": 20.0,
+  "num_scenarios": 140,
+  "num_inference_steps": 10,
+  "exec_horizon": 4,
+  "goal_horizon_steps": 100,
+  "goal_representation": "hindsight_geom_profile16",
+  "dynamic_speed_budget": true,
+  "speed_budget_max_mps": 0.8,
+  "waypoint_time_offsets_s": [
+    0.5,
+    1.0,
+    1.5
+  ],
+  "speeds_evaluated": [
+    0.2,
+    0.4,
+    0.6,
+    0.8,
+    1.0,
+    1.2,
+    1.4
+  ],
+  "heights_evaluated": [
+    0.1705,
+    0.2932
+  ],
+  "transition_fractions": [],
+  "height_profile": "constant",
+  "height_segment_m": null,
+  "height_cycle": [],
+  "reference_replay_dataset": null,
+  "deterministic_resets": false,
+  "overall_survival_rate": 0.8,
+  "overall_base_failure_rate": 0.17142857142857143,
+  "overall_physical_sanity_failure_rate": 0.02857142857142857,
+  "overall_route_completion_ratio": 0.900905220780167,
+  "overall_route_horizon_speed_ratio": 0.625526236639339,
+  "overall_route_arrival_rate": 0.7214285714285714,
+  "overall_route_arrival_speed_ratio": 0.9077320787836962,
+  "overall_task_success_rate": 0.23,
+  "task_success_scenarios": 100,
+  "overall_route_cross_track_rmse_m": 0.08263640444991845,
+  "overall_route_terminal_position_error_m": 0.8275137943787049,
+  "survival_by_path": {
+    "circle": 0.7142857142857143,
+    "random_polyline": 0.8571428571428571,
+    "right_angle": 0.75,
+    "s_curve": 0.75,
+    "straight": 0.9285714285714286
+  },
+  "arrival_rate_by_path": {
+    "circle": 0.4642857142857143,
+    "random_polyline": 0.7857142857142857,
+    "right_angle": 0.7142857142857143,
+    "s_curve": 0.75,
+    "straight": 0.8928571428571429
+  },
+  "mean_xy_rmse_by_path": {
+    "circle": 0.07690817762618722,
+    "random_polyline": 0.08429249858786347,
+    "right_angle": 0.08988717884763056,
+    "s_curve": 0.07621780079825273,
+    "straight": 0.07240300792271971
+  }
+}

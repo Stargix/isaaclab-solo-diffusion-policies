@@ -8,29 +8,34 @@ high-level velocity controller.
 The environment selects its actor observation contract from checkpoint
 metadata. Both the original `hindsight_geom_avg12` checkpoints and the new
 `hindsight_geom_profile16` checkpoints are supported; mixing a policy kind,
-goal name and dimension is rejected before simulation starts. In schema 16,
+goal name and dimension is rejected before simulation starts. In schema 8,
 the four route samples are `[x,y,h_required]` tokens and `h_now` is appended
-before terminal yaw and average speed. Rewards and DPPO likelihood mathematics
-are unchanged.
+before terminal yaw and average speed. Task contract v4 adds sustained profile
+tracking to schema-8 success and checkpoint selection without changing DPPO's
+likelihood mathematics.
 
 ## Train
 
-Profile16 first online gate, initialized from the three-skill Phase-A actor.
-Stage 1 deliberately targets the observed blocker: binary walk/crouch height
-sections on straight, S and right-angle routes. It does not yet claim sprint
-allocation. A Phase-A checkpoint starts with fresh critic and Adam states, so
-`--restart_optimization` must not be supplied:
+Definitive profile16 Stage-1 repair, warm-started from Job 3471 iteration 100.
+That actor repaired most Phase-A instability but learned to remain crouched
+because task contract v3 checked only terminal height. Contract v4 measures
+distance-weighted height error over the complete route and requires its MAE to
+be at most 0.04 m. Critic and Adam state are reset because they estimate the old
+return; the immutable KL reference is re-anchored to the loaded iteration-100
+actor:
 
 ```bash
-./isaaclab.sh -p scripts/dppo_diffusion_rl/train.py --checkpoint checkpoints_iri/checkpoints_dp/wct_diffusion_policy_baseline.pt --output_dir scripts/dppo_diffusion_rl/runs/dppo_wct_profile16_stage1_v1 --run_name dppo_wct_profile16_stage1_v1 --num_envs 4096 --iterations 500 --rollout_chunks 32 --route_stage 1 --route_speed_max_mps 0.5 --speed_budget_max_mps 0.8 --save_interval 25 --headless --device cuda:0 --wandb
+./isaaclab.sh -p scripts/dppo_diffusion_rl/train.py --checkpoint checkpoints_iri/checkpoints_dppo/dppo_wct_100_potxo.pt --output_dir scripts/dppo_diffusion_rl/runs/dppo_wct_profile16_stage1_contract4 --run_name dppo_wct_profile16_stage1_contract4 --restart_optimization --reference_kl_coef 0.05 --profile_height_reward_weight 2.0 --profile_height_mae_tolerance_m 0.04 --num_envs 4096 --iterations 150 --rollout_chunks 32 --route_stage 1 --route_speed_max_mps 0.5 --speed_budget_max_mps 0.8 --save_interval 10 --seed 43 --headless --device cuda:0 --wandb
 ```
 
-Do not start the stage-2/sprint-allocation run until a held-out evaluation of
-stage 1 demonstrates survival and sustained height tracking. This makes a
-failed transition experiment cheap and interpretable instead of confounding
-height-profile learning with high-speed gait allocation.
+The two profile flags are explicit for provenance although they equal the v4
+defaults. They affect only `hindsight_geom_profile16`; legacy 12-D actors keep
+their old 0.75 height weight and terminal-only success semantics. Do not start
+stage-2/sprint allocation until a held-out evaluation demonstrates at least
+90% survival, at most 5% base contact, 75% joint success, profile MAE at most
+0.04 m, speed MAE at most 0.05 m/s, and cross-track RMSE at most 0.10 m.
 
-Recommended v4 continuation from `dppo_path_3`.  Task-contract v3 keeps the
+Historical path-v4 continuation from `dppo_path_3`. Task-contract v3 kept the
 12-D geometric goal but replaces its final local `v_avg` scalar with the
 closed-loop remaining-route speed budget
 `(remaining distance) / (remaining target time)`.  Geometry is still previewed
@@ -121,9 +126,10 @@ Interactive right-angle transition:
 ```
 
 `best.pt` is created only after at least one episode has completed. Selection
-prioritizes route success and fall avoidance, penalizes corridor/overshoot, and
-then uses progress, mean-speed error and terminal distance. Its score is saved
-and restored on an in-place resume. `last.pt`, periodic `model_N.pt`,
+prioritizes joint route/profile success and fall avoidance, penalizes timeout,
+failed arrival, corridor and overshoot, and then uses progress, mean-speed
+error, terminal distance and a bounded profile-height MAE tiebreaker. Its score
+is saved and restored on an in-place resume. `last.pt`, periodic `model_N.pt`,
 `metrics.jsonl`, and `run_config.json` are always produced.
 
 The first 10 iterations train only the critic. With 32 chunks per iteration,

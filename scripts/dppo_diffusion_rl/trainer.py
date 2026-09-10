@@ -25,9 +25,14 @@ class EpisodeAccumulator:
     corridor_failure: float = 0.0
     terminal_overshoot: float = 0.0
     arrival_failure: float = 0.0
+    time_out: float = 0.0
     progress_fraction: float = 0.0
     mean_speed_error_abs_mps: float = 0.0
     terminal_distance_m: float = 0.0
+    profile_height_constraint_active: float = 0.0
+    profile_height_success: float = 0.0
+    profile_height_mae_m: float = 0.0
+    profile_height_within_tolerance_fraction: float = 0.0
     returns: list[float] = field(default_factory=list)
 
     def add_extras(self, extras: dict[str, Any], active: torch.Tensor) -> None:
@@ -46,9 +51,14 @@ class EpisodeAccumulator:
             "corridor_failure",
             "terminal_overshoot",
             "arrival_failure",
+            "time_out",
             "progress_fraction",
             "mean_speed_error_abs_mps",
             "terminal_distance_m",
+            "profile_height_constraint_active",
+            "profile_height_success",
+            "profile_height_mae_m",
+            "profile_height_within_tolerance_fraction",
         ):
             setattr(self, name, getattr(self, name) + float(event[name][keep].sum()))
 
@@ -61,9 +71,18 @@ class EpisodeAccumulator:
             "Episode/corridor_failure_rate": self.corridor_failure / divisor,
             "Episode/terminal_overshoot_rate": self.terminal_overshoot / divisor,
             "Episode/arrival_failure_rate": self.arrival_failure / divisor,
+            "Episode/time_out_rate": self.time_out / divisor,
             "Episode/progress_fraction": self.progress_fraction / divisor,
             "Episode/mean_speed_error_abs_mps": self.mean_speed_error_abs_mps / divisor,
             "Episode/terminal_distance_m": self.terminal_distance_m / divisor,
+            "Episode/profile_height_constraint_active": (
+                self.profile_height_constraint_active / divisor
+            ),
+            "Episode/profile_height_success_rate": self.profile_height_success / divisor,
+            "Episode/profile_height_mae_m": self.profile_height_mae_m / divisor,
+            "Episode/profile_height_within_tolerance_fraction": (
+                self.profile_height_within_tolerance_fraction / divisor
+            ),
             "Episode/return": sum(self.returns) / max(len(self.returns), 1),
         }
 
@@ -275,16 +294,28 @@ class DPPOTrainer:
     def _selection_score(metrics: dict[str, float]) -> float:
         if metrics["Episode/completed"] <= 0.0:
             return float("-inf")
-        return (
+        score = (
             metrics["Episode/success_rate"]
             - metrics["Episode/base_contact_rate"]
             - 0.5 * metrics["Episode/corridor_failure_rate"]
             - 0.5 * metrics["Episode/terminal_overshoot_rate"]
             - 0.5 * metrics.get("Episode/arrival_failure_rate", 0.0)
+            - 0.5 * metrics.get("Episode/time_out_rate", 0.0)
             + 0.10 * metrics["Episode/progress_fraction"]
             - 0.50 * metrics["Episode/mean_speed_error_abs_mps"]
             - 0.01 * metrics["Episode/terminal_distance_m"]
         )
+        # Joint success already contains the full profile gate for schema 8.
+        # This bounded term is only a checkpoint-selection tiebreaker, so a
+        # model that tracks height more faithfully wins when task outcomes are
+        # otherwise similar. Legacy 12-D runs remain unchanged.
+        if metrics.get("Episode/profile_height_constraint_active", 0.0) > 0.5:
+            normalized_mae = min(
+                metrics.get("Episode/profile_height_mae_m", 0.0) / 0.04,
+                2.0,
+            )
+            score -= 0.10 * normalized_mae
+        return score
 
     def _write_metrics(self, iteration: int, metrics: dict[str, float]) -> None:
         record = {"iteration": iteration, "total_physics_steps": self.total_physics_steps, **metrics}
@@ -311,6 +342,12 @@ class DPPOTrainer:
                 "route_stage": int(self.raw_env.cfg.route_stage),
                 "route_speed_max_mps": self.raw_env.cfg.route_speed_max_mps,
                 "episode_length_s": float(self.raw_env.cfg.episode_length_s),
+                "profile_height_mae_tolerance_m": float(
+                    self.raw_env.cfg.profile_height_mae_tolerance_m
+                ),
+                "profile_height_reward_weight": float(
+                    self.raw_env.cfg.profile_height_reward_weight
+                ),
             },
         )
 
@@ -351,6 +388,7 @@ class DPPOTrainer:
                 f"fall={metrics['Episode/base_contact_rate']:.3f} "
                 f"progress={metrics['Episode/progress_fraction']:.3f} "
                 f"speed_err={metrics['Episode/mean_speed_error_abs_mps']:.3f} "
+                f"height_mae={metrics['Episode/profile_height_mae_m']:.3f} "
                 f"kl={metrics['Policy/approximate_kl']:.5f} "
                 f"ref_kl={metrics['Policy/reference_kl']:.5f} "
                 f"sat={metrics['Rollout/action_saturation_fraction']:.3f}"

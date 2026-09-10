@@ -24,6 +24,18 @@ parser.add_argument("--num_envs", type=int, default=2048)
 parser.add_argument("--iterations", type=int, default=1000, help="Additional PPO iterations to run.")
 parser.add_argument("--rollout_chunks", type=int, default=32)
 parser.add_argument("--episode_length_s", type=float, default=24.0)
+parser.add_argument(
+    "--profile_height_mae_tolerance_m",
+    type=float,
+    default=0.04,
+    help="Schema-8 distance-weighted route-profile MAE required for success.",
+)
+parser.add_argument(
+    "--profile_height_reward_weight",
+    type=float,
+    default=2.0,
+    help="Schema-8 per-metre dense height-tracking weight.",
+)
 parser.add_argument("--route_stage", type=int, choices=(0, 1, 2), default=2)
 parser.add_argument(
     "--route_speed_max_mps",
@@ -172,6 +184,12 @@ def main() -> None:
     if args_cli.episode_length_s <= 0.0:
         raise ValueError("episode_length_s must be positive.")
     env_cfg.episode_length_s = float(args_cli.episode_length_s)
+    env_cfg.profile_height_mae_tolerance_m = float(
+        args_cli.profile_height_mae_tolerance_m
+    )
+    env_cfg.profile_height_reward_weight = float(
+        args_cli.profile_height_reward_weight
+    )
     env_cfg.route_stage = int(args_cli.route_stage)
     env_cfg.route_speed_max_mps = args_cli.route_speed_max_mps
     env_cfg.speed_budget_max_mps = float(args_cli.speed_budget_max_mps)

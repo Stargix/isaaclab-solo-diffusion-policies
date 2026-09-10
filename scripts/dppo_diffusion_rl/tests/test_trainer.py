@@ -189,6 +189,82 @@ def test_selection_score_prefers_accurate_first_arrival() -> None:
     assert accurate > early
 
 
+def test_profile_checkpoint_selection_uses_distance_weighted_height_mae() -> None:
+    common = {
+        "Episode/completed": 1.0,
+        "Episode/success_rate": 0.5,
+        "Episode/base_contact_rate": 0.0,
+        "Episode/corridor_failure_rate": 0.0,
+        "Episode/terminal_overshoot_rate": 0.0,
+        "Episode/arrival_failure_rate": 0.5,
+        "Episode/progress_fraction": 1.0,
+        "Episode/mean_speed_error_abs_mps": 0.02,
+        "Episode/terminal_distance_m": 0.1,
+        "Episode/profile_height_constraint_active": 1.0,
+    }
+    accurate = DPPOTrainer._selection_score(
+        {**common, "Episode/profile_height_mae_m": 0.02}
+    )
+    collapsed = DPPOTrainer._selection_score(
+        {**common, "Episode/profile_height_mae_m": 0.08}
+    )
+    assert accurate > collapsed
+
+
+def test_selection_score_does_not_prefer_standing_until_timeout() -> None:
+    common = {
+        "Episode/completed": 1.0,
+        "Episode/success_rate": 0.0,
+        "Episode/base_contact_rate": 0.0,
+        "Episode/corridor_failure_rate": 0.0,
+        "Episode/terminal_overshoot_rate": 0.0,
+        "Episode/mean_speed_error_abs_mps": 0.1,
+        "Episode/profile_height_constraint_active": 1.0,
+        "Episode/profile_height_mae_m": 0.04,
+    }
+    arrived_with_bad_profile = DPPOTrainer._selection_score(
+        {
+            **common,
+            "Episode/arrival_failure_rate": 1.0,
+            "Episode/time_out_rate": 0.0,
+            "Episode/progress_fraction": 1.0,
+            "Episode/terminal_distance_m": 0.1,
+        }
+    )
+    stood_until_timeout = DPPOTrainer._selection_score(
+        {
+            **common,
+            "Episode/arrival_failure_rate": 0.0,
+            "Episode/time_out_rate": 1.0,
+            "Episode/progress_fraction": 0.0,
+            "Episode/terminal_distance_m": 4.0,
+        }
+    )
+    assert arrived_with_bad_profile > stood_until_timeout
+
+
+def test_legacy_checkpoint_selection_ignores_profile_tiebreaker() -> None:
+    common = {
+        "Episode/completed": 1.0,
+        "Episode/success_rate": 0.5,
+        "Episode/base_contact_rate": 0.0,
+        "Episode/corridor_failure_rate": 0.0,
+        "Episode/terminal_overshoot_rate": 0.0,
+        "Episode/arrival_failure_rate": 0.5,
+        "Episode/progress_fraction": 1.0,
+        "Episode/mean_speed_error_abs_mps": 0.02,
+        "Episode/terminal_distance_m": 0.1,
+        "Episode/profile_height_constraint_active": 0.0,
+    }
+    low = DPPOTrainer._selection_score(
+        {**common, "Episode/profile_height_mae_m": 0.01}
+    )
+    high = DPPOTrainer._selection_score(
+        {**common, "Episode/profile_height_mae_m": 0.20}
+    )
+    assert low == high
+
+
 def test_historical_best_score_is_only_reused_in_place(tmp_path) -> None:
     source = {"algorithm": "dppo", "best_score": 3.0}
     old_dir = tmp_path / "old"

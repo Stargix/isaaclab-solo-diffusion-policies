@@ -21,7 +21,7 @@ from .ppo import DPPOUpdater
 
 
 DPPO_CHECKPOINT_VERSION = 1
-DPPO_TASK_CONTRACT_VERSION = 3
+DPPO_TASK_CONTRACT_VERSION = 4
 DPPO_GOAL_CONTRACTS = {
     "hindsight_geom_avg12": "spatial_hindsight_geometry_ddpm",
     "hindsight_geom_profile16": "spatial_hindsight_height_profile_ddpm",

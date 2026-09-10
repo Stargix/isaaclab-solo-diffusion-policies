@@ -41,6 +41,11 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
     corridor_half_width_m: float = 0.60
     route_goal_tolerance_m: float = 0.15
     terminal_height_tolerance_m: float = 0.05
+    # Schema-8 only: the task includes the complete route-height profile, not
+    # just the terminal posture.  Both quantities are distance-weighted so
+    # waiting cannot improve or worsen the result.
+    profile_height_mae_tolerance_m: float = 0.04
+    profile_height_reward_weight: float = 2.0
     terminal_yaw_tolerance_rad: float = 0.40
     terminal_mean_speed_tolerance_mps: float = 0.08
     terminal_overshoot_m: float = 0.50
@@ -94,6 +99,10 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
             )
         if self.route_goal_tolerance_m <= 0.0 or self.corridor_half_width_m <= self.route_goal_tolerance_m:
             raise ValueError("The corridor must be wider than the positive terminal tolerance.")
+        if self.profile_height_mae_tolerance_m <= 0.0:
+            raise ValueError("profile_height_mae_tolerance_m must be positive.")
+        if self.profile_height_reward_weight <= 0.0:
+            raise ValueError("profile_height_reward_weight must be positive.")
 
 
 class DPPODiffusionEnv(Solo12Env):
@@ -113,7 +122,12 @@ class DPPODiffusionEnv(Solo12Env):
             length_m=cfg.route_length_m,
             height_segment_m=cfg.height_segment_m,
         )
-        self._reward_weights = TaskRewardWeights()
+        reward_height = (
+            cfg.profile_height_reward_weight
+            if cfg.goal_representation == "hindsight_geom_profile16"
+            else TaskRewardWeights().height
+        )
+        self._reward_weights = TaskRewardWeights(height=reward_height)
         self._route_state: RouteState | None = None
         self._goal = torch.zeros(
             self.num_envs,
@@ -123,11 +137,30 @@ class DPPODiffusionEnv(Solo12Env):
         self._task_step = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._success = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._arrival_failure = torch.zeros_like(self._success)
+        self._time_out_failure = torch.zeros_like(self._success)
         self._base_contact_failure = torch.zeros_like(self._success)
         self._corridor_failure = torch.zeros_like(self._success)
         self._overshoot_failure = torch.zeros_like(self._success)
         self._last_mean_speed_error = torch.zeros(self.num_envs, device=self.device)
         self._last_terminal_pose_potential = torch.zeros(self.num_envs, device=self.device)
+        self._profile_height_error_distance_sum = torch.zeros(
+            self.num_envs, device=self.device
+        )
+        self._profile_height_within_tolerance_distance_sum = torch.zeros_like(
+            self._profile_height_error_distance_sum
+        )
+        self._profile_height_distance_sum = torch.zeros_like(
+            self._profile_height_error_distance_sum
+        )
+        self._last_profile_height_mae = torch.zeros_like(
+            self._profile_height_error_distance_sum
+        )
+        self._last_profile_height_within_tolerance = torch.zeros_like(
+            self._profile_height_error_distance_sum
+        )
+        self._profile_height_success = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
         all_ids = torch.arange(self.num_envs, device=self.device)
         self._routes.reset(
             all_ids,
@@ -237,6 +270,34 @@ class DPPODiffusionEnv(Solo12Env):
         self._task_step += 1
         contact, timeout = super()._get_dones()
         state = self._update_route_and_goal()
+        height_abs_error = (self._base_height() - state.target_height).abs()
+        height_distance = state.progress_delta.clamp_min(0.0)
+        self._profile_height_error_distance_sum += height_abs_error * height_distance
+        self._profile_height_within_tolerance_distance_sum += (
+            height_abs_error <= self.cfg.profile_height_mae_tolerance_m
+        ).float() * height_distance
+        self._profile_height_distance_sum += height_distance
+        has_profile_distance = self._profile_height_distance_sum > 1.0e-6
+        profile_denominator = self._profile_height_distance_sum.clamp_min(1.0e-6)
+        self._last_profile_height_mae.copy_(
+            torch.where(
+                has_profile_distance,
+                self._profile_height_error_distance_sum / profile_denominator,
+                torch.zeros_like(profile_denominator),
+            )
+        )
+        self._last_profile_height_within_tolerance.copy_(
+            torch.where(
+                has_profile_distance,
+                self._profile_height_within_tolerance_distance_sum
+                / profile_denominator,
+                torch.zeros_like(profile_denominator),
+            )
+        )
+        profile_height_ok = has_profile_distance & (
+            self._last_profile_height_mae
+            <= self.cfg.profile_height_mae_tolerance_m
+        )
         terminal_yaw_error = torch.atan2(
             torch.sin(self._routes.yaw[:, -1] - self._robot_yaw()),
             torch.cos(self._routes.yaw[:, -1] - self._robot_yaw()),
@@ -254,6 +315,9 @@ class DPPODiffusionEnv(Solo12Env):
         arrival_speed_error = (
             self._routes.length / elapsed_s.clamp_min(self.step_dt) - self._routes.speed
         )
+        profile_constraint_active = (
+            self.cfg.goal_representation == "hindsight_geom_profile16"
+        )
         success = (
             arrival
             & (terminal_yaw_error.abs() <= self.cfg.terminal_yaw_tolerance_rad)
@@ -262,21 +326,25 @@ class DPPODiffusionEnv(Solo12Env):
                 <= self.cfg.terminal_height_tolerance_m
             )
             & (arrival_speed_error.abs() <= self.cfg.terminal_mean_speed_tolerance_mps)
+            & (profile_height_ok if profile_constraint_active else True)
             & ~contact
             & ~corridor
             & ~overshoot
         )
+        self._profile_height_success.copy_(arrival & profile_height_ok)
         arrival_failure = arrival & ~success & ~contact & ~corridor & ~overshoot
+        terminated = contact | corridor | overshoot | arrival
+        time_out_failure = timeout & ~terminated
         self._success.copy_(success)
         self._arrival_failure.copy_(arrival_failure)
+        self._time_out_failure.copy_(time_out_failure)
         self._base_contact_failure.copy_(contact)
         self._corridor_failure.copy_(corridor)
         self._overshoot_failure.copy_(overshoot)
         self._last_mean_speed_error.copy_(
             torch.where(arrival, arrival_speed_error, mean_speed_error)
         )
-        terminated = contact | corridor | overshoot | arrival
-        return terminated, timeout & ~terminated
+        return terminated, time_out_failure
 
     def _get_rewards(self) -> torch.Tensor:
         # ``_reset_idx`` adds this after reward computation. Remove the prior
@@ -287,13 +355,7 @@ class DPPODiffusionEnv(Solo12Env):
             torch.sin(state.tangent_yaw - self._robot_yaw()),
             torch.cos(state.tangent_yaw - self._robot_yaw()),
         )
-        timeout_failure = self.reset_time_outs & ~(
-            self._success
-            | self._arrival_failure
-            | self._base_contact_failure
-            | self._corridor_failure
-            | self._overshoot_failure
-        )
+        timeout_failure = self._time_out_failure
         schedule_improvement = schedule_error_improvement(
             progress=state.progress,
             progress_delta=state.progress_delta,
@@ -347,6 +409,10 @@ class DPPODiffusionEnv(Solo12Env):
             "Metrics/progress_fraction": float((state.progress / self._routes.length).mean()),
             "Metrics/cross_track_abs_m": float(state.cross_track.abs().mean()),
             "Metrics/height_error_abs_m": float((self._base_height() - state.target_height).abs().mean()),
+            "Metrics/profile_height_mae_m": float(self._last_profile_height_mae.mean()),
+            "Metrics/profile_height_within_tolerance_fraction": float(
+                self._last_profile_height_within_tolerance.mean()
+            ),
             "Metrics/mean_speed_error_abs_mps": float(self._last_mean_speed_error.abs().mean()),
             "Metrics/terminal_distance_m": float(state.terminal_distance.mean()),
             "Metrics/success": float(self._success.float().mean()),
@@ -390,6 +456,7 @@ class DPPODiffusionEnv(Solo12Env):
                 episode_snapshot = {
                     "success": float(self._success[completed_ids].float().mean()),
                     "arrival_failure": float(self._arrival_failure[completed_ids].float().mean()),
+                    "time_out": float(self._time_out_failure[completed_ids].float().mean()),
                     "base_contact": float(self._base_contact_failure[completed_ids].float().mean()),
                     "corridor_failure": float(self._corridor_failure[completed_ids].float().mean()),
                     "terminal_overshoot": float(self._overshoot_failure[completed_ids].float().mean()),
@@ -398,12 +465,25 @@ class DPPODiffusionEnv(Solo12Env):
                     "progress_fraction": float(
                         (self._route_state.progress[completed_ids] / self._routes.length[completed_ids]).mean()
                     ),
+                    "profile_height_constraint_active": float(
+                        self.cfg.goal_representation == "hindsight_geom_profile16"
+                    ),
+                    "profile_height_success": float(
+                        self._profile_height_success[completed_ids].float().mean()
+                    ),
+                    "profile_height_mae_m": float(
+                        self._last_profile_height_mae[completed_ids].mean()
+                    ),
+                    "profile_height_within_tolerance_fraction": float(
+                        self._last_profile_height_within_tolerance[completed_ids].mean()
+                    ),
                     "count": float(len(completed_ids)),
                 }
                 episode_event = {
                     "env_ids": completed_ids.clone(),
                     "success": self._success[completed_ids].float().clone(),
                     "arrival_failure": self._arrival_failure[completed_ids].float().clone(),
+                    "time_out": self._time_out_failure[completed_ids].float().clone(),
                     "base_contact": self._base_contact_failure[completed_ids].float().clone(),
                     "corridor_failure": self._corridor_failure[completed_ids].float().clone(),
                     "terminal_overshoot": self._overshoot_failure[completed_ids].float().clone(),
@@ -413,6 +493,20 @@ class DPPODiffusionEnv(Solo12Env):
                         self._route_state.progress[completed_ids]
                         / self._routes.length[completed_ids].clamp_min(1.0e-6)
                     ).clone(),
+                    "profile_height_constraint_active": torch.full(
+                        (len(completed_ids),),
+                        float(self.cfg.goal_representation == "hindsight_geom_profile16"),
+                        device=self.device,
+                    ),
+                    "profile_height_success": self._profile_height_success[
+                        completed_ids
+                    ].float().clone(),
+                    "profile_height_mae_m": self._last_profile_height_mae[
+                        completed_ids
+                    ].clone(),
+                    "profile_height_within_tolerance_fraction": (
+                        self._last_profile_height_within_tolerance[completed_ids].clone()
+                    ),
                 }
         else:
             episode_snapshot = None
@@ -434,9 +528,16 @@ class DPPODiffusionEnv(Solo12Env):
         self._task_step[env_ids] = 0
         self._success[env_ids] = False
         self._arrival_failure[env_ids] = False
+        self._time_out_failure[env_ids] = False
         self._base_contact_failure[env_ids] = False
         self._corridor_failure[env_ids] = False
         self._overshoot_failure[env_ids] = False
         self._last_mean_speed_error[env_ids] = 0.0
         self._last_terminal_pose_potential[env_ids] = 0.0
+        self._profile_height_error_distance_sum[env_ids] = 0.0
+        self._profile_height_within_tolerance_distance_sum[env_ids] = 0.0
+        self._profile_height_distance_sum[env_ids] = 0.0
+        self._last_profile_height_mae[env_ids] = 0.0
+        self._last_profile_height_within_tolerance[env_ids] = 0.0
+        self._profile_height_success[env_ids] = False
         self._route_state = None

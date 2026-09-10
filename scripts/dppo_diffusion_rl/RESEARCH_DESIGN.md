@@ -174,7 +174,10 @@ reward is
 
 `3 Delta s + Delta[-|min(s,L)-v*t|] + Delta Phi_pose`
 
-`- Delta s [1.25 B(e_perp;0.12) + 0.25 B(e_psi;0.40) + 0.75 B(e_h;0.04) + stability]`.
+`- Delta s [1.25 B(e_perp;0.12) + 0.25 B(e_psi;0.40) + w_h B(e_h;0.04) + stability]`,
+
+where `w_h=2.0` for profile16 contract v4 and remains 0.75 for the legacy
+12-D contract.
 
 The schedule potential is not capped in time: arriving either early or late
 leaves `|L-v*t|>0`. The episode terminates at the first entry into the goal
@@ -202,12 +205,82 @@ Terminal outcomes are:
 Success requires first arrival within 0.15 m, yaw within 0.40 rad, height
 within 0.05 m and `|L/t_arrival-v_des| <= 0.08 m/s`. Desired mean speed thus
 defines timing without a separate deadline or instantaneous-speed reward.
-Timeout remains a failed episode, not a source of value bootstrapping.
+For profile16 it additionally requires the full-route height MAE defined below
+to be at most 0.04 m. Timeout remains a failed episode, not a source of value
+bootstrapping.
 
 Smooth height transitions are not hard-coded. The network receives future
 height through its geometric goal and is rewarded against the height required
 at its current route progress. Smoothness must remain an emergent property of
 the pretrained diffusion manifold and its online refinement.
+
+## Task contract v4: sustained height-profile success
+
+Job 3471 exposed a mismatch between the stated task and task contract v3.  Its
+iteration-100 actor substantially repaired the unstable Phase-A profile actor:
+the matched long-horizon audit reached about 81.5% survival, and a separate
+mixed-profile audit reached 90%.  It also retained a usable high posture on
+constant-height trials (approximately 0.269 m achieved for 0.2932 m requested).
+The actor therefore contains both postures and is a valid online warm start.
+However, on held-out binary profiles it obtained 0.055 m distance-weighted
+height MAE and spent only about 49% of travelled distance within 0.03 m of the
+requirement.  Qualitatively, it often descended and then remained crouched.
+
+This was an objective-specification failure, not evidence that DPPO could not
+represent the transition.  Contract v3 required only terminal height for
+success, and checkpoint selection did not include sustained height.  Moreover,
+the old dense height cost had weight 0.75 and was bounded per metre.  On a 4 m
+route its absolute upper bound was only 3; remaining crouched through a typical
+half-high profile cost roughly 1.4, much less than the progress and terminal
+success return.  A stable crouch followed by a late terminal correction was
+therefore rational under the implemented objective.
+
+Contract v4 keeps the actor input, action output, route distribution, average-
+speed potential and DPPO likelihood unchanged.  For each episode it accumulates
+
+`E_h = sum_t |h_t-h*_t| Delta s_t / sum_t Delta s_t`
+
+and
+
+`C_h = sum_t 1[|h_t-h*_t| <= 0.04] Delta s_t / sum_t Delta s_t`.
+
+Both are weighted by monotone route progress rather than time. Waiting cannot
+reduce the error and early failure cannot avoid a per-second occupancy cost.
+For `hindsight_geom_profile16`, first-arrival success now additionally requires
+`E_h <= 0.04 m`; terminal-height tolerance remains a separate 0.05 m condition.
+The dense height weight is 2.0 for profile16 only. Its full-route cost remains
+bounded by 8 on a 4 m route, below the explicit hard-failure cost, while an
+always-crouched half-high route costs roughly 3.7 before its failed-arrival
+penalty. Legacy `hindsight_geom_avg12` training retains weight 0.75 and does not
+activate the profile gate.
+
+`Episode/profile_height_mae_m`,
+`Episode/profile_height_within_tolerance_fraction`, and
+`Episode/profile_height_success_rate` are logged. Joint success remains the
+primary checkpoint criterion; normalized profile MAE contributes at most 0.2
+as a bounded tiebreaker. Timeout rate is now also logged and penalized in the
+selection score, matching its explicit terminal reward and preventing a
+no-progress policy from looking preferable to a near-complete profile attempt.
+This prevents `best.pt` from selecting a visibly collapsed or stationary
+strategy when task outcomes are otherwise similar.
+
+No target ramp, height controller, gait label, gait-specific reward or action-
+rate term is introduced. The future height samples remain observations, and
+the diffusion actor must learn when and how to transition smoothly. Falls and
+corridor exits remain hard terminations; profile error is evaluated over the
+route rather than terminating valid transition attempts. This separation is
+consistent with the constraint-as-termination treatment of physical safety in
+[CaT](https://arxiv.org/abs/2403.18765), while retaining the potential-based
+shaping invariance described above for task progress.
+
+The preregistered repair run starts from Job 3471 `model_100.pt`, resets critic
+and Adam state, anchors reference KL to that stable actor with coefficient
+0.05, and trains only stage 1 for at most 150 iterations. The value 0.05 and all
+other optimizer settings are retained from the successful path-v3/v4 runs;
+this is not a hyperparameter sweep. Checkpoints are saved every 10 iterations.
+Sprint allocation remains deferred until the held-out gate reaches: survival
+at least 90%, base-contact at most 5%, joint success at least 75%, profile MAE
+at most 0.04 m, speed MAE at most 0.05 m/s, and cross-track RMSE at most 0.10 m.
 
 ## What counts as a positive result
 
