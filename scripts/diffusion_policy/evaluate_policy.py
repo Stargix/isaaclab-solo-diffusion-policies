@@ -273,6 +273,12 @@ def finite_mean(rows: list[dict[str, Any]], key: str) -> float | None:
     return float(np.mean(values)) if values.size else None
 
 
+def nanmean_or_nan(values: list[float]) -> float:
+    finite = np.asarray(values, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    return float(np.mean(finite)) if finite.size else math.nan
+
+
 def build_straight_path(start_pos: np.ndarray, start_quat: np.ndarray, length_m: float = 10.0, num_points: int = 250) -> tuple[np.ndarray, np.ndarray]:
     yaw = robot_yaw_w(start_quat)
     cos_y = float(np.cos(yaw))
@@ -1826,7 +1832,13 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             if any(row["path_shape"] == shape for row in route_rows)
         },
         "mean_xy_rmse_by_path": {
-            shape: float(np.nanmean([r["xy_rmse"] for r in summary_rows if r["path_shape"] == shape and r["survived"]]))
+            shape: nanmean_or_nan(
+                [
+                    r["xy_rmse"]
+                    for r in summary_rows
+                    if r["path_shape"] == shape and r["survived"]
+                ]
+            )
             for shape in shapes
         }
     }

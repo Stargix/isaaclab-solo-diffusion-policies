@@ -282,6 +282,58 @@ Sprint allocation remains deferred until the held-out gate reaches: survival
 at least 90%, base-contact at most 5%, joint success at least 75%, profile MAE
 at most 0.04 m, speed MAE at most 0.05 m/s, and cross-track RMSE at most 0.10 m.
 
+### Job 3475 outcome and controlled next experiment
+
+Job 3475 did not validate the proposed repair. At iteration 110 its on-policy
+snapshot reported 41.6% joint success, 5.0% base contact, no timeout, 2.85 cm/s
+mean-speed error and 3.69 cm profile MAE. The apparently contradictory 53.1%
+`arrival_failure` is not failure to reach the endpoint: it means the endpoint
+was entered but at least one terminal/profile gate failed. The original
+evaluator compounded the ambiguity because its `task_success` checked terminal
+height but omitted contract-v4 full-profile MAE. The evaluator is now aligned
+with contract v4 and reports every gate separately.
+
+Paired inference with seed 42 exposed the actual result. On 4 m routes with
+speeds 0.2/0.35/0.5 m/s, five route families and random four-level height
+profiles, Job 3475 `iter110` versus Job 3471 `model_100` obtained:
+
+| Metric | Job 3475 iter110 | Job 3471 model_100 |
+|---|---:|---:|
+| survival | 91.1% | 93.3% |
+| first position arrival | 93.3% | 95.6% |
+| yaw gate among arrivals | 92.9% | 97.7% |
+| terminal-height gate among arrivals | 33.3% | 37.2% |
+| mean-speed gate among arrivals | 66.7% | 76.7% |
+| profile gate among arrivals | 14.3% | 16.3% |
+| distance-weighted profile MAE | 4.59 cm | 4.55 cm |
+| joint contract-v4 success | 0% | 0% |
+
+Thus `iter110` is dominated by its source actor and must not seed another run.
+The result is not evidence for increasing the fall penalty, yaw weight, height
+weight or PPO learning rate. Its exact cause is a distribution mismatch:
+historical route Stage 1 samples section-wise binary walk/crouch heights,
+whereas the target/evaluation also requires 0.25 and 0.21 m. Route Stage 2
+introduces those heights, but simultaneously adds random geometry and raises
+the nominal speed range; using it would confound three changes.
+
+The curricula are therefore factorized without changing historical behavior.
+Route stage continues to select geometry and its default speed. A new optional
+`height_profile_stage` selects constant binary (0), section-wise binary (1), or
+section-wise four-level (2) targets. `None` retains the old coupling. The next
+controlled run uses route Stage 1, height Stage 2, 0.5 m/s maximum, the
+unchanged v4 reward, KL coefficient 0.05 and Job 3471 `model_100` as actor
+warm-start. Phase A is retained as a later clean-start ablation, not the next
+operational run: it failed physically under the matched four-level evaluation,
+whereas `model_100` supplies the stable gait manifold to refine.
+
+Evaluation now supports `--route_length_m 4.0`, preventing low requested speeds
+from being excluded because a long analytic endpoint lies beyond the horizon.
+It records achieved height/yaw and applies the distance-weighted profile gate
+at first arrival. Training logs position arrival and the yaw, terminal-height,
+mean-speed and profile gates individually. Resuming optimizer state after
+changing any task-distribution field is rejected, preventing an incompatible
+critic/Adam state from silently contaminating a run.
+
 ## What counts as a positive result
 
 Checkpoint selection is not based on episodic return alone. The primary paired
