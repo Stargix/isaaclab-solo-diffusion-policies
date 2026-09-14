@@ -10,32 +10,27 @@ metadata. Both the original `hindsight_geom_avg12` checkpoints and the new
 `hindsight_geom_profile16` checkpoints are supported; mixing a policy kind,
 goal name and dimension is rejected before simulation starts. In schema 8,
 the four route samples are `[x,y,h_required]` tokens and `h_now` is appended
-before terminal yaw and average speed. Task contract v4 adds sustained profile
-tracking to schema-8 success and checkpoint selection without changing DPPO's
-likelihood mathematics.
+before terminal yaw and average speed. Task contract v5 adds support-aware
+procedural routes and evaluates sustained posture on the plateaus surrounding
+a physical transition without changing DPPO's likelihood mathematics.
 
 ## Train
 
-Next controlled run: Stage-1 geometry with the four-level height curriculum.
-Job 3475 showed that contract v4 alone cannot improve intermediate-height
-tracking when Stage 1 samples only walk/crouch targets. Geometry and height
-difficulty are now independent: `--route_stage 1 --height_profile_stage 2`
-keeps the solved geometry/speed distribution while exposing 0.2932, 0.25,
-0.21 and 0.1705 m profiles. The run starts from Job 3471 `model_100`, which
-dominates Job 3475 `iter110` on the matched 4 m evaluation. Critic and Adam
-state are reset and the KL reference is re-anchored to `model_100`:
+The current primary experiment is documented and launched from
+[`experiments/supported_procedural_v1`](experiments/supported_procedural_v1/README.md).
+It starts directly from the pure Phase-A WCT imitation checkpoint, samples a
+new continuous-curvature route on every reset, and commands only supported
+walk/crouch height endpoints in balanced constant and bidirectional-transition
+profiles:
 
 ```bash
-./isaaclab.sh -p scripts/dppo_diffusion_rl/train.py --checkpoint checkpoints_iri/checkpoints_dppo/dppo_wct_100_potxo.pt --output_dir scripts/dppo_diffusion_rl/runs/dppo_wct_profile16_multilevel_c4_v1 --run_name dppo_wct_profile16_multilevel_c4_v1 --restart_optimization --reference_kl_coef 0.05 --profile_height_reward_weight 2.0 --profile_height_mae_tolerance_m 0.04 --num_envs 4096 --iterations 150 --rollout_chunks 32 --route_stage 1 --height_profile_stage 2 --route_speed_max_mps 0.5 --speed_budget_max_mps 0.8 --save_interval 5 --seed 44 --headless --device cuda:0 --wandb
+sbatch scripts/dppo_diffusion_rl/experiments/supported_procedural_v1/train_cluster.sbs
 ```
 
-The profile reward flags are explicit for provenance although they equal the
-v4 defaults. `--height_profile_stage 2` changes only target-height sampling;
-omitting it preserves every historical run's coupling to `--route_stage`.
-Legacy 12-D actors keep their old 0.75 height weight and terminal-only success
-semantics. Do not start stage-2/sprint allocation until evaluation demonstrates at least
-90% survival, at most 5% base contact, 75% joint success, profile MAE at most
-0.04 m, speed MAE at most 0.05 m/s, and cross-track RMSE at most 0.10 m.
+It deliberately does not use `--restart_optimization`: Phase A has no PPO
+critic or optimizer state to restore. `--require_phase_a_source` prevents an
+accidental DPPO warm start. The commands below are retained only to reproduce
+historical task contracts and are not the current recommendation.
 
 Historical path-v4 continuation from `dppo_path_3`. Task-contract v3 kept the
 12-D geometric goal but replaces its final local `v_avg` scalar with the

@@ -15,6 +15,7 @@ from scripts.diffusion_policy.train.data.obs_utils import proprio_from_env_tenso
 from scripts.residual_diffusion_rl.routes import RouteBank, RouteState
 
 from .conditioning import remaining_speed_budget
+from .procedural_routes import SupportedProceduralRouteBank
 from .rewards import (
     TaskRewardWeights,
     average_speed_error,
@@ -34,6 +35,12 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
     route_points: int = 101
     route_length_m: float = 4.0
     height_segment_m: float = 0.8
+    route_distribution: str = "legacy"
+    procedural_curvature_knots: int = 6
+    procedural_max_curvature_rad_m: float = 0.8
+    transition_boundary_min_m: float = 1.6
+    transition_boundary_max_m: float = 2.4
+    transition_margin_m: float = 0.25
     goal_representation: str = "hindsight_geom_avg12"
     route_stage: int = 2
     # None preserves the historical route-stage coupling. Set to 2 to expose
@@ -77,6 +84,10 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
 
         if self.route_stage not in (0, 1, 2):
             raise ValueError("route_stage must be 0, 1 or 2.")
+        if self.route_distribution not in {"legacy", "supported_procedural_v1"}:
+            raise ValueError(
+                "route_distribution must be 'legacy' or 'supported_procedural_v1'."
+            )
         if self.height_profile_stage is not None and self.height_profile_stage not in (0, 1, 2):
             raise ValueError("height_profile_stage must be 0, 1, 2 or None.")
         if self.goal_representation not in {
@@ -97,7 +108,11 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
             raise ValueError("speed_budget_max_mps must be in (0, v_req_clip].")
         sampled_speed_max = self.route_speed_max_mps
         if sampled_speed_max is None:
-            sampled_speed_max = 0.4 if self.route_stage <= 0 else 0.5 if self.route_stage == 1 else 0.6
+            sampled_speed_max = (
+                0.8
+                if self.route_distribution == "supported_procedural_v1"
+                else 0.4 if self.route_stage <= 0 else 0.5 if self.route_stage == 1 else 0.6
+            )
         if sampled_speed_max > self.speed_budget_max_mps:
             raise ValueError(
                 "speed_budget_max_mps must cover the maximum sampled route speed."
@@ -108,6 +123,33 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
             raise ValueError("profile_height_mae_tolerance_m must be positive.")
         if self.profile_height_reward_weight <= 0.0:
             raise ValueError("profile_height_reward_weight must be positive.")
+        if self.route_distribution == "supported_procedural_v1":
+            if self.goal_representation != "hindsight_geom_profile16":
+                raise ValueError(
+                    "supported_procedural_v1 requires the schema-8 height-profile actor."
+                )
+            if self.height_profile_stage is not None:
+                raise ValueError(
+                    "supported_procedural_v1 owns its support-aware height distribution; "
+                    "do not combine it with --height_profile_stage."
+                )
+            if self.route_length_m != 4.0:
+                raise ValueError(
+                    "supported_procedural_v1 is preregistered for 4.0 m routes."
+                )
+            if sampled_speed_max > 1.2:
+                raise ValueError(
+                    "supported_procedural_v1 is bounded by the audited 1.2 m/s fast envelope."
+                )
+            if not (
+                0.0
+                < self.transition_boundary_min_m
+                <= self.transition_boundary_max_m
+                < self.route_length_m
+            ):
+                raise ValueError("Invalid supported-profile transition boundary range.")
+            if self.transition_margin_m < 0.0:
+                raise ValueError("transition_margin_m must be non-negative.")
 
 
 class DPPODiffusionEnv(Solo12Env):
@@ -120,13 +162,26 @@ class DPPODiffusionEnv(Solo12Env):
         # here so an impossible actor/reward contract cannot reach simulation.
         cfg.validate_task()
         super().__init__(cfg, render_mode, **kwargs)
-        self._routes = RouteBank(
-            self.num_envs,
-            self.device,
-            points=cfg.route_points,
-            length_m=cfg.route_length_m,
-            height_segment_m=cfg.height_segment_m,
-        )
+        if cfg.route_distribution == "supported_procedural_v1":
+            self._routes = SupportedProceduralRouteBank(
+                self.num_envs,
+                self.device,
+                points=cfg.route_points,
+                length_m=cfg.route_length_m,
+                curvature_knots=cfg.procedural_curvature_knots,
+                max_curvature_rad_m=cfg.procedural_max_curvature_rad_m,
+                transition_boundary_min_m=cfg.transition_boundary_min_m,
+                transition_boundary_max_m=cfg.transition_boundary_max_m,
+                transition_margin_m=cfg.transition_margin_m,
+            )
+        else:
+            self._routes = RouteBank(
+                self.num_envs,
+                self.device,
+                points=cfg.route_points,
+                length_m=cfg.route_length_m,
+                height_segment_m=cfg.height_segment_m,
+            )
         reward_height = (
             cfg.profile_height_reward_weight
             if cfg.goal_representation == "hindsight_geom_profile16"
@@ -171,14 +226,28 @@ class DPPODiffusionEnv(Solo12Env):
             self.num_envs, dtype=torch.bool, device=self.device
         )
         all_ids = torch.arange(self.num_envs, device=self.device)
-        self._routes.reset(
-            all_ids,
-            cfg.route_stage,
-            stratified=cfg.stratified_route_sampling,
-            speed_max=cfg.route_speed_max_mps,
-            height_stage=cfg.height_profile_stage,
-        )
+        self._reset_routes(all_ids)
         self._update_route_and_goal()
+
+    def _reset_routes(self, env_ids: torch.Tensor) -> None:
+        if self.cfg.route_distribution == "supported_procedural_v1":
+            self._routes.reset(
+                env_ids,
+                stratified=self.cfg.stratified_route_sampling,
+                speed_max=(
+                    float(self.cfg.route_speed_max_mps)
+                    if self.cfg.route_speed_max_mps is not None
+                    else 0.8
+                ),
+            )
+            return
+        self._routes.reset(
+            env_ids,
+            self.cfg.route_stage,
+            stratified=self.cfg.stratified_route_sampling,
+            speed_max=self.cfg.route_speed_max_mps,
+            height_stage=self.cfg.height_profile_stage,
+        )
 
     def _local_position(self) -> torch.Tensor:
         return self._robot.data.root_pos_w[:, :2] - self._terrain.env_origins[:, :2]
@@ -281,7 +350,12 @@ class DPPODiffusionEnv(Solo12Env):
         contact, timeout = super()._get_dones()
         state = self._update_route_and_goal()
         height_abs_error = (self._base_height() - state.target_height).abs()
-        height_distance = state.progress_delta.clamp_min(0.0)
+        height_tracking_weight = getattr(
+            self._routes,
+            "height_tracking_weight",
+            torch.ones_like(state.progress),
+        )
+        height_distance = state.progress_delta.clamp_min(0.0) * height_tracking_weight
         self._profile_height_error_distance_sum += height_abs_error * height_distance
         self._profile_height_within_tolerance_distance_sum += (
             height_abs_error <= self.cfg.profile_height_mae_tolerance_m
@@ -413,7 +487,16 @@ class DPPODiffusionEnv(Solo12Env):
             ),
             cross_track=state.cross_track,
             yaw_error=yaw_error,
-            height_error=self._base_height() - state.target_height,
+            # A discontinuous spatial requirement cannot be followed
+            # instantaneously. The procedural contract scores the surrounding
+            # plateaus and leaves a small boundary interval for a learned
+            # physical transition; it does not blend or override actions.
+            height_error=(self._base_height() - state.target_height)
+            * getattr(
+                self._routes,
+                "height_tracking_weight",
+                torch.ones_like(state.progress),
+            ),
             projected_gravity_xy=self._robot.data.projected_gravity_b[:, :2],
             vertical_velocity=self._robot.data.root_lin_vel_b[:, 2],
             success=self._success,
@@ -433,6 +516,18 @@ class DPPODiffusionEnv(Solo12Env):
             "Metrics/profile_height_mae_m": float(self._last_profile_height_mae.mean()),
             "Metrics/profile_height_within_tolerance_fraction": float(
                 self._last_profile_height_within_tolerance.mean()
+            ),
+            "Metrics/desired_mean_speed_mps": float(self._routes.speed.mean()),
+            "Metrics/tangent_speed_mps": float(
+                (
+                    torch.cos(state.tangent_yaw) * self._robot.data.root_lin_vel_w[:, 0]
+                    + torch.sin(state.tangent_yaw) * self._robot.data.root_lin_vel_w[:, 1]
+                ).mean()
+            ),
+            "Metrics/transition_fraction": float(
+                (getattr(self._routes, "profile_class", torch.zeros_like(self._task_step)) >= 2)
+                .float()
+                .mean()
             ),
             "Metrics/mean_speed_error_abs_mps": float(self._last_mean_speed_error.abs().mean()),
             "Metrics/terminal_distance_m": float(state.terminal_distance.mean()),
@@ -564,13 +659,7 @@ class DPPODiffusionEnv(Solo12Env):
             for name, value in episode_snapshot.items():
                 log[f"Episode/{name}"] = value
             self.extras["dppo_episode"] = episode_event
-        self._routes.reset(
-            env_ids,
-            self.cfg.route_stage,
-            stratified=self.cfg.stratified_route_sampling,
-            speed_max=self.cfg.route_speed_max_mps,
-            height_stage=self.cfg.height_profile_stage,
-        )
+        self._reset_routes(env_ids)
         self._task_step[env_ids] = 0
         self._success[env_ids] = False
         self._position_arrival[env_ids] = False

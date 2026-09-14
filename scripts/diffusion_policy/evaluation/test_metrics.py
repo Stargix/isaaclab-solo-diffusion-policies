@@ -251,5 +251,31 @@ class RouteMetricsTest(unittest.TestCase):
         self.assertAlmostEqual(result.mean_speed_error_m_s, 0.25)
 
 
+    def test_contract_v5_scores_plateaus_not_discontinuous_transition_band(self) -> None:
+        path = np.asarray(
+            [[0.0, 0.0], [0.25, 0.0], [0.5, 0.0], [0.75, 0.0], [1.0, 0.0]]
+        )
+        path_height = np.asarray([0.2932, 0.2932, 0.1705, 0.1705, 0.1705])
+        positions = path[1:]
+        result = compute_first_task_success(
+            positions,
+            path,
+            yaws_rad=np.zeros(4),
+            heights_m=np.asarray([0.2932, 0.2932, 0.1705, 0.1705]),
+            requested_speed_m_s=0.5,
+            target_progress_m=1.0,
+            target_yaw_rad=0.0,
+            target_height_m=0.1705,
+            dt=0.5,
+            start_position_xy=np.asarray([0.0, 0.0]),
+            target_heights_m=np.asarray([0.2932, 0.1705, 0.1705, 0.1705]),
+            profile_height_mae_tolerance_m=0.04,
+            path_heights_m=path_height,
+            profile_transition_margin_m=0.13,
+        )
+        self.assertTrue(result.success)
+        self.assertAlmostEqual(result.profile_height_mae_m, 0.0, places=6)
+
+
 if __name__ == "__main__":
     unittest.main()

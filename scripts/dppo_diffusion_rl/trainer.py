@@ -352,6 +352,7 @@ class DPPOTrainer:
             best_score=self.best_score,
             task_config={
                 "goal_representation": self.raw_env.cfg.goal_representation,
+                "route_distribution": self.raw_env.cfg.route_distribution,
                 "speed_budget_max_mps": float(self.raw_env.cfg.speed_budget_max_mps),
                 "route_stage": int(self.raw_env.cfg.route_stage),
                 "height_profile_stage": self.raw_env.cfg.height_profile_stage,
@@ -363,6 +364,19 @@ class DPPOTrainer:
                 "profile_height_reward_weight": float(
                     self.raw_env.cfg.profile_height_reward_weight
                 ),
+                "procedural_curvature_knots": int(
+                    self.raw_env.cfg.procedural_curvature_knots
+                ),
+                "procedural_max_curvature_rad_m": float(
+                    self.raw_env.cfg.procedural_max_curvature_rad_m
+                ),
+                "transition_boundary_min_m": float(
+                    self.raw_env.cfg.transition_boundary_min_m
+                ),
+                "transition_boundary_max_m": float(
+                    self.raw_env.cfg.transition_boundary_max_m
+                ),
+                "transition_margin_m": float(self.raw_env.cfg.transition_margin_m),
             },
         )
 

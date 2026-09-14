@@ -37,7 +37,7 @@ parser.add_argument(
     "--path_shapes",
     type=str,
     nargs="+",
-    choices=("straight", "circle", "s_curve", "right_angle", "random_polyline"),
+    choices=("straight", "circle", "s_curve", "right_angle", "random_polyline", "procedural"),
     default=("straight", "circle", "s_curve", "right_angle", "random_polyline"),
     help="Path families to evaluate. New non-smooth families expose corner and polyline generalization.",
 )
@@ -72,6 +72,16 @@ parser.add_argument(
     help="Length in metres of each interleaved height segment.",
 )
 parser.add_argument(
+    "--profile_transition_margin_m",
+    type=float,
+    default=None,
+    help=(
+        "Spatial margin around discontinuous height requirements excluded from "
+        "plateau-profile scoring. Defaults to contract-v5 checkpoint metadata; "
+        "set explicitly when comparing against a Phase-A checkpoint."
+    ),
+)
+parser.add_argument(
     "--height_cycle", type=float, nargs="+", default=(0.2932, 0.25, 0.21, 0.1705, 0.21, 0.25),
     help="Ordered base-height requirements [m] repeated by --height_profile interleaved.",
 )
@@ -92,6 +102,12 @@ parser.add_argument(
 parser.add_argument(
     "--require_empty_output_dir", action="store_true",
     help="Refuse to mix a canonical run with files from an earlier invocation.",
+)
+parser.add_argument(
+    "--transition_directions",
+    choices=("walk_to_crouch", "crouch_to_walk", "both"),
+    default="walk_to_crouch",
+    help="Direction(s) used with --transition_fractions.",
 )
 parser.add_argument(
     "--save_timeseries", action="store_true",
@@ -169,6 +185,7 @@ class Scenario:
     speed: float
     demo_name: str | None = None
     transition_fraction: float | None = None
+    transition_direction: str | None = None
     path_height: float | None = None
 
 
@@ -391,6 +408,40 @@ def build_random_polyline_path(start_pos: np.ndarray, start_quat: np.ndarray, se
         y = float(np.clip(y + rng.uniform(-0.85, 0.85), -1.15, 1.15))
         waypoints.append([x, y])
     return _sample_local_polyline(np.asarray(waypoints, dtype=np.float32), start_pos=start_pos, start_yaw=yaw)
+
+
+def build_procedural_curvature_path(
+    start_pos: np.ndarray,
+    start_quat: np.ndarray,
+    *,
+    seed: int,
+    length_m: float = 10.0,
+    spacing_m: float = 0.04,
+    curvature_knots: int = 6,
+    max_curvature_rad_m: float = 0.8,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Independent smooth-curvature draw matching the contract-v5 train family."""
+
+    rng = np.random.default_rng(seed)
+    segments = max(1, int(round(length_m / spacing_m)))
+    arc_segments = np.linspace(0.0, length_m, segments, endpoint=False)
+    knot_arc = np.linspace(0.0, length_m, curvature_knots)
+    amplitude = float(rng.uniform(0.0, max_curvature_rad_m))
+    knot_values = rng.uniform(-amplitude, amplitude, size=curvature_knots)
+    curvature = np.interp(arc_segments, knot_arc, knot_values)
+    local_yaw = np.concatenate(([0.0], np.cumsum(curvature * spacing_m)))
+    local_yaw[-1] = local_yaw[-2]
+    increments = spacing_m * np.stack(
+        (np.cos(local_yaw[:-1]), np.sin(local_yaw[:-1])), axis=1
+    )
+    local_xy = np.vstack((np.zeros((1, 2)), np.cumsum(increments, axis=0)))
+    start_yaw = robot_yaw_w(start_quat)
+    rotation = np.asarray(
+        [[np.cos(start_yaw), -np.sin(start_yaw)], [np.sin(start_yaw), np.cos(start_yaw)]]
+    )
+    world_xy = start_pos[:2] + local_xy @ rotation.T
+    path = np.column_stack((world_xy, np.full(len(world_xy), 0.2932)))
+    return path.astype(np.float32), (start_yaw + local_yaw).astype(np.float32)
 
 
 def compute_vectorized_goals(
@@ -624,6 +675,15 @@ def make_scenarios(path_heights: tuple[float, ...]) -> list[Scenario]:
     scenarios = []
     shapes = list(args_cli.path_shapes)
     transitions = [None] if args_cli.transition_fractions is None else list(args_cli.transition_fractions)
+    transition_directions = (
+        (None,)
+        if args_cli.transition_fractions is None
+        else (
+            ("walk_to_crouch", "crouch_to_walk")
+            if args_cli.transition_directions == "both"
+            else (args_cli.transition_directions,)
+        )
+    )
     for fraction in transitions:
         if fraction is not None and not 0.0 < fraction < 1.0:
             raise ValueError(f"Transition fractions must be in (0, 1), got {fraction}.")
@@ -631,14 +691,16 @@ def make_scenarios(path_heights: tuple[float, ...]) -> list[Scenario]:
         for speed in args_cli.speeds:
             for height in path_heights:
                 for fraction in transitions:
-                    for r in range(args_cli.repeats):
-                        scenarios.append(
-                            Scenario(
-                                len(scenarios), r, shape, speed,
-                                transition_fraction=fraction,
-                                path_height=height,
+                    for direction in transition_directions:
+                        for r in range(args_cli.repeats):
+                            scenarios.append(
+                                Scenario(
+                                    len(scenarios), r, shape, speed,
+                                    transition_fraction=fraction,
+                                    transition_direction=direction,
+                                    path_height=height,
+                                )
                             )
-                        )
     return scenarios
 
 
@@ -716,6 +778,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             raise ValueError("--height_segment_m must be positive.")
         if len(args_cli.height_cycle) < 2 or any(not 0.10 <= value <= 0.40 for value in args_cli.height_cycle):
             raise ValueError("--height_cycle needs at least two physical heights in [0.10, 0.40].")
+    if (
+        args_cli.profile_transition_margin_m is not None
+        and args_cli.profile_transition_margin_m < 0.0
+    ):
+        raise ValueError("--profile_transition_margin_m must be non-negative.")
     if args_cli.route_length_m is not None:
         if args_cli.route_length_m <= 0.0:
             raise ValueError("--route_length_m must be positive.")
@@ -851,6 +918,10 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             pts, yaws = build_random_polyline_path(
                 start_pos[i], start_quat[i], seed=args_cli.seed + s.repeat
             )
+        elif s.path_shape == "procedural":
+            pts, yaws = build_procedural_curvature_path(
+                start_pos[i], start_quat[i], seed=args_cli.seed + s.repeat
+            )
         else:
             raise ValueError(f"Unknown shape: {s.path_shape}")
         if args_cli.route_length_m is not None and replay_fragments is None:
@@ -885,7 +956,10 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         else:
             arc = cumulative_xy_lengths(pts)
             transition_arc = float(arc[-1] * s.transition_fraction)
-            pts[:, 2] = np.where(arc < transition_arc, 0.2932, 0.1705)
+            if s.transition_direction == "crouch_to_walk":
+                pts[:, 2] = np.where(arc < transition_arc, 0.1705, 0.2932)
+            else:
+                pts[:, 2] = np.where(arc < transition_arc, 0.2932, 0.1705)
         
         path_plans.append(
             PathPlan(
@@ -1274,6 +1348,17 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 profile_height_mae_tolerance_m=(
                     profile_height_mae_tolerance_m if profile_task_active else None
                 ),
+                path_heights_m=plan.path_w[:, 2] if profile_task_active else None,
+                profile_transition_margin_m=(
+                    float(args_cli.profile_transition_margin_m)
+                    if profile_task_active
+                    and args_cli.profile_transition_margin_m is not None
+                    else (
+                        float(dppo_task_config.get("transition_margin_m", 0.0))
+                        if profile_task_active and dppo_task_contract_version >= 5
+                        else 0.0
+                    )
+                ),
             ).to_dict()
 
         summary_rows.append({
@@ -1284,6 +1369,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             "requested_speed": s.speed,
             "requested_height": s.path_height if s.path_height is not None else math.nan,
             "transition_fraction": s.transition_fraction,
+            "transition_direction": s.transition_direction or "",
             "height_profile": args_cli.height_profile,
             "height_segment_m": args_cli.height_segment_m if args_cli.height_profile in {"interleaved", "random"} else math.nan,
             "height_schedule": (
@@ -1756,6 +1842,16 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         "speeds_evaluated": list(args_cli.speeds),
         "heights_evaluated": list(path_heights),
         "transition_fractions": list(args_cli.transition_fractions) if args_cli.transition_fractions is not None else [],
+        "transition_directions": args_cli.transition_directions,
+        "profile_transition_margin_m": (
+            float(args_cli.profile_transition_margin_m)
+            if args_cli.profile_transition_margin_m is not None
+            else (
+                float(dppo_task_config.get("transition_margin_m", 0.0))
+                if dppo_task_contract_version >= 5
+                else 0.0
+            )
+        ),
         "height_profile": args_cli.height_profile,
         "height_segment_m": args_cli.height_segment_m if args_cli.height_profile in {"interleaved", "random"} else None,
         "height_cycle": list(args_cli.height_cycle) if args_cli.height_profile in {"interleaved", "random"} else [],

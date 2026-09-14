@@ -346,6 +346,8 @@ def compute_first_task_success(
     start_position_xy: np.ndarray,
     target_heights_m: np.ndarray | None = None,
     profile_height_mae_tolerance_m: float | None = None,
+    path_heights_m: np.ndarray | None = None,
+    profile_transition_margin_m: float = 0.0,
     position_tolerance_m: float = 0.15,
     yaw_tolerance_rad: float = 0.40,
     height_tolerance_m: float = 0.05,
@@ -359,7 +361,9 @@ def compute_first_task_success(
     route speed are evaluated exactly once at that event, so arriving early
     and waiting at the endpoint cannot turn a failed attempt into success. If
     ``target_heights_m`` is supplied, the distance-weighted height-profile MAE
-    is accumulated up to first arrival exactly as in DPPO task contract v4.
+    is accumulated up to first arrival. For task contract v5,
+    ``path_heights_m`` and ``profile_transition_margin_m`` exclude the same
+    narrow spatial interval around discontinuous requirements as training.
     """
 
     positions = np.asarray(positions_xy, dtype=np.float64)
@@ -378,6 +382,19 @@ def compute_first_task_success(
             raise ValueError(
                 "profile_height_mae_tolerance_m is required with target_heights_m."
             )
+    path_heights = None
+    if path_heights_m is not None:
+        path_heights = np.asarray(path_heights_m, dtype=np.float64).reshape(-1)
+        if len(path_heights) != len(np.asarray(path_xy)):
+            raise ValueError("path_heights_m must have one value per path point.")
+        if target_heights is None:
+            raise ValueError("path_heights_m requires target_heights_m.")
+    if profile_transition_margin_m < 0.0:
+        raise ValueError("profile_transition_margin_m must be non-negative.")
+    if profile_transition_margin_m > 0.0 and path_heights is None:
+        raise ValueError(
+            "A positive profile_transition_margin_m requires path_heights_m."
+        )
     if (
         profile_height_mae_tolerance_m is not None
         and profile_height_mae_tolerance_m <= 0.0
@@ -448,6 +465,21 @@ def compute_first_task_success(
     if target_heights is not None:
         progress_delta = np.diff(np.concatenate(([0.0], progress))).clip(min=0.0)
         distance = progress_delta[: index + 1]
+        if path_heights is not None and profile_transition_margin_m > 0.0:
+            _, _, path_cumulative = _validate_polyline(path_xy)
+            change_indices = np.flatnonzero(np.abs(np.diff(path_heights)) > 1.0e-5) + 1
+            if change_indices.size:
+                absolute_progress = combined_progress[1 : index + 2]
+                distance_to_change = np.min(
+                    np.abs(
+                        absolute_progress[:, None]
+                        - path_cumulative[change_indices][None, :]
+                    ),
+                    axis=1,
+                )
+                distance = distance * (
+                    distance_to_change >= profile_transition_margin_m
+                ).astype(np.float64)
         distance_sum = float(np.sum(distance))
         if distance_sum <= 1.0e-6:
             profile_height_ok = False

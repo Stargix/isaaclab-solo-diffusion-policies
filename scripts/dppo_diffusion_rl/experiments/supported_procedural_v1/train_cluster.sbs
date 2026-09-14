@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+#SBATCH --job-name=dppo_spv1
+#SBATCH --output=/home/sflores/i2r/slurm_logs/slurm-%x-%j.out
+#SBATCH --error=/home/sflores/i2r/slurm_logs/slurm-%x-%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=50G
+#SBATCH --time=24:00:00
+#SBATCH --gres=gpu:lovelace:1
+
+set -Eeuo pipefail
+
+export EGL_VISIBLE_DEVICES=0
+export PHYSX_GPU_DEVICE=0
+export OMNI_KIT_GPU_ID=0
+
+if [[ -f "${HOME}/miniconda3/etc/profile.d/conda.sh" ]]; then
+  CONDA_SH="${HOME}/miniconda3/etc/profile.d/conda.sh"
+elif [[ -f "/etc/profile.d/conda.sh" ]]; then
+  CONDA_SH="/etc/profile.d/conda.sh"
+else
+  CONDA_SH="$(conda info --base)/etc/profile.d/conda.sh"
+fi
+set +eu
+source "${CONDA_SH}"
+conda activate env_isaaclab
+set -eu
+
+ISAACLAB_DIR="${HOME}/i2r/isaaclab-solo-diffusion-policies"
+cd "${ISAACLAB_DIR}"
+export PYTHONPATH="${ISAACLAB_DIR}:${PYTHONPATH:-}"
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export NCCL_P2P_DISABLE=1
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:1024
+export MALLOC_ARENA_MAX=1
+export TMPDIR="${HOME}/i2r/tmp"
+mkdir -p "${TMPDIR}"
+
+RUN_DIR="scripts/dppo_diffusion_rl/runs/dppo_wct_supported_procedural_v1"
+CHECKPOINT_PATH="${1:-scripts/diffusion_policy/runs/walk_crouch_sprint_hindsight_geom_profile16_a_wcs_v1_k10/best.pt}"
+if [[ ! -f "${CHECKPOINT_PATH}" ]]; then
+  FALLBACK="checkpoints_iri/checkpoints_dp/wct_diffusion_policy_baseline.pt"
+  if [[ -f "${FALLBACK}" ]]; then
+    CHECKPOINT_PATH="${FALLBACK}"
+  else
+    echo "Phase-A checkpoint not found: ${CHECKPOINT_PATH}" >&2
+    exit 2
+  fi
+fi
+
+echo "Using pure Phase-A checkpoint: ${CHECKPOINT_PATH}"
+nvidia-smi
+
+./isaaclab.sh -p scripts/dppo_diffusion_rl/train.py \
+  --checkpoint "${CHECKPOINT_PATH}" \
+  --require_phase_a_source \
+  --output_dir "${RUN_DIR}" \
+  --run_name dppo_wct_supported_procedural_v1 \
+  --route_distribution supported_procedural_v1 \
+  --route_speed_max_mps 0.8 \
+  --speed_budget_max_mps 1.2 \
+  --profile_height_reward_weight 0.75 \
+  --profile_height_mae_tolerance_m 0.04 \
+  --reference_kl_coef 0.0 \
+  --num_envs 4096 \
+  --iterations 150 \
+  --rollout_chunks 32 \
+  --save_interval 10 \
+  --seed 42 \
+  --headless \
+  --device cuda:0 \
+  --wandb

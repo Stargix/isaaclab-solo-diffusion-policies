@@ -17,6 +17,31 @@ which indices 8:12 are executed.
 The implementation follows [DPPO (Ren et al., ICLR 2025)](https://openreview.net/forum?id=mEpqHvbD2h)
 and its [official implementation](https://github.com/irom-princeton/dppo).
 
+## Definitive clean-start experiment (task contract v5)
+
+After the contract-v4 failures, the primary experiment no longer continues
+from Job 3471 or Job 3475. It starts from the pure schema-8 Phase-A checkpoint
+and uses the preregistered support-aware procedural distribution described in
+[`experiments/supported_procedural_v1/README.md`](experiments/supported_procedural_v1/README.md).
+This supersedes the operational recommendations later in this document; those
+sections remain as an audit trail of earlier experiments.
+
+The decisive change is experimental identifiability. Previous runs altered
+geometry, speed range and height support together, then attempted to repair an
+actor already changed by that objective. Contract v5 instead randomizes smooth
+geometry continuously while balancing four interpretable posture conditions:
+constant walk, constant crouch and both single-transition directions. Targets
+use only demonstrated posture endpoints. A 0.25 m spatial margin around the
+discontinuous boundary is excluded from plateau-height scoring, but the actor
+still receives the unmodified preview and controls every joint action. This
+tests learned anticipation without a handcrafted transition controller.
+
+The direct Phase-A start, original DPPO optimizer, finite 150-iteration budget
+and 0.75 per-metre posture weight each remove one unsupported intervention.
+The fast expert is not named or rewarded. Its use can only emerge where the
+task-level average-speed and geometry objective makes it useful, preserving
+the original research claim.
+
 ## Starting checkpoints and their real limitations
 
 The profile16 experiment starts directly from

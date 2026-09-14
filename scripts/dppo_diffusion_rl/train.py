@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -38,6 +39,15 @@ parser.add_argument(
 )
 parser.add_argument("--route_stage", type=int, choices=(0, 1, 2), default=2)
 parser.add_argument(
+    "--route_distribution",
+    choices=("legacy", "supported_procedural_v1"),
+    default="legacy",
+    help=(
+        "legacy preserves prior experiments; supported_procedural_v1 samples a new "
+        "smooth route per episode and only supported walk/crouch posture profiles."
+    ),
+)
+parser.add_argument(
     "--height_profile_stage",
     type=int,
     choices=(0, 1, 2),
@@ -62,6 +72,11 @@ parser.add_argument(
         "Keep a DPPO actor as a warm start but reset iteration, critic and Adam states. "
         "Required when migrating a legacy checkpoint to the first-arrival task contract."
     ),
+)
+parser.add_argument(
+    "--require_phase_a_source",
+    action="store_true",
+    help="Reject a DPPO checkpoint: the run must start directly from pure imitation learning.",
 )
 parser.add_argument(
     "--speed_budget_max_mps",
@@ -185,6 +200,10 @@ def main() -> None:
         checkpoint_path, requested_device, dppo_cfg
     )
     goal_representation = checkpoint_goal_representation(source_checkpoint)
+    if args_cli.require_phase_a_source and source_checkpoint.get("algorithm") == "dppo":
+        raise ValueError(
+            "--require_phase_a_source was set, but --checkpoint is already a DPPO checkpoint."
+        )
 
     env_cfg = parse_env_cfg(
         args_cli.task,
@@ -202,6 +221,7 @@ def main() -> None:
     env_cfg.profile_height_reward_weight = float(
         args_cli.profile_height_reward_weight
     )
+    env_cfg.route_distribution = args_cli.route_distribution
     env_cfg.route_stage = int(args_cli.route_stage)
     env_cfg.height_profile_stage = args_cli.height_profile_stage
     env_cfg.route_speed_max_mps = args_cli.route_speed_max_mps
@@ -232,6 +252,7 @@ def main() -> None:
             source_checkpoint,
             {
                 "goal_representation": goal_representation,
+                "route_distribution": env_cfg.route_distribution,
                 "speed_budget_max_mps": float(env_cfg.speed_budget_max_mps),
                 "route_stage": int(env_cfg.route_stage),
                 "height_profile_stage": (
@@ -247,6 +268,13 @@ def main() -> None:
                 "profile_height_reward_weight": float(
                     env_cfg.profile_height_reward_weight
                 ),
+                "procedural_curvature_knots": int(env_cfg.procedural_curvature_knots),
+                "procedural_max_curvature_rad_m": float(
+                    env_cfg.procedural_max_curvature_rad_m
+                ),
+                "transition_boundary_min_m": float(env_cfg.transition_boundary_min_m),
+                "transition_boundary_max_m": float(env_cfg.transition_boundary_max_m),
+                "transition_margin_m": float(env_cfg.transition_margin_m),
             },
         )
     if args_cli.restart_optimization:
@@ -337,5 +365,11 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
+    except BaseException:
+        # Isaac Sim shutdown can terminate the process before Python renders
+        # an unhandled exception. Emit it first so cluster failures are never
+        # reported as an empty, successful-looking launch.
+        traceback.print_exc()
+        raise
     finally:
         simulation_app.close()
