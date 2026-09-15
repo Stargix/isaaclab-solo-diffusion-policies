@@ -134,6 +134,19 @@ class RouteMetricsTest(unittest.TestCase):
         np.testing.assert_allclose(truncated[-1], [1.0, 1.0, 0.25], atol=1.0e-6)
         self.assertAlmostEqual(float(yaws[-1]), np.pi / 2.0, places=6)
 
+    def test_truncate_path_at_float32_vertex_does_not_duplicate_endpoint(self) -> None:
+        # Reproduces procedural routes with 4 cm spacing cut at exactly 4 m.
+        x = np.arange(251, dtype=np.float32) * np.float32(0.04)
+        path = np.column_stack((x, np.zeros_like(x), np.full_like(x, 0.2932)))
+        truncated, yaws = truncate_path_to_arc_length(
+            path, np.zeros(len(path), dtype=np.float32), 4.0
+        )
+
+        segment_lengths = np.linalg.norm(np.diff(truncated[:, :2], axis=0), axis=1)
+        self.assertTrue(np.all(segment_lengths > 1.0e-9))
+        self.assertAlmostEqual(float(truncated[-1, 0]), 4.0, places=6)
+        self.assertEqual(len(truncated), len(yaws))
+
     def test_task_success_requires_joint_terminal_constraints(self) -> None:
         positions = np.asarray([[0.25, 0.0], [0.5, 0.0], [0.75, 0.0], [1.0, 0.0]])
         result = compute_first_task_success(

@@ -161,6 +161,24 @@ def truncate_path_to_arc_length(
         return path.copy(), yaws.copy()
     upper = int(np.clip(np.searchsorted(arc, length_m, side="left"), 1, len(path) - 1))
     lower = upper - 1
+    # Float32 path coordinates can place a requested cut infinitesimally past
+    # an existing vertex. Interpolating in that case and appending the result
+    # duplicates ``path[lower]``, creating a zero-length terminal segment.
+    # Preserve the existing vertex instead; downstream projection deliberately
+    # rejects degenerate polylines.
+    if abs(length_m - float(arc[lower])) <= 1.0e-6:
+        truncated_path = path[: lower + 1].copy()
+        truncated_yaws = yaws[: lower + 1].copy()
+        if lower > 0:
+            segment = path[lower, :2] - path[lower - 1, :2]
+            truncated_yaws[-1] = np.arctan2(segment[1], segment[0])
+        return truncated_path, truncated_yaws
+    if abs(float(arc[upper]) - length_m) <= 1.0e-6:
+        truncated_path = path[: upper + 1].copy()
+        truncated_yaws = yaws[: upper + 1].copy()
+        segment = path[upper, :2] - path[upper - 1, :2]
+        truncated_yaws[-1] = np.arctan2(segment[1], segment[0])
+        return truncated_path, truncated_yaws
     segment_length = max(float(arc[upper] - arc[lower]), 1.0e-8)
     alpha = float((length_m - arc[lower]) / segment_length)
     terminal = path[lower] + alpha * (path[upper] - path[lower])

@@ -86,6 +86,10 @@ fallback. `--require_phase_a_source` aborts if either file is actually DPPO.
 
 ## Held-out evaluation
 
+The exact cross-generation protocol, the distinction between primary and OOD
+tests, and the local three-checkpoint screen are recorded in
+[`COMPARABLE_EVALUATION.md`](COMPARABLE_EVALUATION.md).
+
 Select `best.pt`, but report it against the untouched Phase-A checkpoint with
 the same seeds. Use at least 50 independent procedural route draws and both
 transition directions. Also retain straight, S, circle, right-angle and random
