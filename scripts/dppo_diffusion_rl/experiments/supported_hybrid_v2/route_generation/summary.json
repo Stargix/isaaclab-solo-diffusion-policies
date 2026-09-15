@@ -1,0 +1,62 @@
+{
+  "seed": 20260916,
+  "samples": 1200,
+  "geometry_counts": {
+    "smooth total": 600,
+    "rounded waypoints": 300,
+    "hard waypoints": 300
+  },
+  "smooth_subclass_counts": {
+    "smooth v1": 300,
+    "coherent smooth": 300
+  },
+  "profile_x_geometry_counts": {
+    "0": {
+      "smooth total": 150,
+      "rounded waypoints": 75,
+      "hard waypoints": 75
+    },
+    "1": {
+      "smooth total": 150,
+      "rounded waypoints": 75,
+      "hard waypoints": 75
+    },
+    "2": {
+      "smooth total": 150,
+      "rounded waypoints": 75,
+      "hard waypoints": 75
+    },
+    "3": {
+      "smooth total": 150,
+      "rounded waypoints": 75,
+      "hard waypoints": 75
+    }
+  },
+  "route_length_m": 4.0,
+  "endpoint_distance_m": {
+    "min": 1.4973703622817993,
+    "median": 3.7629129886627197,
+    "max": 3.9999966621398926
+  },
+  "waypoint_turn_abs_deg": {
+    "min": 15.0831937789917,
+    "median": 49.95237731933594,
+    "max": 89.99495697021484
+  },
+  "waypoint_max_abs_heading_deg": 134.8032989501953,
+  "waypoint_segment_length_m": {
+    "min": 0.550510048866272,
+    "max": 3.4428234100341797
+  },
+  "waypoint_segment_count": {
+    "2": 165,
+    "3": 150,
+    "4": 144,
+    "5": 141
+  },
+  "coherent_target_peak_curvature_rad_m": {
+    "min": 0.2503795027732849,
+    "median": 0.5224615335464478,
+    "max": 0.7988744974136353
+  }
+}

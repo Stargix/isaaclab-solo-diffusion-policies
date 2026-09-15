@@ -15,6 +15,7 @@ from scripts.diffusion_policy.train.data.obs_utils import proprio_from_env_tenso
 from scripts.residual_diffusion_rl.routes import RouteBank, RouteState
 
 from .conditioning import remaining_speed_budget
+from .hybrid_routes import HYBRID_ROUTE_CONTRACT_VERSION, SupportedHybridRouteBank
 from .procedural_routes import SupportedProceduralRouteBank
 from .rewards import (
     TaskRewardWeights,
@@ -26,6 +27,10 @@ from .rewards import (
 
 
 CRITIC_FEATURE_DIM = 14
+SUPPORTED_ROUTE_DISTRIBUTIONS = {
+    "supported_procedural_v1",
+    "supported_hybrid_v2",
+}
 
 
 class DPPODiffusionEnvCfg(Solo12EnvCfg):
@@ -38,6 +43,7 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
     route_distribution: str = "legacy"
     procedural_curvature_knots: int = 6
     procedural_max_curvature_rad_m: float = 0.8
+    hybrid_route_contract_version: int = HYBRID_ROUTE_CONTRACT_VERSION
     transition_boundary_min_m: float = 1.6
     transition_boundary_max_m: float = 2.4
     transition_margin_m: float = 0.25
@@ -84,9 +90,11 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
 
         if self.route_stage not in (0, 1, 2):
             raise ValueError("route_stage must be 0, 1 or 2.")
-        if self.route_distribution not in {"legacy", "supported_procedural_v1"}:
+        valid_distributions = {"legacy", *SUPPORTED_ROUTE_DISTRIBUTIONS}
+        if self.route_distribution not in valid_distributions:
             raise ValueError(
-                "route_distribution must be 'legacy' or 'supported_procedural_v1'."
+                "route_distribution must be 'legacy', 'supported_procedural_v1' "
+                "or 'supported_hybrid_v2'."
             )
         if self.height_profile_stage is not None and self.height_profile_stage not in (0, 1, 2):
             raise ValueError("height_profile_stage must be 0, 1, 2 or None.")
@@ -110,7 +118,7 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
         if sampled_speed_max is None:
             sampled_speed_max = (
                 0.8
-                if self.route_distribution == "supported_procedural_v1"
+                if self.route_distribution in SUPPORTED_ROUTE_DISTRIBUTIONS
                 else 0.4 if self.route_stage <= 0 else 0.5 if self.route_stage == 1 else 0.6
             )
         if sampled_speed_max > self.speed_budget_max_mps:
@@ -123,23 +131,24 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
             raise ValueError("profile_height_mae_tolerance_m must be positive.")
         if self.profile_height_reward_weight <= 0.0:
             raise ValueError("profile_height_reward_weight must be positive.")
-        if self.route_distribution == "supported_procedural_v1":
+        if self.route_distribution in SUPPORTED_ROUTE_DISTRIBUTIONS:
+            distribution_name = self.route_distribution
             if self.goal_representation != "hindsight_geom_profile16":
                 raise ValueError(
-                    "supported_procedural_v1 requires the schema-8 height-profile actor."
+                    f"{distribution_name} requires the schema-8 height-profile actor."
                 )
             if self.height_profile_stage is not None:
                 raise ValueError(
-                    "supported_procedural_v1 owns its support-aware height distribution; "
+                    f"{distribution_name} owns its support-aware height distribution; "
                     "do not combine it with --height_profile_stage."
                 )
             if self.route_length_m != 4.0:
                 raise ValueError(
-                    "supported_procedural_v1 is preregistered for 4.0 m routes."
+                    f"{distribution_name} is preregistered for 4.0 m routes."
                 )
             if sampled_speed_max > 1.2:
                 raise ValueError(
-                    "supported_procedural_v1 is bounded by the audited 1.2 m/s fast envelope."
+                    f"{distribution_name} is bounded by the audited 1.2 m/s fast envelope."
                 )
             if not (
                 0.0
@@ -150,6 +159,14 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
                 raise ValueError("Invalid supported-profile transition boundary range.")
             if self.transition_margin_m < 0.0:
                 raise ValueError("transition_margin_m must be non-negative.")
+        if (
+            self.route_distribution == "supported_hybrid_v2"
+            and self.hybrid_route_contract_version != HYBRID_ROUTE_CONTRACT_VERSION
+        ):
+            raise ValueError(
+                "supported_hybrid_v2 requires hybrid route contract version "
+                f"{HYBRID_ROUTE_CONTRACT_VERSION}."
+            )
 
 
 class DPPODiffusionEnv(Solo12Env):
@@ -162,7 +179,19 @@ class DPPODiffusionEnv(Solo12Env):
         # here so an impossible actor/reward contract cannot reach simulation.
         cfg.validate_task()
         super().__init__(cfg, render_mode, **kwargs)
-        if cfg.route_distribution == "supported_procedural_v1":
+        if cfg.route_distribution == "supported_hybrid_v2":
+            self._routes = SupportedHybridRouteBank(
+                self.num_envs,
+                self.device,
+                points=cfg.route_points,
+                length_m=cfg.route_length_m,
+                curvature_knots=cfg.procedural_curvature_knots,
+                max_curvature_rad_m=cfg.procedural_max_curvature_rad_m,
+                transition_boundary_min_m=cfg.transition_boundary_min_m,
+                transition_boundary_max_m=cfg.transition_boundary_max_m,
+                transition_margin_m=cfg.transition_margin_m,
+            )
+        elif cfg.route_distribution == "supported_procedural_v1":
             self._routes = SupportedProceduralRouteBank(
                 self.num_envs,
                 self.device,
@@ -230,7 +259,7 @@ class DPPODiffusionEnv(Solo12Env):
         self._update_route_and_goal()
 
     def _reset_routes(self, env_ids: torch.Tensor) -> None:
-        if self.cfg.route_distribution == "supported_procedural_v1":
+        if self.cfg.route_distribution in SUPPORTED_ROUTE_DISTRIBUTIONS:
             self._routes.reset(
                 env_ids,
                 stratified=self.cfg.stratified_route_sampling,

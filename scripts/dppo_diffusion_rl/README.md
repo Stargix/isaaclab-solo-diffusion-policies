@@ -16,15 +16,16 @@ a physical transition without changing DPPO's likelihood mathematics.
 
 ## Train
 
-The current primary experiment is documented and launched from
+The audited smooth baseline is documented in
 [`experiments/supported_procedural_v1`](experiments/supported_procedural_v1/README.md).
-It starts directly from the pure Phase-A WCT imitation checkpoint, samples a
-new continuous-curvature route on every reset, and commands only supported
-walk/crouch height endpoints in balanced constant and bidirectional-transition
-profiles:
+The next controlled geometry expansion is
+[`experiments/supported_hybrid_v2`](experiments/supported_hybrid_v2/README.md).
+Both start directly from the same pure Phase-A WCT imitation checkpoint and
+command only supported walk/crouch height endpoints in balanced constant and
+bidirectional-transition profiles. V2 changes only route geometry:
 
 ```bash
-sbatch scripts/dppo_diffusion_rl/experiments/supported_procedural_v1/train_cluster.sbs
+sbatch scripts/dppo_diffusion_rl/experiments/supported_hybrid_v2/train_cluster.sbs
 ```
 
 It deliberately does not use `--restart_optimization`: Phase A has no PPO

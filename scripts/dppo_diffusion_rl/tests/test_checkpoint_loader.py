@@ -132,3 +132,25 @@ def test_optimizer_resume_rejects_changed_height_distribution() -> None:
 def test_legacy_height_stage_is_inferred_from_route_stage() -> None:
     config = {"route_stage": 1, "route_speed_max_mps": 0.5}
     validate_resume_task_config({"dppo_task_config": config}, config)
+
+
+def test_supported_hybrid_resume_preserves_owned_height_distribution() -> None:
+    config = {
+        "route_distribution": "supported_hybrid_v2",
+        "route_stage": 2,
+        "height_profile_stage": None,
+        "hybrid_route_contract_version": 1,
+    }
+    validate_resume_task_config({"dppo_task_config": config}, config)
+
+
+def test_supported_hybrid_resume_rejects_changed_generator_contract() -> None:
+    saved = {
+        "route_distribution": "supported_hybrid_v2",
+        "route_stage": 2,
+        "height_profile_stage": None,
+        "hybrid_route_contract_version": 1,
+    }
+    requested = {**saved, "hybrid_route_contract_version": 2}
+    with pytest.raises(ValueError, match="hybrid_route_contract_version"):
+        validate_resume_task_config({"dppo_task_config": saved}, requested)

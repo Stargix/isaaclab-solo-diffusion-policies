@@ -40,11 +40,13 @@ parser.add_argument(
 parser.add_argument("--route_stage", type=int, choices=(0, 1, 2), default=2)
 parser.add_argument(
     "--route_distribution",
-    choices=("legacy", "supported_procedural_v1"),
+    choices=("legacy", "supported_procedural_v1", "supported_hybrid_v2"),
     default="legacy",
     help=(
         "legacy preserves prior experiments; supported_procedural_v1 samples a new "
-        "smooth route per episode and only supported walk/crouch posture profiles."
+        "smooth route per episode; supported_hybrid_v2 uses the audited 25/25/25/25 "
+        "smooth-v1/coherent-smooth/rounded-waypoint/hard-waypoint distribution. "
+        "Both supported variants use only supported walk/crouch posture profiles."
     ),
 )
 parser.add_argument(
@@ -55,7 +57,8 @@ parser.add_argument(
     help=(
         "Height curriculum independent of route geometry: 0 constant walk/crouch, "
         "1 section-wise walk/crouch, 2 section-wise four-level profile. "
-        "Defaults to --route_stage for backward compatibility."
+        "Defaults to --route_stage for legacy routes. Supported route distributions "
+        "own their height-profile sampling and therefore require this to remain unset."
     ),
 )
 parser.add_argument(
@@ -248,34 +251,40 @@ def main() -> None:
         source_checkpoint, restart_optimization=args_cli.restart_optimization
     )
     if restore_optimization:
+        requested_task_config = {
+            "goal_representation": goal_representation,
+            "route_distribution": env_cfg.route_distribution,
+            "speed_budget_max_mps": float(env_cfg.speed_budget_max_mps),
+            "route_stage": int(env_cfg.route_stage),
+            "height_profile_stage": (
+                int(env_cfg.route_stage)
+                if env_cfg.route_distribution == "legacy"
+                and env_cfg.height_profile_stage is None
+                else env_cfg.height_profile_stage
+            ),
+            "route_speed_max_mps": env_cfg.route_speed_max_mps,
+            "episode_length_s": float(env_cfg.episode_length_s),
+            "profile_height_mae_tolerance_m": float(
+                env_cfg.profile_height_mae_tolerance_m
+            ),
+            "profile_height_reward_weight": float(
+                env_cfg.profile_height_reward_weight
+            ),
+            "procedural_curvature_knots": int(env_cfg.procedural_curvature_knots),
+            "procedural_max_curvature_rad_m": float(
+                env_cfg.procedural_max_curvature_rad_m
+            ),
+            "transition_boundary_min_m": float(env_cfg.transition_boundary_min_m),
+            "transition_boundary_max_m": float(env_cfg.transition_boundary_max_m),
+            "transition_margin_m": float(env_cfg.transition_margin_m),
+        }
+        if env_cfg.route_distribution == "supported_hybrid_v2":
+            requested_task_config["hybrid_route_contract_version"] = int(
+                env_cfg.hybrid_route_contract_version
+            )
         validate_resume_task_config(
             source_checkpoint,
-            {
-                "goal_representation": goal_representation,
-                "route_distribution": env_cfg.route_distribution,
-                "speed_budget_max_mps": float(env_cfg.speed_budget_max_mps),
-                "route_stage": int(env_cfg.route_stage),
-                "height_profile_stage": (
-                    env_cfg.height_profile_stage
-                    if env_cfg.height_profile_stage is not None
-                    else int(env_cfg.route_stage)
-                ),
-                "route_speed_max_mps": env_cfg.route_speed_max_mps,
-                "episode_length_s": float(env_cfg.episode_length_s),
-                "profile_height_mae_tolerance_m": float(
-                    env_cfg.profile_height_mae_tolerance_m
-                ),
-                "profile_height_reward_weight": float(
-                    env_cfg.profile_height_reward_weight
-                ),
-                "procedural_curvature_knots": int(env_cfg.procedural_curvature_knots),
-                "procedural_max_curvature_rad_m": float(
-                    env_cfg.procedural_max_curvature_rad_m
-                ),
-                "transition_boundary_min_m": float(env_cfg.transition_boundary_min_m),
-                "transition_boundary_max_m": float(env_cfg.transition_boundary_max_m),
-                "transition_margin_m": float(env_cfg.transition_margin_m),
-            },
+            requested_task_config,
         )
     if args_cli.restart_optimization:
         # A new task contract is a new optimization run.  Anchor conservative

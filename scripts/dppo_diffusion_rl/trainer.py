@@ -339,6 +339,43 @@ class DPPOTrainer:
             self.logger.log(record, step=iteration)
 
     def _save(self, filename: str, iteration: int, metrics: dict[str, float]) -> None:
+        task_config = {
+            "goal_representation": self.raw_env.cfg.goal_representation,
+            "route_distribution": self.raw_env.cfg.route_distribution,
+            "speed_budget_max_mps": float(self.raw_env.cfg.speed_budget_max_mps),
+            "route_stage": int(self.raw_env.cfg.route_stage),
+            "height_profile_stage": (
+                int(self.raw_env.cfg.route_stage)
+                if self.raw_env.cfg.route_distribution == "legacy"
+                and self.raw_env.cfg.height_profile_stage is None
+                else self.raw_env.cfg.height_profile_stage
+            ),
+            "route_speed_max_mps": self.raw_env.cfg.route_speed_max_mps,
+            "episode_length_s": float(self.raw_env.cfg.episode_length_s),
+            "profile_height_mae_tolerance_m": float(
+                self.raw_env.cfg.profile_height_mae_tolerance_m
+            ),
+            "profile_height_reward_weight": float(
+                self.raw_env.cfg.profile_height_reward_weight
+            ),
+            "procedural_curvature_knots": int(
+                self.raw_env.cfg.procedural_curvature_knots
+            ),
+            "procedural_max_curvature_rad_m": float(
+                self.raw_env.cfg.procedural_max_curvature_rad_m
+            ),
+            "transition_boundary_min_m": float(
+                self.raw_env.cfg.transition_boundary_min_m
+            ),
+            "transition_boundary_max_m": float(
+                self.raw_env.cfg.transition_boundary_max_m
+            ),
+            "transition_margin_m": float(self.raw_env.cfg.transition_margin_m),
+        }
+        if self.raw_env.cfg.route_distribution == "supported_hybrid_v2":
+            task_config["hybrid_route_contract_version"] = int(
+                self.raw_env.cfg.hybrid_route_contract_version
+            )
         save_checkpoint(
             self.output_dir / filename,
             source_checkpoint=self.source_checkpoint,
@@ -350,34 +387,7 @@ class DPPOTrainer:
             total_physics_steps=self.total_physics_steps,
             metrics=metrics,
             best_score=self.best_score,
-            task_config={
-                "goal_representation": self.raw_env.cfg.goal_representation,
-                "route_distribution": self.raw_env.cfg.route_distribution,
-                "speed_budget_max_mps": float(self.raw_env.cfg.speed_budget_max_mps),
-                "route_stage": int(self.raw_env.cfg.route_stage),
-                "height_profile_stage": self.raw_env.cfg.height_profile_stage,
-                "route_speed_max_mps": self.raw_env.cfg.route_speed_max_mps,
-                "episode_length_s": float(self.raw_env.cfg.episode_length_s),
-                "profile_height_mae_tolerance_m": float(
-                    self.raw_env.cfg.profile_height_mae_tolerance_m
-                ),
-                "profile_height_reward_weight": float(
-                    self.raw_env.cfg.profile_height_reward_weight
-                ),
-                "procedural_curvature_knots": int(
-                    self.raw_env.cfg.procedural_curvature_knots
-                ),
-                "procedural_max_curvature_rad_m": float(
-                    self.raw_env.cfg.procedural_max_curvature_rad_m
-                ),
-                "transition_boundary_min_m": float(
-                    self.raw_env.cfg.transition_boundary_min_m
-                ),
-                "transition_boundary_max_m": float(
-                    self.raw_env.cfg.transition_boundary_max_m
-                ),
-                "transition_margin_m": float(self.raw_env.cfg.transition_margin_m),
-            },
+            task_config=task_config,
         )
 
     def run(self, iterations: int) -> None:
