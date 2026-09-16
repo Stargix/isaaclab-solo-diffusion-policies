@@ -1869,7 +1869,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 )
         plotted = True
     if plotted:
-        ax.set_title(f"Height tracking: {reference_shape}, {reference_speed:.1f} m/s")
+        ax.set_title(f"Height tracking: {reference_shape}, {reference_speed:.2f} m/s")
         ax.set_xlabel("Time [s]")
         ax.set_ylabel("Base height [m]")
         ax.axhline(0.2932, color="#888888", linewidth=0.8, alpha=0.5)
@@ -1889,7 +1889,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                     and (requested_height is None or r["requested_height"] == requested_height)]
             values.append(float(np.nanmean(rows)) if rows else np.nan)
         ax.bar(x + (speed_index - (len(speeds_list) - 1) / 2) * width, values,
-               width=width, label=f"{speed:.1f} m/s")
+               width=width, label=f"{speed:.2f} m/s")
     labels = []
     for requested_height, fraction in height_conditions:
         if args_cli.height_profile in {"interleaved", "random"}:

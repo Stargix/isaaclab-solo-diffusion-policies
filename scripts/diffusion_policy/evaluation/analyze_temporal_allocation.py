@@ -189,20 +189,59 @@ def main() -> None:
     import matplotlib.pyplot as plt
 
     fig, axes = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
-    for i, scenario in enumerate(metadata["scenarios"]):
-        mask = valid[:, i]
-        label = f"{scenario['path_shape']} r{scenario['repeat']} ({requested[i]:.1f} m/s)"
-        axes[0].plot(progress[:, i][mask], speed[:, i][mask], alpha=0.75, linewidth=1.0, label=label)
-        axes[1].plot(progress[:, i][mask], schedule_error[mask, i], alpha=0.75, linewidth=1.0, label=label)
-    axes[0].axhline(float(np.mean(requested)), color="black", linestyle="--", linewidth=1.0, label="requested")
+    unique_speeds = np.unique(requested)
+    colors = plt.get_cmap("tab10")(np.linspace(0.0, 0.8, max(len(unique_speeds), 1)))
+    for requested_speed, color in zip(unique_speeds, colors):
+        speed_rows = [
+            row for row in rows
+            if np.isclose(float(row["requested_speed_m_s"]), requested_speed)
+        ]
+        segment_starts = sorted({float(row["progress_start_m"]) for row in speed_rows})
+        centers: list[float] = []
+        speed_median: list[float] = []
+        speed_low: list[float] = []
+        speed_high: list[float] = []
+        slack_median: list[float] = []
+        slack_low: list[float] = []
+        slack_high: list[float] = []
+        for start in segment_starts:
+            segment_rows = [
+                row for row in speed_rows
+                if np.isclose(float(row["progress_start_m"]), start)
+            ]
+            segment_speed = np.asarray(
+                [row["tangent_speed_mean_m_s"] for row in segment_rows], dtype=np.float64
+            )
+            segment_slack = np.asarray(
+                [row["schedule_error_mean_m"] for row in segment_rows], dtype=np.float64
+            )
+            segment_speed = segment_speed[np.isfinite(segment_speed)]
+            segment_slack = segment_slack[np.isfinite(segment_slack)]
+            if not segment_speed.size or not segment_slack.size:
+                continue
+            centers.append(start + 0.5 * args.segment_m)
+            speed_low.append(float(np.quantile(segment_speed, 0.1)))
+            speed_median.append(float(np.median(segment_speed)))
+            speed_high.append(float(np.quantile(segment_speed, 0.9)))
+            slack_low.append(float(np.quantile(segment_slack, 0.1)))
+            slack_median.append(float(np.median(segment_slack)))
+            slack_high.append(float(np.quantile(segment_slack, 0.9)))
+        if not centers:
+            continue
+        label = f"{requested_speed:.2f} m/s"
+        axes[0].plot(centers, speed_median, color=color, linewidth=2.0, label=label)
+        axes[0].fill_between(centers, speed_low, speed_high, color=color, alpha=0.16)
+        axes[0].axhline(requested_speed, color=color, linestyle="--", linewidth=1.0, alpha=0.8)
+        axes[1].plot(centers, slack_median, color=color, linewidth=2.0, label=label)
+        axes[1].fill_between(centers, slack_low, slack_high, color=color, alpha=0.16)
     axes[0].set_ylabel("Tangent speed [m/s]")
     axes[1].axhline(0.0, color="black", linestyle="--", linewidth=1.0)
     axes[1].set_ylabel("Schedule error [m]")
     axes[1].set_xlabel("Route progress [m]")
-    axes[0].set_title("Local speed allocation and temporal slack")
+    axes[0].set_title("Route-progress profiles (median and 10–90% across routes)")
     axes[0].grid(alpha=0.25)
     axes[1].grid(alpha=0.25)
-    axes[0].legend(fontsize=8, ncol=2)
+    axes[0].legend(title="Requested mean speed", fontsize=8, ncol=min(3, len(unique_speeds)))
     fig.tight_layout()
     fig.savefig(args.trace_dir / "temporal_allocation.png", dpi=180)
     plt.close(fig)
