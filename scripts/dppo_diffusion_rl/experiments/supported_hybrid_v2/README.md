@@ -79,3 +79,47 @@ sbatch scripts/dppo_diffusion_rl/experiments/supported_hybrid_v2/train_cluster.s
 Output is written to
 `scripts/dppo_diffusion_rl/runs/dppo_wct_supported_hybrid_v2`. The launcher
 and trainer refuse to overwrite a populated run directory.
+
+## Evaluation protocol
+
+The primary evaluation must sample all four generator families rather than
+only the legacy `procedural` one.  The evaluator exposes the registered
+families as `procedural`, `coherent_smooth`, `rounded_waypoint` and
+`hard_waypoint`; the latter three require `--route_length_m 4.0`, matching the
+training contract.  Run the following on the cluster for the reported ID
+result.  It has 3,600 vectorised conditions (50 independent geometry draws
+per family); omit `--save_timeseries` to keep the final artifact compact.
+
+```bash
+./isaaclab.sh -p scripts/diffusion_policy/evaluate_policy.py \
+  --checkpoint scripts/dppo_diffusion_rl/runs/dppo_wct_supported_hybrid_v2/best.pt \
+  --output_dir scripts/dppo_diffusion_rl/evaluations/dppo_wct_supported_hybrid_v2_id \
+  --speeds 0.2 0.35 0.45 \
+  --path_shapes procedural coherent_smooth rounded_waypoint hard_waypoint \
+  --route_length_m 4.0 --transition_fractions 0.4 0.5 0.6 \
+  --transition_directions both --profile_transition_margin_m 0.25 \
+  --repeats 50 --duration_s 24.0 --num_inference_steps 10 --exec_horizon 4 \
+  --seed 142 --headless --require_empty_output_dir --device cuda:0
+```
+
+Report task success (the v5 15 cm arrival contract), survival through the
+full evaluator horizon, the stricter diagnostic `route_arrival_rate` (10 cm),
+speed-ratio error, profile-height MAE and cross-track RMSE.  A policy may
+complete the task and subsequently fall because the generic evaluator keeps
+rolling after first success; those are distinct first-arrival and
+post-arrival-stability outcomes, not contradictory labels.
+
+Use legacy templates only as a separately labelled transfer test.  They are
+not part of the hybrid generator and must not be averaged into the ID score:
+
+```bash
+./isaaclab.sh -p scripts/diffusion_policy/evaluate_policy.py \
+  --checkpoint scripts/dppo_diffusion_rl/runs/dppo_wct_supported_hybrid_v2/best.pt \
+  --output_dir scripts/dppo_diffusion_rl/evaluations/dppo_wct_supported_hybrid_v2_legacy_ood \
+  --speeds 0.2 0.35 0.45 \
+  --path_shapes straight circle s_curve right_angle random_polyline \
+  --route_length_m 4.0 --transition_fractions 0.4 0.6 \
+  --transition_directions both --profile_transition_margin_m 0.25 \
+  --repeats 3 --duration_s 24.0 --num_inference_steps 10 --exec_horizon 4 \
+  --seed 542 --headless --require_empty_output_dir --device cuda:0
+```

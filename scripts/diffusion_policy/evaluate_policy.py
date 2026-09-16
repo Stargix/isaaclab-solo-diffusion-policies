@@ -37,9 +37,23 @@ parser.add_argument(
     "--path_shapes",
     type=str,
     nargs="+",
-    choices=("straight", "circle", "s_curve", "right_angle", "random_polyline", "procedural"),
+    choices=(
+        "straight",
+        "circle",
+        "s_curve",
+        "right_angle",
+        "random_polyline",
+        "procedural",
+        "coherent_smooth",
+        "rounded_waypoint",
+        "hard_waypoint",
+    ),
     default=("straight", "circle", "s_curve", "right_angle", "random_polyline"),
-    help="Path families to evaluate. New non-smooth families expose corner and polyline generalization.",
+    help=(
+        "Path families to evaluate. procedural is the smooth-v1 generator; "
+        "coherent_smooth, rounded_waypoint and hard_waypoint reproduce the "
+        "three additional supported_hybrid_v2 geometry families at 4 m."
+    ),
 )
 parser.add_argument("--repeats", type=int, default=3, help="Stochastic repeats per scenario condition.")
 parser.add_argument("--duration_s", type=float, default=50.0)
@@ -160,6 +174,10 @@ from evaluation.plots import plot_route_outcomes
 from train.config import resolve_inference_steps
 from train.data.obs_utils import proprio_from_env_tensors
 from train.runtime.checkpoint import load_training_checkpoint
+from scripts.dppo_diffusion_rl.hybrid_routes import (
+    sample_coherent_smooth_geometry,
+    sample_waypoint_geometry,
+)
 
 
 @dataclass
@@ -438,6 +456,44 @@ def build_procedural_curvature_path(
     start_yaw = robot_yaw_w(start_quat)
     rotation = np.asarray(
         [[np.cos(start_yaw), -np.sin(start_yaw)], [np.sin(start_yaw), np.cos(start_yaw)]]
+    )
+    world_xy = start_pos[:2] + local_xy @ rotation.T
+    path = np.column_stack((world_xy, np.full(len(world_xy), 0.2932)))
+    return path.astype(np.float32), (start_yaw + local_yaw).astype(np.float32)
+
+
+def build_supported_hybrid_path(
+    start_pos: np.ndarray,
+    start_quat: np.ndarray,
+    *,
+    family: str,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Draw one 4 m path from a non-v1 `supported_hybrid_v2` family.
+
+    The train bank runs on Torch tensors, while this evaluator builds one
+    analytic path per vectorized scenario.  Forking the CPU RNG makes the
+    geometry depend only on the declared seed/repeat rather than scenario
+    order, and does not perturb policy sampling.
+    """
+
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(int(seed))
+        if family == "coherent_smooth":
+            geometry = sample_coherent_smooth_geometry(1, "cpu")
+        elif family == "rounded_waypoint":
+            geometry = sample_waypoint_geometry(1, "cpu", rounded=True)
+        elif family == "hard_waypoint":
+            geometry = sample_waypoint_geometry(1, "cpu", rounded=False)
+        else:
+            raise ValueError(f"Unknown supported hybrid family: {family}")
+
+    local_xy = geometry.xy[0].cpu().numpy()
+    local_yaw = geometry.yaw[0].cpu().numpy()
+    start_yaw = robot_yaw_w(start_quat)
+    rotation = np.asarray(
+        [[np.cos(start_yaw), -np.sin(start_yaw)], [np.sin(start_yaw), np.cos(start_yaw)]],
+        dtype=np.float32,
     )
     world_xy = start_pos[:2] + local_xy @ rotation.T
     path = np.column_stack((world_xy, np.full(len(world_xy), 0.2932)))
@@ -788,6 +844,12 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             raise ValueError("--route_length_m must be positive.")
         if args_cli.reference_replay_dataset:
             raise ValueError("--route_length_m is only valid for analytic paths.")
+    hybrid_eval_shapes = {"coherent_smooth", "rounded_waypoint", "hard_waypoint"}
+    if hybrid_eval_shapes.intersection(args_cli.path_shapes) and args_cli.route_length_m != 4.0:
+        raise ValueError(
+            "supported_hybrid_v2 evaluation families require --route_length_m 4.0 "
+            "to preserve their registered training contract."
+        )
     if len(path_heights) > 1 and (
         args_cli.height_profile != "constant" or args_cli.transition_fractions is not None
     ):
@@ -921,6 +983,13 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         elif s.path_shape == "procedural":
             pts, yaws = build_procedural_curvature_path(
                 start_pos[i], start_quat[i], seed=args_cli.seed + s.repeat
+            )
+        elif s.path_shape in {"coherent_smooth", "rounded_waypoint", "hard_waypoint"}:
+            pts, yaws = build_supported_hybrid_path(
+                start_pos[i],
+                start_quat[i],
+                family=s.path_shape,
+                seed=args_cli.seed + s.repeat,
             )
         else:
             raise ValueError(f"Unknown shape: {s.path_shape}")
