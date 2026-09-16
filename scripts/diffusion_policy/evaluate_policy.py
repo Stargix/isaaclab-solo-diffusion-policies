@@ -113,6 +113,17 @@ parser.add_argument(
     help="Ordered base-height requirements [m] repeated by --height_profile interleaved.",
 )
 parser.add_argument("--warmup_steps", type=int, default=25)
+parser.add_argument(
+    "--posture_settle_steps",
+    type=int,
+    default=0,
+    help=(
+        "Optional unscored policy-controlled settling steps before the route clock starts. "
+        "The policy receives a zero-speed goal with the route's initial height requirement; "
+        "this removes the standing-reset transient from crouch-start evaluations without "
+        "forcing joint targets or deleting samples from the scored trace."
+    ),
+)
 parser.add_argument("--num_inference_steps", type=int, default=None)
 parser.add_argument(
     "--exec_horizon",
@@ -858,6 +869,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         and args_cli.profile_transition_margin_m < 0.0
     ):
         raise ValueError("--profile_transition_margin_m must be non-negative.")
+    if args_cli.posture_settle_steps < 0:
+        raise ValueError("--posture_settle_steps must be non-negative.")
     if args_cli.route_length_m is not None:
         if args_cli.route_length_m <= 0.0:
             raise ValueError("--route_length_m must be positive.")
@@ -1055,9 +1068,21 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         height_schedule = None
         if args_cli.height_profile in {"interleaved", "random"}:
             arc = cumulative_xy_lengths(pts)
-            segment_index = np.floor(arc / args_cli.height_segment_m).astype(np.int64)
+            # A terminal sample exactly on an integer segment boundary belongs
+            # to the preceding finite plateau.  Without this clamp, a 4.0 m
+            # route with 0.8 m sections creates a sixth, zero-length height
+            # segment only at the endpoint and changes the terminal pose.
+            route_length = float(arc[-1])
+            endpoint_epsilon = max(1.0e-6, 1.0e-6 * route_length)
+            num_segments = max(
+                1,
+                int(math.ceil(max(route_length - endpoint_epsilon, 0.0) / args_cli.height_segment_m)),
+            )
+            segment_index = np.minimum(
+                np.floor(arc / args_cli.height_segment_m).astype(np.int64),
+                num_segments - 1,
+            )
             cycle = np.asarray(args_cli.height_cycle, dtype=np.float32)
-            num_segments = int(segment_index.max()) + 1
             if args_cli.height_profile == "interleaved":
                 height_schedule = tuple(float(cycle[index % len(cycle)]) for index in range(num_segments))
             else:
@@ -1115,18 +1140,89 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     previous_action = torch.zeros((num_envs, policy_cfg.action_dim), device=device)
     stand_action = torch.zeros_like(previous_action)
 
-    # Run Warmup (Stand-hold to fill history buffers)
+    # Fill history while the simulator settles from its reset state.  When a
+    # policy-controlled posture settle follows, keep this staging history at
+    # zero requested speed so a crouch-start route is not first conditioned as
+    # a moving walk.  ``path_progress`` remains untouched: staging is not free
+    # route progress.
     print(f"[INFO] Warmup: {args_cli.warmup_steps} steps with stand-hold actions...")
+    staging_progress = path_progress.copy()
+    staging_speeds = (
+        np.zeros_like(speeds) if args_cli.posture_settle_steps > 0 else speeds
+    )
     for _ in range(max(args_cli.warmup_steps, policy_cfg.history + 1)):
         proprio = get_proprio_30d(raw_env, joint_ids)
         goals = compute_vectorized_goals(
-            raw_env, path_plans, speeds, path_progress, goal_horizon_steps, waypoint_time_offsets_s, dt, v_req_clip, device,
+            raw_env, path_plans, staging_speeds, staging_progress, goal_horizon_steps, waypoint_time_offsets_s, dt, v_req_clip, device,
             goal_representation,
             reference_step=0,
         )
         update_history(proprio_buffer, action_buffer, goal_buffer, proprio, previous_action, goals)
         vec_env.step(stand_action)
         previous_action = stand_action.clone()
+
+    # The base environment resets every scenario in the same safe standing
+    # pose.  That is a biased initial condition for crouch->walk and for a
+    # repeated profile whose first plateau is crouched.  Let the evaluated
+    # policy reach the *initial requested posture* at zero speed before timing
+    # the route.  This is explicit staging, not post-hoc trace trimming.  Any
+    # reset during staging aborts the benchmark so an unstable initialization
+    # cannot be silently replaced by a fresh robot.
+    if args_cli.posture_settle_steps > 0:
+        print(
+            "[INFO] Initial-posture staging: "
+            f"{args_cli.posture_settle_steps} policy steps at zero requested speed..."
+        )
+        settle_chunk: torch.Tensor | None = None
+        settle_chunk_index = 0
+        for _ in range(args_cli.posture_settle_steps):
+            with torch.inference_mode():
+                if settle_chunk is None or settle_chunk_index == 0:
+                    full_trajectory = policy.predict_action_denormalized(
+                        proprio_buffer,
+                        action_buffer,
+                        goal_buffer,
+                        guidance_scale=args_cli.guidance_scale,
+                    )
+                    settle_chunk = policy.executable_chunk(
+                        full_trajectory, args_cli.exec_horizon
+                    )
+                action = settle_chunk[:, settle_chunk_index]
+                settle_chunk_index = (settle_chunk_index + 1) % args_cli.exec_horizon
+                if agent_cfg.clip_actions is not None:
+                    action = torch.clamp(
+                        action, -agent_cfg.clip_actions, agent_cfg.clip_actions
+                    )
+                proprio = get_proprio_30d(raw_env, joint_ids)
+                goals = compute_vectorized_goals(
+                    raw_env,
+                    path_plans,
+                    staging_speeds,
+                    staging_progress,
+                    goal_horizon_steps,
+                    waypoint_time_offsets_s,
+                    dt,
+                    v_req_clip,
+                    device,
+                    goal_representation,
+                    reference_step=0,
+                )
+                _, _, staging_dones, _ = vec_env.step(action)
+                update_history(
+                    proprio_buffer,
+                    action_buffer,
+                    goal_buffer,
+                    proprio,
+                    previous_action,
+                    goals,
+                )
+                previous_action = action.clone()
+            if bool(torch.any(staging_dones)):
+                failed_count = int(torch.count_nonzero(staging_dones).item())
+                raise RuntimeError(
+                    f"{failed_count} environment(s) reset during unscored initial-posture "
+                    "staging. Refusing to hide initialization instability."
+                )
 
     # The requested speed horizon starts after history warm-up.  Keep this
     # state separate from the original spawn so warm-up drift cannot be counted
@@ -1363,6 +1459,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         )
         trace_metadata = {
             "dt_s": dt,
+            "posture_settle_steps": int(args_cli.posture_settle_steps),
             "feet_body_names": feet_body_names,
             "scenarios": [
                 {
@@ -2082,6 +2179,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         "height_profile": args_cli.height_profile,
         "height_segment_m": args_cli.height_segment_m if args_cli.height_profile in {"interleaved", "random"} else None,
         "height_cycle": list(args_cli.height_cycle) if args_cli.height_profile in {"interleaved", "random"} else [],
+        "posture_settle_steps": int(args_cli.posture_settle_steps),
         "reference_replay_dataset": (
             str(Path(args_cli.reference_replay_dataset).resolve()) if args_cli.reference_replay_dataset else None
         ),

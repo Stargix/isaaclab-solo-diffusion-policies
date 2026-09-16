@@ -62,6 +62,8 @@ treated as independent statistical evidence.
 |---|---|---:|---|
 | `id_constant` | basic walk and crouch | 200 | speeds 0.20/0.35/0.45 |
 | `id_transition` | W->C and C->W composition | 200 | fractions 0.40/0.50/0.60, three speeds |
+| `id_repeated_walk_start` | repeated W->C->W->C->W tracking | 200 | 0.8 m plateaus, speeds 0.35/0.45 |
+| `id_repeated_crouch_start` | repeated C->W->C->W->C tracking | 200 | 0.8 m plateaus, speeds 0.35/0.45 |
 | `fast_crouch_to_walk` | leave a 0.8 m restricted section | 200 | 0.65/0.75/0.85/0.95/1.00 m/s |
 | `fast_walk_to_crouch` | brake into a final 0.8 m restricted section | 200 | same speeds |
 | `ood_constant` | geometric transfer | 150 | two heights, three speeds |
@@ -78,6 +80,23 @@ it identifies the capability boundary.
 The OOD-fast suites are stress tests and are never pooled into the ID gate.
 They test whether the behavior that differentiates WCT also transfers to
 unseen geometry; they do not require every sharp corner at 1.0 m/s to succeed.
+
+The two repeated-height suites are secondary ID stress tests, not extra
+training distributions or new headline gates.  They use only the two expert
+endpoint heights (`0.2932` and `0.1705` m), alternating every 0.8 m.  Keeping
+intermediate heights out isolates repeated composition, hysteresis and error
+accumulation from the separate question of height interpolation.  Both initial
+states are evaluated so a standing reset cannot make W->C appear easier than
+C->W.
+
+Every canonical suite uses 50 unscored policy-controlled staging steps at zero
+requested speed before the route clock starts.  The staging goal contains the
+route's initial height requirement.  Therefore crouch-start traces begin from
+a policy-achieved crouch rather than from Isaac Lab's shared safe standing
+reset.  This is not post-hoc cropping: a simulator reset during staging aborts
+the benchmark, and the scored route always begins afterwards.  Reset velocity
+and joint noise are disabled so the independent statistical unit remains the
+frozen route geometry.
 
 ## Metrics
 
@@ -168,11 +187,19 @@ Outputs of interest:
 - `<root>/summary/benchmark_overview.png`;
 - `<root>/summary/benchmark_overview_navigation.png`;
 - `<root>/summary/benchmark_overview_fast.png`;
+- `<root>/summary/ood_fast_breakdown.png` and `ood_fast_breakdown.csv`;
+- `<root>/id_repeated_{walk,crouch}_start/height_tracking_and_error.png`;
 - `<root>/id_constant/gait_signature.png`;
 - `<root>/*fast*/temporal_allocation_summary.json`;
 - `<root>/*fast*/temporal_allocation.png`;
 - `<root>/*fast*/gait_signature.png`;
 - `<root>/*fast*/representative_contact_raster.png`.
+
+`ood_fast_breakdown.png` is the audit view for the complete fast-OOD design:
+rows separate C->W/W->C and `ood_arc`/`ood_s_curve`/`ood_corner`; columns show
+0.65, 0.85 and 1.00 m/s.  It reports success, survival, arrival, cross-track,
+height and speed error, so no OOD family or boundary speed is hidden by the
+suite-level mean.
 
 For a paper-facing result, use the two split overview figures rather than the
 combined overview. Keep per-suite `survival_and_smoothness.png`, maximum CTE,

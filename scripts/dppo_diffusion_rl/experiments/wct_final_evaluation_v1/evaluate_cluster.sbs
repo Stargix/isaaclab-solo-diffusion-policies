@@ -65,6 +65,8 @@ COMMON=(
   --num_inference_steps 10
   --exec_horizon 4
   --profile_transition_margin_m 0.25
+  --posture_settle_steps 50
+  --deterministic_resets
   --headless
   --require_empty_output_dir
   --device cuda:0
@@ -85,6 +87,26 @@ COMMON=(
   --path_shapes procedural coherent_smooth rounded_waypoint hard_waypoint \
   --speeds 0.2 0.35 0.45 --transition_fractions 0.4 0.5 0.6 \
   --transition_directions both --duration_s 24.0 --seed 160142
+
+# Repeated posture changes isolate hysteresis and accumulated transition error.
+# Binary endpoint heights keep this separate from intermediate-height
+# interpolation.  Two suites are required because the reset posture must be
+# evaluated fairly from either initial task state.
+./isaaclab.sh -p scripts/diffusion_policy/evaluate_policy.py \
+  "${COMMON[@]}" --route_bank "${ID_BANK}" \
+  --output_dir "${OUTPUT_ROOT}/id_repeated_walk_start" \
+  --path_shapes procedural coherent_smooth rounded_waypoint hard_waypoint \
+  --speeds 0.35 0.45 --height_profile interleaved --height_segment_m 0.8 \
+  --height_cycle 0.2932 0.1705 --duration_s 24.0 --seed 160142 \
+  --save_timeseries
+
+./isaaclab.sh -p scripts/diffusion_policy/evaluate_policy.py \
+  "${COMMON[@]}" --route_bank "${ID_BANK}" \
+  --output_dir "${OUTPUT_ROOT}/id_repeated_crouch_start" \
+  --path_shapes procedural coherent_smooth rounded_waypoint hard_waypoint \
+  --speeds 0.35 0.45 --height_profile interleaved --height_segment_m 0.8 \
+  --height_cycle 0.1705 0.2932 --duration_s 24.0 --seed 160142 \
+  --save_timeseries
 
 # Functional fast-trot test.  These two suites pair a single 0.8 m restricted
 # section with 3.2 m open route.  0.95/1.00 m/s are boundary tests, not ID gates.
@@ -163,6 +185,8 @@ python scripts/diffusion_policy/evaluation/analyze_temporal_allocation.py \
 python "${PROTOCOL_DIR}/summarize_benchmark.py" \
   --suite id_constant="${OUTPUT_ROOT}/id_constant" \
   --suite id_transition="${OUTPUT_ROOT}/id_transition" \
+  --suite id_repeated_walk_start="${OUTPUT_ROOT}/id_repeated_walk_start" \
+  --suite id_repeated_crouch_start="${OUTPUT_ROOT}/id_repeated_crouch_start" \
   --suite fast_crouch_to_walk="${OUTPUT_ROOT}/fast_crouch_to_walk" \
   --suite fast_walk_to_crouch="${OUTPUT_ROOT}/fast_walk_to_crouch" \
   --suite ood_constant="${OUTPUT_ROOT}/ood_constant" \

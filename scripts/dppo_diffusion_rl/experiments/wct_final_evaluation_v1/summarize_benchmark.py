@@ -135,6 +135,126 @@ def _plot_overview(
     plt.close(figure)
 
 
+def _write_and_plot_ood_fast_breakdown(
+    rows: list[dict[str, str]], output_dir: Path
+) -> None:
+    """Expose every OOD-fast family, speed and transition direction.
+
+    The overview intentionally reports route-clustered suite aggregates.  That
+    is appropriate for the headline result but can hide whether one OOD family
+    or requested speed dominates failure.  This diagnostic retains the route
+    as the sampling unit while showing the complete 2 directions x 3 families
+    x 3 speeds factorial design.
+    """
+
+    suite_order = (
+        "ood_fast_crouch_to_walk",
+        "ood_fast_walk_to_crouch",
+    )
+    family_order = ("ood_arc", "ood_s_curve", "ood_corner")
+    selected = [row for row in rows if row["suite"] in suite_order]
+    if not selected:
+        return
+
+    metrics = (
+        ("task_success_rate", "Task success [%]", 100.0, False),
+        ("survival_rate", "Survival [%]", 100.0, False),
+        ("strict_arrival_rate", "Strict arrival [%]", 100.0, False),
+        ("active_cross_track_p95_m", "Active CTE p95 [cm]", 100.0, True),
+        ("active_height_mae_m", "Active height MAE [cm]", 100.0, True),
+        ("arrival_speed_abs_error_m_s", "Arrival speed error [m/s]", 1.0, True),
+    )
+    speeds = sorted({_number(row["requested_speed"]) for row in selected})
+    row_keys = [
+        (suite, family) for suite in suite_order for family in family_order
+    ]
+    output_rows: list[dict[str, object]] = []
+    for suite, family in row_keys:
+        for speed in speeds:
+            conditions = [
+                row
+                for row in selected
+                if row["suite"] == suite
+                and row["path_shape"] == family
+                and math.isclose(_number(row["requested_speed"]), speed)
+            ]
+            output: dict[str, object] = {
+                "suite": suite,
+                "transition_direction": (
+                    "crouch_to_walk" if "crouch_to_walk" in suite else "walk_to_crouch"
+                ),
+                "path_shape": family,
+                "requested_speed_m_s": speed,
+                "independent_routes": len({int(row["repeat"]) for row in conditions}),
+            }
+            for metric, _, _, _ in metrics:
+                extractor = METRICS[metric][1]
+                values = np.asarray([extractor(row) for row in conditions], dtype=np.float64)
+                finite = values[np.isfinite(values)]
+                output[metric] = float(np.mean(finite)) if finite.size else float("nan")
+            output_rows.append(output)
+
+    csv_path = output_dir / "ood_fast_breakdown.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(output_rows[0]))
+        writer.writeheader()
+        writer.writerows(output_rows)
+
+    import matplotlib.pyplot as plt
+
+    labels = [
+        ("C->W" if suite.endswith("crouch_to_walk") else "W->C")
+        + " | "
+        + family.removeprefix("ood_").replace("_", " ")
+        for suite, family in row_keys
+    ]
+    figure, axes = plt.subplots(2, 3, figsize=(14.5, 8.5), facecolor="white")
+    for axis, (metric, title, scale, lower_is_better) in zip(axes.flat, metrics):
+        matrix = np.full((len(row_keys), len(speeds)), np.nan, dtype=np.float64)
+        for row_index, (suite, family) in enumerate(row_keys):
+            for speed_index, speed in enumerate(speeds):
+                match = next(
+                    row
+                    for row in output_rows
+                    if row["suite"] == suite
+                    and row["path_shape"] == family
+                    and math.isclose(float(row["requested_speed_m_s"]), speed)
+                )
+                matrix[row_index, speed_index] = float(match[metric]) * scale
+        finite = matrix[np.isfinite(matrix)]
+        if metric.endswith("_rate"):
+            vmin, vmax = 0.0, 100.0
+        elif finite.size:
+            vmin, vmax = 0.0, max(float(np.max(finite)), 1.0e-6)
+        else:
+            vmin, vmax = 0.0, 1.0
+        image = axis.imshow(
+            matrix,
+            aspect="auto",
+            cmap="RdYlGn_r" if lower_is_better else "RdYlGn",
+            vmin=vmin,
+            vmax=vmax,
+        )
+        for row_index in range(matrix.shape[0]):
+            for speed_index in range(matrix.shape[1]):
+                value = matrix[row_index, speed_index]
+                text = "--" if not np.isfinite(value) else f"{value:.1f}"
+                axis.text(speed_index, row_index, text, ha="center", va="center", fontsize=8)
+        axis.set_xticks(np.arange(len(speeds)), [f"{speed:.2f}" for speed in speeds])
+        axis.set_yticks(np.arange(len(labels)), labels)
+        axis.set_xlabel("Requested mean speed [m/s]")
+        axis.set_title(title)
+        figure.colorbar(image, ax=axis, fraction=0.046, pad=0.04)
+    figure.suptitle(
+        "OOD fast transitions by direction, geometry and requested speed",
+        fontweight="bold",
+        y=0.995,
+    )
+    figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
+    figure.savefig(output_dir / "ood_fast_breakdown.png", dpi=180, bbox_inches="tight")
+    plt.close(figure)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -236,12 +356,14 @@ def main() -> None:
     order = {
         "id_constant": 0,
         "id_transition": 1,
-        "ood_constant": 2,
-        "ood_transition": 3,
-        "fast_crouch_to_walk": 4,
-        "fast_walk_to_crouch": 5,
-        "ood_fast_crouch_to_walk": 6,
-        "ood_fast_walk_to_crouch": 7,
+        "id_repeated_walk_start": 2,
+        "id_repeated_crouch_start": 3,
+        "ood_constant": 4,
+        "ood_transition": 5,
+        "fast_crouch_to_walk": 6,
+        "fast_walk_to_crouch": 7,
+        "ood_fast_crouch_to_walk": 8,
+        "ood_fast_walk_to_crouch": 9,
     }
     overall = sorted(
         [row for row in aggregate_rows if row["path_shape"] == "__all__"],
@@ -264,6 +386,7 @@ def main() -> None:
         output_dir / "benchmark_overview_fast.png",
         "Fast-section capability and geometric OOD stress tests",
     )
+    _write_and_plot_ood_fast_breakdown(all_rows, output_dir)
     print(json.dumps({"routes": len(route_rows), "aggregates": len(aggregate_rows)}, indent=2))
 
 
