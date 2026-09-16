@@ -1776,6 +1776,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     # 1. Trajectory comparison plot
     shapes = sorted({scenario.path_shape for scenario in scenarios})
     titles = [shape.replace("_", " ").title() for shape in shapes]
+    trajectory_plot_name = (
+        "trajectory_ood.png"
+        if shapes and all(shape.startswith("ood_") for shape in shapes)
+        else "trajectories.png"
+    )
 
     if replay_fragments is not None:
         # Reference replay evaluation: each scenario has a different path.
@@ -1815,7 +1820,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             axes[j].set_visible(False)
             
         fig.tight_layout()
-        fig.savefig(output_dir / "trajectories.png", dpi=200)
+        fig.savefig(output_dir / trajectory_plot_name, dpi=200)
         plt.close(fig)
     else:
         # Analytic paths evaluation
@@ -1883,7 +1888,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             ax.axis("equal")
             ax.legend(fontsize=9, framealpha=0.9, facecolor="white", edgecolor="#eaeaea")
         fig.tight_layout()
-        fig.savefig(output_dir / "trajectories.png", dpi=200)
+        fig.savefig(output_dir / trajectory_plot_name, dpi=200)
         plt.close(fig)
 
     # 2. Height command and tracking. The first panel shows the commanded

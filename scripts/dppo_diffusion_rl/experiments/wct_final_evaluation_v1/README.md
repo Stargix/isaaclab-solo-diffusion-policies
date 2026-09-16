@@ -188,6 +188,7 @@ Outputs of interest:
 - `<root>/summary/benchmark_overview_navigation.png`;
 - `<root>/summary/benchmark_overview_fast.png`;
 - `<root>/summary/ood_fast_breakdown.png` and `ood_fast_breakdown.csv`;
+- `<root>/ood_fast_{crouch_to_walk,walk_to_crouch}/trajectory_ood.png`;
 - `<root>/id_repeated_{walk,crouch}_start/height_tracking_and_error.png`;
 - `<root>/id_constant/gait_signature.png`;
 - `<root>/*fast*/temporal_allocation_summary.json`;
@@ -200,6 +201,12 @@ rows separate C->W/W->C and `ood_arc`/`ood_s_curve`/`ood_corner`; columns show
 0.65, 0.85 and 1.00 m/s.  It reports success, survival, arrival, cross-track,
 height and speed error, so no OOD family or boundary speed is hidden by the
 suite-level mean.
+
+Each OOD suite also writes `trajectory_ood.png` locally.  It contains one
+fixed representative route (`repeat=0`) for each of `ood_arc`, `ood_s_curve`
+and `ood_corner`, with separate traces for every requested speed.  This is the
+qualitative geometry view; the route-clustered summary remains the
+quantitative view over all 50 routes per family.
 
 For a paper-facing result, use the two split overview figures rather than the
 combined overview. Keep per-suite `survival_and_smoothness.png`, maximum CTE,
