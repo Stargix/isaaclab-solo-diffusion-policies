@@ -47,12 +47,25 @@ parser.add_argument(
         "coherent_smooth",
         "rounded_waypoint",
         "hard_waypoint",
+        "ood_arc",
+        "ood_s_curve",
+        "ood_corner",
     ),
     default=("straight", "circle", "s_curve", "right_angle", "random_polyline"),
     help=(
         "Path families to evaluate. procedural is the smooth-v1 generator; "
         "coherent_smooth, rounded_waypoint and hard_waypoint reproduce the "
-        "three additional supported_hybrid_v2 geometry families at 4 m."
+        "three additional supported_hybrid_v2 geometry families at 4 m. "
+        "The ood_* families require a frozen --route_bank."
+    ),
+)
+parser.add_argument(
+    "--route_bank",
+    type=str,
+    default=None,
+    help=(
+        "Optional materialized .npz route bank. Every (path_shape, repeat) "
+        "geometry is then identical across conditions and checkpoints."
     ),
 )
 parser.add_argument("--repeats", type=int, default=3, help="Stochastic repeats per scenario condition.")
@@ -162,6 +175,7 @@ from train.conditioning.goal_builder import (
 )
 from model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
 from evaluation.metrics import (
+    compute_active_tracking_metrics,
     compute_first_task_success,
     compute_route_metrics,
     point_at_progress,
@@ -171,6 +185,11 @@ from evaluation.metrics import (
     valid_post_step_mask,
 )
 from evaluation.plots import plot_route_outcomes
+from evaluation.route_bank import (
+    align_route_to_spawn,
+    load_route_bank,
+    sha256_file as route_bank_sha256,
+)
 from train.config import resolve_inference_steps
 from train.data.obs_utils import proprio_from_env_tensors
 from train.runtime.checkpoint import load_training_checkpoint
@@ -859,6 +878,32 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         print(f"[INFO] {args_cli.height_profile.capitalize()} height schedule: cycle={list(args_cli.height_cycle)}, "
               f"segment={args_cli.height_segment_m:.2f} m")
     scenarios = make_scenarios(path_heights)
+    materialized_routes = None
+    route_bank_hash = None
+    if args_cli.route_bank is not None:
+        if args_cli.reference_replay_dataset:
+            raise ValueError("--route_bank and --reference_replay_dataset are mutually exclusive.")
+        route_bank_path = Path(args_cli.route_bank)
+        if not route_bank_path.is_absolute():
+            route_bank_path = _PROJECT_ROOT / route_bank_path
+        materialized_routes = load_route_bank(route_bank_path)
+        route_bank_hash = route_bank_sha256(route_bank_path)
+        missing = sorted({
+            (scenario.path_shape, scenario.repeat)
+            for scenario in scenarios
+            if (scenario.path_shape, scenario.repeat) not in materialized_routes
+        })
+        if missing:
+            preview = ", ".join(f"{family}[{repeat}]" for family, repeat in missing[:8])
+            raise ValueError(
+                f"Route bank {route_bank_path} is missing {len(missing)} requested keys: {preview}"
+            )
+        print(
+            f"[INFO] Frozen route bank: {route_bank_path} "
+            f"(sha256={route_bank_hash[:12]}..., {len(materialized_routes)} routes)."
+        )
+    elif any(shape.startswith("ood_") for shape in args_cli.path_shapes):
+        raise ValueError("The randomized ood_* families require --route_bank.")
     num_envs = len(scenarios)
     print(f"[INFO] Evaluating {num_envs} vectorized scenarios in parallel.")
     inference_steps = resolve_inference_steps(args_cli.num_inference_steps, config["diffusion"])
@@ -965,6 +1010,13 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             demo_name, stored_pos, stored_yaw, stored_command, stored_guidance, _ = replay_fragments[i]
             pts, yaws, aligned_guidance = align_reference_fragment(
                 stored_pos, stored_yaw, start_pos[i], start_quat[i], stored_guidance
+            )
+        elif materialized_routes is not None:
+            route = materialized_routes[(s.path_shape, s.repeat)]
+            pts, yaws = align_route_to_spawn(
+                route,
+                start_pos[i],
+                robot_yaw_w(start_quat[i]),
             )
         elif s.path_shape == "straight":
             pts, yaws = build_straight_path(start_pos[i], start_quat[i])
@@ -1125,6 +1177,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     achieved_yaws = []
     tilts = []
     action_deltas = []
+    foot_contacts = []
     commanded_heights = []
     conditioned_height_profiles = []
     required_heights = []
@@ -1191,6 +1244,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         a_delta = torch.sqrt(torch.mean(torch.square(action - previous_for_delta), dim=-1)).cpu().numpy()
         action_np = action.detach().cpu().numpy()
         previous_for_delta = action.clone()
+        contact_forces = raw_env._contact_sensor.data.net_forces_w[:, raw_env._feet_body_ids, :]
+        foot_contact = (torch.linalg.vector_norm(contact_forces, dim=-1) > 1.0).cpu().numpy()
         physical_invalid = ~physical_state_valid(
             pos_w, planar_speed, tilt, action_np
         )
@@ -1237,6 +1292,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         achieved_yaws.append(yaw)
         tilts.append(tilt)
         action_deltas.append(a_delta)
+        foot_contacts.append(foot_contact)
         required_heights.append(np.asarray(step_required_heights, dtype=np.float32))
 
         # Handle resets / failures
@@ -1258,6 +1314,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     achieved_yaws = np.stack(achieved_yaws, axis=0)
     tilts = np.stack(tilts, axis=0)
     action_deltas = np.stack(action_deltas, axis=0)
+    foot_contacts = np.stack(foot_contacts, axis=0)
 
     if len(commanded_heights) != duration_steps:
         raise RuntimeError(f"No terminal-height command available for goal representation {goal_representation!r}.")
@@ -1295,9 +1352,18 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             failure_step=failure_step,
             base_failure=base_failures,
             physical_sanity_failure=physical_sanity_failures,
+            foot_contact=foot_contacts,
+        )
+        sensor_body_names = list(getattr(raw_env._contact_sensor, "body_names", ()))
+        feet_indices = [int(index) for index in raw_env._feet_body_ids]
+        feet_body_names = (
+            [sensor_body_names[index] for index in feet_indices]
+            if sensor_body_names and max(feet_indices) < len(sensor_body_names)
+            else [f"foot_{index}" for index in range(len(feet_indices))]
         )
         trace_metadata = {
             "dt_s": dt,
+            "feet_body_names": feet_body_names,
             "scenarios": [
                 {
                     "index": i,
@@ -1430,6 +1496,36 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 ),
             ).to_dict()
 
+        active_tracking_values: dict[str, float | int] = {}
+        if trajectories[i]["actual"]:
+            active_steps = len(relative_positions)
+            if bool(task_values.get("arrived", False)):
+                active_steps = int(np.clip(
+                    round(float(task_values["time_s"]) / dt),
+                    1,
+                    len(relative_positions),
+                ))
+            transition_progress_m = (
+                float(s.transition_fraction) * float(plan.cumulative_lengths[-1])
+                - float(rollout_start_progress)
+                if s.transition_fraction is not None
+                else None
+            )
+            active_tracking_values = compute_active_tracking_metrics(
+                relative_positions + start_pos[i, :2],
+                plan.path_w[:, :2],
+                heights_m=hgts,
+                target_heights_m=target_h,
+                start_position_xy=rollout_start_pos[i, :2],
+                active_steps=active_steps,
+                transition_progress_m=transition_progress_m,
+                transition_margin_m=(
+                    float(args_cli.profile_transition_margin_m)
+                    if args_cli.profile_transition_margin_m is not None
+                    else 0.25
+                ),
+            ).to_dict()
+
         summary_rows.append({
             "scenario_id": s.scenario_id,
             "repeat": s.repeat,
@@ -1481,6 +1577,32 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             "route_final_schedule_error_m": route_values.get("final_schedule_error_m", math.nan),
             "route_cross_track_rmse_m": route_values.get("cross_track_rmse_m", math.nan),
             "route_cross_track_p95_m": route_values.get("cross_track_p95_m", math.nan),
+            "active_steps": active_tracking_values.get("steps", 0),
+            "active_cross_track_mean_m": active_tracking_values.get("cross_track_mean_m", math.nan),
+            "active_cross_track_rmse_m": active_tracking_values.get("cross_track_rmse_m", math.nan),
+            "active_cross_track_p95_m": active_tracking_values.get("cross_track_p95_m", math.nan),
+            "active_cross_track_max_m": active_tracking_values.get("cross_track_max_m", math.nan),
+            "active_height_mae_m": active_tracking_values.get("height_mae_m", math.nan),
+            "active_height_bias_m": active_tracking_values.get("height_bias_m", math.nan),
+            "active_height_p95_m": active_tracking_values.get("height_p95_m", math.nan),
+            "pre_transition_cross_track_rmse_m": active_tracking_values.get(
+                "pre_transition_cross_track_rmse_m", math.nan
+            ),
+            "transition_cross_track_rmse_m": active_tracking_values.get(
+                "transition_cross_track_rmse_m", math.nan
+            ),
+            "post_transition_cross_track_rmse_m": active_tracking_values.get(
+                "post_transition_cross_track_rmse_m", math.nan
+            ),
+            "pre_transition_height_mae_m": active_tracking_values.get(
+                "pre_transition_height_mae_m", math.nan
+            ),
+            "transition_height_mae_m": active_tracking_values.get(
+                "transition_height_mae_m", math.nan
+            ),
+            "post_transition_height_mae_m": active_tracking_values.get(
+                "post_transition_height_mae_m", math.nan
+            ),
             "route_terminal_position_error_m": route_values.get("terminal_position_error_m", math.nan),
             "task_success_applicable": task_success_applicable,
             "task_arrived": task_values.get("arrived", False),
@@ -1575,7 +1697,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             ax.set_facecolor("#fafafa")
             plan = path_plans[i]
             ref_xy = (plan.path_w[:, :2] - start_pos[i, :2])[:duration_steps]
-            act_traj = np.array(trajectories[i]["actual"])
+            active_steps = int(summary_rows[i].get("active_steps", 0))
+            act_traj = np.array(trajectories[i]["actual"][:active_steps or None])
             
             # Plot reference and actual
             ax.plot(ref_xy[:, 0], ref_xy[:, 1], color="#333333", linestyle="--", linewidth=2.0, label="Reference", zorder=3)
@@ -1611,6 +1734,16 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                     plan = path_plans[i]
                     ref_xy = plan.path_w[:, :2] - start_pos[i, :2]
                     ax.plot(ref_xy[:, 0], ref_xy[:, 1], color="#333333", linestyle="--", linewidth=2.0, label="Reference", zorder=3)
+                    if s.transition_fraction is not None:
+                        transition_xy = point_at_progress(
+                            plan.path_w[:, :2],
+                            float(s.transition_fraction) * float(plan.cumulative_lengths[-1]),
+                        ) - start_pos[i, :2]
+                        ax.scatter(
+                            transition_xy[0], transition_xy[1], marker="D", s=38,
+                            color="#F5A623", edgecolor="white", linewidth=0.7,
+                            label="Height transition", zorder=6,
+                        )
                     break
             
             # Plot actual paths and the finite-horizon endpoint for each speed.
@@ -1620,7 +1753,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             for speed_idx, speed in enumerate(speeds_list):
                 for i, s in enumerate(scenarios):
                     if s.path_shape == shape and s.speed == speed and s.repeat == 0:
-                        act_traj = np.array(trajectories[i]["actual"])
+                        active_steps = int(summary_rows[i].get("active_steps", 0))
+                        act_traj = np.array(trajectories[i]["actual"][:active_steps or None])
                         color = colors_list[speed_idx % len(colors_list)]
                         ax.plot(act_traj[:, 0], act_traj[:, 1], color=color, alpha=0.9, linewidth=2.0, label=f"{speed} m/s", zorder=4)
                         plan = path_plans[i]
@@ -1685,16 +1819,24 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         )
         measured = achieved_heights[:, i].copy()
         measured[~valid] = np.nan
+        active_steps = int(summary_rows[i].get("active_steps", 0))
+        if active_steps:
+            measured[active_steps:] = np.nan
+        required_for_plot = target_heights[:, i].copy()
+        preview_for_plot = preview_target_heights[:, i].copy()
+        if active_steps:
+            required_for_plot[active_steps:] = np.nan
+            preview_for_plot[active_steps:] = np.nan
         if args_cli.height_profile in {"interleaved", "random"}:
             label = f"{args_cli.height_profile} every {args_cli.height_segment_m:.1f} m"
         elif requested_height is not None:
             label = f"constant {requested_height:.4f} m"
         else:
             label = "constant" if fraction is None else f"transition at {fraction:.0%}"
-        ax.plot(time_axis, target_heights[:, i], linestyle="--", linewidth=2.0, label=f"required ({label})")
+        ax.plot(time_axis, required_for_plot, linestyle="--", linewidth=2.0, label=f"required ({label})")
         ax.plot(
             time_axis,
-            preview_target_heights[:, i],
+            preview_for_plot,
             linestyle=":",
             linewidth=1.2,
             alpha=0.8,
@@ -1702,15 +1844,29 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         )
         if height_profile_previews.shape[-1] == 4:
             for slot in range(3):
+                profile_for_plot = height_profile_previews[:, i, slot].copy()
+                if active_steps:
+                    profile_for_plot[active_steps:] = np.nan
                 ax.plot(
                     time_axis,
-                    height_profile_previews[:, i, slot],
+                    profile_for_plot,
                     linestyle=":",
                     linewidth=0.7,
                     alpha=0.28,
                     label=f"profile {25 * (slot + 1)}%" if not plotted else None,
                 )
         ax.plot(time_axis, measured, linewidth=1.5, alpha=0.9, label=f"actual ({label})")
+        if fraction is not None:
+            boundary_m = float(fraction) * float(path_plans[i].cumulative_lengths[-1])
+            candidates_at_boundary = np.flatnonzero(
+                (progress_m[:, i] >= boundary_m) & trace_valid[:, i]
+            )
+            if candidates_at_boundary.size:
+                boundary_time = float(candidates_at_boundary[0]) * dt
+                ax.axvline(
+                    boundary_time, color="#F5A623", linestyle="-.", linewidth=1.0,
+                    alpha=0.7, label=f"boundary ({label})",
+                )
         plotted = True
     if plotted:
         ax.set_title(f"Height tracking: {reference_shape}, {reference_speed:.1f} m/s")
@@ -1728,7 +1884,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     for speed_index, speed in enumerate(speeds_list):
         values = []
         for requested_height, fraction in height_conditions:
-            rows = [r["height_abs_error_mean"] for r in summary_rows
+            rows = [r["active_height_mae_m"] for r in summary_rows
                     if r["requested_speed"] == speed and r["transition_fraction"] == fraction
                     and (requested_height is None or r["requested_height"] == requested_height)]
             values.append(float(np.nanmean(rows)) if rows else np.nan)
@@ -1898,6 +2054,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             profile_height_mae_tolerance_m if profile_task_active else None
         ),
         "seed": args_cli.seed,
+        "route_bank": str(Path(args_cli.route_bank).resolve()) if args_cli.route_bank else None,
+        "route_bank_sha256": route_bank_hash,
         "duration_s": args_cli.duration_s,
         "route_length_m": args_cli.route_length_m,
         "num_scenarios": len(scenarios),
@@ -1939,6 +2097,24 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         ),
         "overall_route_arrival_speed_ratio": finite_mean(
             summary_rows, "route_arrival_speed_ratio"
+        ),
+        "overall_active_cross_track_rmse_m": finite_mean(
+            summary_rows, "active_cross_track_rmse_m"
+        ),
+        "overall_active_cross_track_p95_m": finite_mean(
+            summary_rows, "active_cross_track_p95_m"
+        ),
+        "overall_active_cross_track_max_m": finite_mean(
+            summary_rows, "active_cross_track_max_m"
+        ),
+        "overall_active_height_mae_m": finite_mean(
+            summary_rows, "active_height_mae_m"
+        ),
+        "overall_transition_cross_track_rmse_m": finite_mean(
+            summary_rows, "transition_cross_track_rmse_m"
+        ),
+        "overall_transition_height_mae_m": finite_mean(
+            summary_rows, "transition_height_mae_m"
         ),
         "overall_task_success_rate": (
             sum(bool(row["task_success"]) for row in task_rows) / len(task_rows)

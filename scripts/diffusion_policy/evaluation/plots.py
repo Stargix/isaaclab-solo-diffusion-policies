@@ -27,7 +27,7 @@ def plot_route_outcomes(summary_rows: list[dict[str, Any]], output_path: Path) -
         ("route_arrived", "Strict endpoint arrival rate", 1.0),
         ("route_arrival_speed_ratio", "Arrival mean-speed ratio", 1.0),
         ("route_terminal_position_error_m", "Terminal position error [m]", None),
-        ("route_cross_track_rmse_m", "Cross-track RMSE [m]", None),
+        ("active_cross_track_rmse_m", "Active cross-track RMSE [m]", None),
     )
     shapes = sorted({str(row["path_shape"]) for row in summary_rows})
     speeds = sorted({float(row["requested_speed"]) for row in summary_rows})

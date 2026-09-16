@@ -22,6 +22,60 @@ def _finite_mean(values: np.ndarray) -> float | None:
     return float(np.mean(values)) if values.size else None
 
 
+def _binary_correlation(first: np.ndarray, second: np.ndarray) -> float | None:
+    first = np.asarray(first, dtype=np.float64)
+    second = np.asarray(second, dtype=np.float64)
+    if first.size < 3 or np.std(first) < 1.0e-8 or np.std(second) < 1.0e-8:
+        return None
+    return float(np.corrcoef(first, second)[0, 1])
+
+
+def _leg_indices(names: list[str]) -> dict[str, int]:
+    aliases = {
+        "fl": ("fl_", "front_left", "left_front"),
+        "fr": ("fr_", "front_right", "right_front"),
+        "hl": ("hl_", "rl_", "hind_left", "left_hind", "rear_left", "left_rear"),
+        "hr": ("hr_", "rr_", "hind_right", "right_hind", "rear_right", "right_rear"),
+    }
+    lowered = [name.lower() for name in names]
+    result: dict[str, int] = {}
+    for leg, candidates in aliases.items():
+        matches = [index for index, name in enumerate(lowered) if any(token in name for token in candidates)]
+        if len(matches) == 1:
+            result[leg] = matches[0]
+    return result
+
+
+def _contact_metrics(contact: np.ndarray, leg_indices: dict[str, int]) -> dict[str, object]:
+    if contact.size == 0:
+        return {}
+    values: dict[str, object] = {
+        "duty_factor_mean": float(np.mean(contact)),
+        "flight_fraction": float(np.mean(~np.any(contact, axis=1))),
+    }
+    for leg, index in leg_indices.items():
+        values[f"duty_factor_{leg}"] = float(np.mean(contact[:, index]))
+    if all(leg in leg_indices for leg in ("fl", "fr", "hl", "hr")):
+        fl, fr, hl, hr = (leg_indices[leg] for leg in ("fl", "fr", "hl", "hr"))
+        diagonal = [
+            _binary_correlation(contact[:, fl], contact[:, hr]),
+            _binary_correlation(contact[:, fr], contact[:, hl]),
+        ]
+        ipsilateral = [
+            _binary_correlation(contact[:, fl], contact[:, hl]),
+            _binary_correlation(contact[:, fr], contact[:, hr]),
+        ]
+        diagonal_finite = [value for value in diagonal if value is not None]
+        ipsilateral_finite = [value for value in ipsilateral if value is not None]
+        values["diagonal_contact_correlation"] = (
+            float(np.mean(diagonal_finite)) if diagonal_finite else None
+        )
+        values["ipsilateral_contact_correlation"] = (
+            float(np.mean(ipsilateral_finite)) if ipsilateral_finite else None
+        )
+    return values
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("trace_dir", type=Path)
@@ -44,6 +98,13 @@ def main() -> None:
     required_height = np.asarray(trace["required_height_m"], dtype=np.float64)
     valid = np.asarray(trace["valid"], dtype=bool)
     requested = np.asarray(trace["requested_speed_m_s"], dtype=np.float64)
+    foot_contact = (
+        np.asarray(trace["foot_contact"], dtype=bool)
+        if "foot_contact" in trace.files
+        else None
+    )
+    feet_body_names = [str(name) for name in metadata.get("feet_body_names", [])]
+    leg_indices = _leg_indices(feet_body_names)
     if progress.shape != speed.shape or progress.shape != valid.shape:
         raise ValueError("Trace arrays have incompatible shapes")
 
@@ -59,8 +120,7 @@ def main() -> None:
             )
             if not np.any(mask):
                 continue
-            rows.append(
-                {
+            row = {
                     "scenario": i,
                     "path_shape": scenario["path_shape"],
                     "repeat": scenario["repeat"],
@@ -73,11 +133,12 @@ def main() -> None:
                     "schedule_error_mean_m": _finite_mean(schedule_error[mask, i]),
                     "samples": int(np.count_nonzero(mask)),
                 }
-            )
+            if foot_contact is not None:
+                row.update(_contact_metrics(foot_contact[mask, i], leg_indices))
+            rows.append(row)
 
         scenario_valid = valid[:, i]
-        scenario_summaries.append(
-            {
+        scenario_summary = {
                 "scenario": i,
                 "path_shape": scenario["path_shape"],
                 "repeat": scenario["repeat"],
@@ -94,7 +155,11 @@ def main() -> None:
                     for h in np.unique(required_height[scenario_valid, i])
                 },
             }
-        )
+        if foot_contact is not None:
+            scenario_summary.update(
+                _contact_metrics(foot_contact[scenario_valid, i], leg_indices)
+            )
+        scenario_summaries.append(scenario_summary)
 
     with (args.trace_dir / "temporal_allocation_segments.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]) if rows else ["scenario"])
@@ -103,6 +168,8 @@ def main() -> None:
     report = {
         "trace_dir": str(args.trace_dir),
         "segment_m": args.segment_m,
+        "feet_body_names": feet_body_names,
+        "leg_indices": leg_indices,
         "scenarios": scenario_summaries,
         "segments": rows,
         "interpretation_note": (

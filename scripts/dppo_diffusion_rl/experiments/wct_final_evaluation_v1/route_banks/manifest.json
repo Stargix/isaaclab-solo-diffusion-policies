@@ -1,0 +1,47 @@
+{
+  "generator": "scripts/diffusion_policy/evaluation/route_bank.py",
+  "id": {
+    "families": {
+      "coherent_smooth": 50,
+      "hard_waypoint": 50,
+      "procedural": 50,
+      "rounded_waypoint": 50
+    },
+    "length_m_max": 4.000000476837158,
+    "length_m_min": 3.999999523162842,
+    "path": "wct_id_routes_v1.npz",
+    "routes": 200,
+    "schema_version": 1,
+    "sha256": "aeb472364efcdef0f244769a3816a00b7590b5983f25616e705a3d2e59b2b138",
+    "splits": [
+      "test_id"
+    ]
+  },
+  "id_seed": 160142,
+  "interpretation": {
+    "id": "Held-out draws from the four supported_hybrid_v2 train families.",
+    "ood": "Randomized constant arcs, higher-frequency S curves and 90--120 degree hard corners beyond the declared train envelope. Report separately from ID."
+  },
+  "ood": {
+    "families": {
+      "ood_arc": 50,
+      "ood_corner": 50,
+      "ood_s_curve": 50
+    },
+    "length_m_max": 4.000000476837158,
+    "length_m_min": 3.9999992847442627,
+    "path": "wct_ood_routes_v1.npz",
+    "routes": 150,
+    "schema_version": 1,
+    "sha256": "3abb2d5568a1943a2aaa01febd445c60622b6d722b4769b167156f6ebacdef96",
+    "splits": [
+      "test_ood"
+    ]
+  },
+  "ood_seed": 260542,
+  "points_per_route": 101,
+  "protocol": "wct_final_evaluation_v1",
+  "purpose": "Frozen paired test geometries. The statistical unit is (family, repeat); speeds and height profiles are repeated conditions on that unit.",
+  "route_length_m": 4.0,
+  "routes_per_family": 50
+}

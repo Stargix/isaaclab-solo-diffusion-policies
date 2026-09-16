@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+#SBATCH --job-name=wct_eval_v1
+#SBATCH --output=/home/sflores/i2r/slurm_logs/slurm-%x-%j.out
+#SBATCH --error=/home/sflores/i2r/slurm_logs/slurm-%x-%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=50G
+#SBATCH --time=72:00:00
+#SBATCH --gres=gpu:lovelace:1
+
+set -Eeuo pipefail
+
+export EGL_VISIBLE_DEVICES=0
+export PHYSX_GPU_DEVICE=0
+export OMNI_KIT_GPU_ID=0
+
+if [[ -f "${HOME}/miniconda3/etc/profile.d/conda.sh" ]]; then
+  CONDA_SH="${HOME}/miniconda3/etc/profile.d/conda.sh"
+elif [[ -f "/etc/profile.d/conda.sh" ]]; then
+  CONDA_SH="/etc/profile.d/conda.sh"
+else
+  CONDA_SH="$(conda info --base)/etc/profile.d/conda.sh"
+fi
+set +eu
+source "${CONDA_SH}"
+conda activate env_isaaclab
+set -eu
+
+ISAACLAB_DIR="${HOME}/i2r/isaaclab-solo-diffusion-policies"
+cd "${ISAACLAB_DIR}"
+export PYTHONPATH="${ISAACLAB_DIR}:${PYTHONPATH:-}"
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export NCCL_P2P_DISABLE=1
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:1024
+export MALLOC_ARENA_MAX=1
+export TMPDIR="${HOME}/i2r/tmp"
+mkdir -p "${TMPDIR}"
+
+CHECKPOINT_PATH="${1:-${ISAACLAB_DIR}/checkpoints_iri/checkpoints_dppo/dppo_wct_hybrid_procedural.pt}"
+OUTPUT_ROOT="${2:-${ISAACLAB_DIR}/scripts/dppo_diffusion_rl/evaluations/wct_final_evaluation_v1}"
+PROTOCOL_DIR="${ISAACLAB_DIR}/scripts/dppo_diffusion_rl/experiments/wct_final_evaluation_v1"
+ID_BANK="${PROTOCOL_DIR}/route_banks/wct_id_routes_v1.npz"
+OOD_BANK="${PROTOCOL_DIR}/route_banks/wct_ood_routes_v1.npz"
+
+for required in "${CHECKPOINT_PATH}" "${ID_BANK}" "${OOD_BANK}"; do
+  if [[ ! -f "${required}" ]]; then
+    echo "Missing required file: ${required}" >&2
+    exit 2
+  fi
+done
+mkdir -p "${OUTPUT_ROOT}"
+
+echo "Checkpoint: ${CHECKPOINT_PATH}"
+echo "Output root: ${OUTPUT_ROOT}"
+nvidia-smi
+
+COMMON=(
+  --checkpoint "${CHECKPOINT_PATH}"
+  --route_length_m 4.0
+  --repeats 50
+  --num_inference_steps 10
+  --exec_horizon 4
+  --profile_transition_margin_m 0.25
+  --headless
+  --require_empty_output_dir
+  --device cuda:0
+)
+
+# ID constant postures: 1,200 conditions, 200 independent geometries.
+./isaaclab.sh -p scripts/diffusion_policy/evaluate_policy.py \
+  "${COMMON[@]}" --route_bank "${ID_BANK}" \
+  --output_dir "${OUTPUT_ROOT}/id_constant" \
+  --path_shapes procedural coherent_smooth rounded_waypoint hard_waypoint \
+  --speeds 0.2 0.35 0.45 --path_heights 0.2932 0.1705 \
+  --duration_s 24.0 --seed 160142
+
+# ID posture composition: 3,600 conditions on the same 200 geometries.
+./isaaclab.sh -p scripts/diffusion_policy/evaluate_policy.py \
+  "${COMMON[@]}" --route_bank "${ID_BANK}" \
+  --output_dir "${OUTPUT_ROOT}/id_transition" \
+  --path_shapes procedural coherent_smooth rounded_waypoint hard_waypoint \
+  --speeds 0.2 0.35 0.45 --transition_fractions 0.4 0.5 0.6 \
+  --transition_directions both --duration_s 24.0 --seed 160142
+
+# Functional fast-trot test.  These two suites pair a single 0.8 m restricted
+# section with 3.2 m open route.  0.95/1.00 m/s are boundary tests, not ID gates.
+./isaaclab.sh -p scripts/diffusion_policy/evaluate_policy.py \
+  "${COMMON[@]}" --route_bank "${ID_BANK}" \
+  --output_dir "${OUTPUT_ROOT}/fast_crouch_to_walk" \
+  --path_shapes procedural coherent_smooth rounded_waypoint hard_waypoint \
+  --speeds 0.65 0.75 0.85 0.95 1.0 --transition_fractions 0.2 \
+  --transition_directions crouch_to_walk --duration_s 8.0 --seed 160142 \
+  --save_timeseries
+
+./isaaclab.sh -p scripts/diffusion_policy/evaluate_policy.py \
+  "${COMMON[@]}" --route_bank "${ID_BANK}" \
+  --output_dir "${OUTPUT_ROOT}/fast_walk_to_crouch" \
+  --path_shapes procedural coherent_smooth rounded_waypoint hard_waypoint \
+  --speeds 0.65 0.75 0.85 0.95 1.0 --transition_fractions 0.8 \
+  --transition_directions walk_to_crouch --duration_s 8.0 --seed 160142 \
+  --save_timeseries
+
+# Randomized geometric OOD.  Never pool these rates with the ID table.
+./isaaclab.sh -p scripts/diffusion_policy/evaluate_policy.py \
+  "${COMMON[@]}" --route_bank "${OOD_BANK}" \
+  --output_dir "${OUTPUT_ROOT}/ood_constant" \
+  --path_shapes ood_arc ood_s_curve ood_corner \
+  --speeds 0.2 0.35 0.45 --path_heights 0.2932 0.1705 \
+  --duration_s 24.0 --seed 260542
+
+./isaaclab.sh -p scripts/diffusion_policy/evaluate_policy.py \
+  "${COMMON[@]}" --route_bank "${OOD_BANK}" \
+  --output_dir "${OUTPUT_ROOT}/ood_transition" \
+  --path_shapes ood_arc ood_s_curve ood_corner \
+  --speeds 0.2 0.35 0.45 --transition_fractions 0.4 0.6 \
+  --transition_directions both --duration_s 24.0 --seed 260542
+
+# Fixed historical shapes are retained only as a backward-comparable stress
+# screen.  Their repeated conditions are not counted as independent routes.
+./isaaclab.sh -p scripts/diffusion_policy/evaluate_policy.py \
+  --checkpoint "${CHECKPOINT_PATH}" \
+  --output_dir "${OUTPUT_ROOT}/legacy_templates" \
+  --path_shapes straight circle s_curve right_angle random_polyline \
+  --route_length_m 4.0 --speeds 0.2 0.35 0.45 \
+  --transition_fractions 0.4 0.6 --transition_directions both \
+  --profile_transition_margin_m 0.25 --repeats 3 --duration_s 24.0 \
+  --num_inference_steps 10 --exec_horizon 4 --seed 542 \
+  --headless --require_empty_output_dir --device cuda:0
+
+python scripts/diffusion_policy/evaluation/analyze_temporal_allocation.py \
+  "${OUTPUT_ROOT}/fast_crouch_to_walk" --segment_m 0.4
+python scripts/diffusion_policy/evaluation/analyze_temporal_allocation.py \
+  "${OUTPUT_ROOT}/fast_walk_to_crouch" --segment_m 0.4
+
+python "${PROTOCOL_DIR}/summarize_benchmark.py" \
+  --suite id_constant="${OUTPUT_ROOT}/id_constant" \
+  --suite id_transition="${OUTPUT_ROOT}/id_transition" \
+  --suite fast_crouch_to_walk="${OUTPUT_ROOT}/fast_crouch_to_walk" \
+  --suite fast_walk_to_crouch="${OUTPUT_ROOT}/fast_walk_to_crouch" \
+  --suite ood_constant="${OUTPUT_ROOT}/ood_constant" \
+  --suite ood_transition="${OUTPUT_ROOT}/ood_transition" \
+  --output_dir "${OUTPUT_ROOT}/summary"
+
+echo "WCT evaluation complete: ${OUTPUT_ROOT}"

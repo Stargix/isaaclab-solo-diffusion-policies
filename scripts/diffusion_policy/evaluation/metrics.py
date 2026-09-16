@@ -55,6 +55,114 @@ class TaskSuccessMetrics:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class ActiveTrackingMetrics:
+    """Tracking diagnostics truncated at first arrival or physical failure."""
+
+    steps: int
+    cross_track_mean_m: float
+    cross_track_rmse_m: float
+    cross_track_p95_m: float
+    cross_track_max_m: float
+    height_mae_m: float
+    height_bias_m: float
+    height_p95_m: float
+    pre_transition_cross_track_rmse_m: float
+    transition_cross_track_rmse_m: float
+    post_transition_cross_track_rmse_m: float
+    pre_transition_height_mae_m: float
+    transition_height_mae_m: float
+    post_transition_height_mae_m: float
+
+    def to_dict(self) -> dict[str, float | int]:
+        return asdict(self)
+
+
+def _rmse(values: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(np.square(values)))) if values.size else float("nan")
+
+
+def _mae(values: np.ndarray) -> float:
+    return float(np.mean(np.abs(values))) if values.size else float("nan")
+
+
+def compute_active_tracking_metrics(
+    positions_xy: np.ndarray,
+    path_xy: np.ndarray,
+    *,
+    heights_m: np.ndarray,
+    target_heights_m: np.ndarray,
+    start_position_xy: np.ndarray,
+    active_steps: int | None = None,
+    transition_progress_m: float | None = None,
+    transition_margin_m: float = 0.25,
+) -> ActiveTrackingMetrics:
+    """Measure route/height tracking only while the task is active.
+
+    ``active_steps`` should be the first-arrival step when an arrival exists;
+    otherwise callers omit it and all physically valid pre-failure samples are
+    used.  Transition strata are spatial, so different requested speeds remain
+    comparable without time-warping the profile.
+    """
+
+    positions = np.asarray(positions_xy, dtype=np.float64)
+    heights = np.asarray(heights_m, dtype=np.float64).reshape(-1)
+    targets = np.asarray(target_heights_m, dtype=np.float64).reshape(-1)
+    if positions.ndim != 2 or positions.shape[1] != 2 or len(positions) == 0:
+        raise ValueError("positions_xy must have shape (T, 2), T >= 1.")
+    if len(heights) != len(positions) or len(targets) != len(positions):
+        raise ValueError("Height arrays must match positions_xy.")
+    if active_steps is None:
+        active_steps = len(positions)
+    if not 1 <= active_steps <= len(positions):
+        raise ValueError("active_steps must lie within the available trajectory.")
+    if transition_margin_m < 0.0:
+        raise ValueError("transition_margin_m must be non-negative.")
+
+    positions = positions[:active_steps]
+    heights = heights[:active_steps]
+    targets = targets[:active_steps]
+    start = np.asarray(start_position_xy, dtype=np.float64).reshape(-1)
+    if start.size != 2:
+        raise ValueError("start_position_xy must contain two values.")
+    combined_progress, combined_cross_track = project_trajectory_to_polyline(
+        np.vstack((start, positions)), path_xy
+    )
+    progress = combined_progress[1:] - float(combined_progress[0])
+    cross_track = combined_cross_track[1:].astype(np.float64)
+    height_error = heights - targets
+
+    nan = float("nan")
+    phase_cte = [nan, nan, nan]
+    phase_height = [nan, nan, nan]
+    if transition_progress_m is not None and np.isfinite(transition_progress_m):
+        boundary = float(transition_progress_m)
+        phase_masks = (
+            progress < boundary - transition_margin_m,
+            np.abs(progress - boundary) <= transition_margin_m,
+            progress > boundary + transition_margin_m,
+        )
+        phase_cte = [_rmse(cross_track[mask]) for mask in phase_masks]
+        phase_height = [_mae(height_error[mask]) for mask in phase_masks]
+
+    return ActiveTrackingMetrics(
+        steps=int(active_steps),
+        cross_track_mean_m=float(np.mean(cross_track)),
+        cross_track_rmse_m=_rmse(cross_track),
+        cross_track_p95_m=float(np.percentile(cross_track, 95)),
+        cross_track_max_m=float(np.max(cross_track)),
+        height_mae_m=_mae(height_error),
+        height_bias_m=float(np.mean(height_error)),
+        height_p95_m=float(np.percentile(np.abs(height_error), 95)),
+        pre_transition_cross_track_rmse_m=phase_cte[0],
+        transition_cross_track_rmse_m=phase_cte[1],
+        post_transition_cross_track_rmse_m=phase_cte[2],
+        pre_transition_height_mae_m=phase_height[0],
+        transition_height_mae_m=phase_height[1],
+        post_transition_height_mae_m=phase_height[2],
+    )
+
+
 def physical_state_valid(
     root_positions_w: np.ndarray,
     planar_speeds_m_s: np.ndarray,
