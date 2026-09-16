@@ -66,12 +66,18 @@ treated as independent statistical evidence.
 | `fast_walk_to_crouch` | brake into a final 0.8 m restricted section | 200 | same speeds |
 | `ood_constant` | geometric transfer | 150 | two heights, three speeds |
 | `ood_transition` | composition under geometric shift | 150 | two fractions/directions, three speeds |
+| `ood_fast_crouch_to_walk` | accelerate after an OOD restricted section | 150 | 0.65/0.85/1.00 m/s |
+| `ood_fast_walk_to_crouch` | brake into an OOD restricted section | 150 | 0.65/0.85/1.00 m/s |
 | `legacy_templates` | historical qualitative comparison | not a statistical bank | old templates |
 
 `0.95` and `1.00 m/s` are boundary/OOD temporal tests.  With 0.8 m of crouch
 near 0.4 m/s and an open-section support near 1.5 m/s, exactly 1.0 m/s average
 can be physically infeasible.  Failure there does not invalidate the ID gate;
 it identifies the capability boundary.
+
+The OOD-fast suites are stress tests and are never pooled into the ID gate.
+They test whether the behavior that differentiates WCT also transfers to
+unseen geometry; they do not require every sharp corner at 1.0 m/s to succeed.
 
 ## Metrics
 
@@ -90,10 +96,26 @@ Trajectory and height plots are also truncated at first arrival.  A gold
 diamond marks the spatial height transition.  This prevents the robot's
 post-task standing behavior from making path or height tracking look better.
 
-The two fast suites additionally save foot-contact traces.  The offline
+The constant ID suite and all four fast suites additionally save foot-contact traces. The constant
+suite supplies the low-speed walk/crouch reference; the offline
 temporal report contains local tangent speed, schedule debt, duty factor,
 flight fraction and diagonal/ipsilateral contact correlation per 0.4 m route
 segment.  These are post-hoc diagnostics, not rewards and not gait labels.
+Temporal and contact traces stop at first geometric arrival, so braking after
+the task has finished cannot be misread as failure to maintain speed.
+
+Each fast suite produces:
+
+- `temporal_allocation.png`: route-progress speed and schedule debt, with the
+  low-height section shaded;
+- `gait_signature.png`: duty factor, full-flight fraction and raw diagonal /
+  ipsilateral contact correlations, stratified by commanded-height section;
+- `representative_contact_raster.png`: a qualitative raster selected by a
+  fixed rule (lexicographically first route at the tested speed nearest
+  0.85 m/s), preventing post-hoc cherry-picking.
+
+No derived "trot score" is reported.  Evidence for fast-trot utilization
+requires the speed-allocation plot and the raw contact diagnostics to agree.
 
 ## Running on the cluster
 
@@ -144,8 +166,19 @@ Outputs of interest:
 - `<root>/summary/aggregate_metrics.csv`;
 - `<root>/summary/route_level_metrics.csv`;
 - `<root>/summary/benchmark_overview.png`;
-- `<root>/fast_*/temporal_allocation_summary.json`;
-- `<root>/fast_*/temporal_allocation.png`.
+- `<root>/summary/benchmark_overview_navigation.png`;
+- `<root>/summary/benchmark_overview_fast.png`;
+- `<root>/id_constant/gait_signature.png`;
+- `<root>/*fast*/temporal_allocation_summary.json`;
+- `<root>/*fast*/temporal_allocation.png`;
+- `<root>/*fast*/gait_signature.png`;
+- `<root>/*fast*/representative_contact_raster.png`.
+
+For a paper-facing result, use the two split overview figures rather than the
+combined overview. Keep per-suite `survival_and_smoothness.png`, maximum CTE,
+and `legacy_templates` as engineering/supplementary diagnostics: action delta
+is not an energy or gait-quality measure, maximum CTE is outlier-sensitive,
+and the legacy templates are not independent statistical routes.
 
 Only after this WCT protocol passes should WC be evaluated on the exact same
 banks.  The paired comparison then tests negative transfer on slow tasks and

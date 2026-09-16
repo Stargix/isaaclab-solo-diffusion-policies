@@ -89,6 +89,52 @@ def _load_suite(name: str, directory: Path) -> tuple[list[dict[str, str]], dict[
     return rows, metadata
 
 
+def _suite_label(name: str) -> str:
+    prefix = "OOD" if name.startswith("ood_") else "ID"
+    body = name.removeprefix("ood_").removeprefix("id_")
+    body = body.replace("crouch_to_walk", "C->W").replace("walk_to_crouch", "W->C")
+    return prefix + "\n" + body.replace("_", " ")
+
+
+def _plot_overview(
+    rows: list[dict[str, object]], output_path: Path, title: str
+) -> None:
+    if not rows:
+        return
+    import matplotlib.pyplot as plt
+
+    figure, axes = plt.subplots(2, 2, figsize=(13, 8), facecolor="white")
+    plot_metrics = (
+        "task_success_rate",
+        "active_cross_track_p95_m",
+        "active_height_mae_m",
+        "arrival_speed_abs_error_m_s",
+    )
+    x = np.arange(len(rows))
+    colors = ["#E67E22" if str(row["suite"]).startswith("ood_") else "#0052CC" for row in rows]
+    for axis, metric in zip(axes.flat, plot_metrics):
+        means = np.asarray([float(row[metric]) for row in rows])
+        lower = np.asarray([float(row[f"{metric}_ci95_low"]) for row in rows])
+        upper = np.asarray([float(row[f"{metric}_ci95_high"]) for row in rows])
+        errors = np.vstack((means - lower, upper - means))
+        axis.bar(x, means, color=colors, alpha=0.85)
+        axis.errorbar(x, means, yerr=errors, fmt="none", ecolor="#222222", capsize=3)
+        rotation = 0 if len(rows) <= 4 else 12
+        alignment = "center" if rotation == 0 else "right"
+        axis.set_xticks(
+            x,
+            [_suite_label(str(row["suite"])) for row in rows],
+            rotation=rotation,
+            ha=alignment,
+        )
+        axis.set_title(METRICS[metric][0])
+        axis.grid(axis="y", alpha=0.25)
+    figure.suptitle(title, fontweight="bold", y=0.995)
+    figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.94))
+    figure.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(figure)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -186,31 +232,38 @@ def main() -> None:
     import matplotlib
 
     matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
 
-    overall = [row for row in aggregate_rows if row["path_shape"] == "__all__"]
-    figure, axes = plt.subplots(2, 2, figsize=(13, 8), facecolor="white")
-    plot_metrics = (
-        "task_success_rate",
-        "active_cross_track_p95_m",
-        "active_height_mae_m",
-        "arrival_speed_abs_error_m_s",
+    order = {
+        "id_constant": 0,
+        "id_transition": 1,
+        "ood_constant": 2,
+        "ood_transition": 3,
+        "fast_crouch_to_walk": 4,
+        "fast_walk_to_crouch": 5,
+        "ood_fast_crouch_to_walk": 6,
+        "ood_fast_walk_to_crouch": 7,
+    }
+    overall = sorted(
+        [row for row in aggregate_rows if row["path_shape"] == "__all__"],
+        key=lambda row: order.get(str(row["suite"]), 999),
     )
-    x = np.arange(len(overall))
-    for axis, metric in zip(axes.flat, plot_metrics):
-        means = np.asarray([float(row[metric]) for row in overall])
-        lower = np.asarray([float(row[f"{metric}_ci95_low"]) for row in overall])
-        upper = np.asarray([float(row[f"{metric}_ci95_high"]) for row in overall])
-        errors = np.vstack((means - lower, upper - means))
-        axis.bar(x, means, color="#0052CC", alpha=0.85)
-        axis.errorbar(x, means, yerr=errors, fmt="none", ecolor="#222222", capsize=3)
-        axis.set_xticks(x, [str(row["suite"]) for row in overall], rotation=20, ha="right")
-        axis.set_title(METRICS[metric][0])
-        axis.grid(axis="y", alpha=0.25)
-    figure.suptitle("WCT benchmark — route-clustered 95% bootstrap intervals", fontweight="bold")
-    figure.tight_layout()
-    figure.savefig(output_dir / "benchmark_overview.png", dpi=180, bbox_inches="tight")
-    plt.close(figure)
+    navigation = [row for row in overall if "fast" not in str(row["suite"])]
+    fast = [row for row in overall if "fast" in str(row["suite"])]
+    _plot_overview(
+        overall,
+        output_dir / "benchmark_overview.png",
+        "WCT benchmark - route-clustered 95% bootstrap intervals",
+    )
+    _plot_overview(
+        navigation,
+        output_dir / "benchmark_overview_navigation.png",
+        "Navigation and posture composition (ID and OOD reported separately)",
+    )
+    _plot_overview(
+        fast,
+        output_dir / "benchmark_overview_fast.png",
+        "Fast-section capability and geometric OOD stress tests",
+    )
     print(json.dumps({"routes": len(route_rows), "aggregates": len(aggregate_rows)}, indent=2))
 
 

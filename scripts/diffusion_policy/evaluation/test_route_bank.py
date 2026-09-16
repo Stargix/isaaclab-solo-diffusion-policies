@@ -10,7 +10,12 @@ import numpy as np
 
 from .metrics import compute_active_tracking_metrics
 from .route_bank import generate_bank, load_route_bank, save_route_bank
-from .analyze_temporal_allocation import _leg_indices
+from .analyze_temporal_allocation import (
+    _contact_metrics_by_height,
+    _leg_indices,
+    _low_height_spans,
+    _valid_until_first_arrival,
+)
 
 
 class RouteBankTest(unittest.TestCase):
@@ -45,6 +50,53 @@ class RouteBankTest(unittest.TestCase):
         self.assertEqual(manifest["routes"], 6)
         self.assertEqual(set(loaded), {(family, repeat) for family in ("procedural", "ood_corner") for repeat in range(3)})
         np.testing.assert_array_equal(loaded[("ood_corner", 2)].xy, first[-1].xy)
+
+    def test_contact_metrics_are_split_by_required_height_not_skill_label(self) -> None:
+        contact = np.asarray(
+            [
+                [1, 0, 0, 1],
+                [1, 0, 0, 1],
+                [0, 1, 1, 0],
+                [0, 1, 1, 0],
+            ],
+            dtype=bool,
+        )
+        result = _contact_metrics_by_height(
+            contact,
+            np.asarray([0.1705, 0.1705, 0.2932, 0.2932]),
+            np.ones(4, dtype=bool),
+            {"fl": 0, "fr": 1, "hl": 2, "hr": 3},
+        )
+        self.assertEqual(set(result), {"crouch_height", "walk_height"})
+        self.assertAlmostEqual(result["crouch_height"]["required_height_m"], 0.1705)
+        self.assertAlmostEqual(result["walk_height"]["required_height_m"], 0.2932)
+
+    def test_low_height_plot_spans_are_contiguous(self) -> None:
+        rows = [
+            {"progress_start_m": start, "required_height_m": height}
+            for start, height in ((0.0, 0.1705), (0.4, 0.1705), (0.8, 0.2932), (1.2, 0.2932))
+        ]
+        self.assertEqual(_low_height_spans(rows, 0.4), [(0.0, 0.8)])
+
+    def test_temporal_trace_stops_at_first_geometric_arrival(self) -> None:
+        positions = np.asarray(
+            [
+                [[0.4, 0.0]],
+                [[0.86, 0.0]],
+                [[1.0, 0.0]],
+                [[1.0, 0.0]],
+            ]
+        )
+        progress = np.asarray([[0.4], [0.86], [1.0], [1.0]])
+        valid = np.ones((4, 1), dtype=bool)
+        scenarios = [
+            {
+                "path_xy": [[0.0, 0.0], [1.0, 0.0]],
+                "path_cumulative_m": [0.0, 1.0],
+            }
+        ]
+        active = _valid_until_first_arrival(positions, progress, valid, scenarios)
+        np.testing.assert_array_equal(active[:, 0], [True, True, True, False])
 
     def test_active_tracking_stops_at_arrival_and_stratifies_transition(self) -> None:
         path = np.column_stack((np.linspace(0.0, 4.0, 101), np.zeros(101)))

@@ -76,7 +76,7 @@ COMMON=(
   --output_dir "${OUTPUT_ROOT}/id_constant" \
   --path_shapes procedural coherent_smooth rounded_waypoint hard_waypoint \
   --speeds 0.2 0.35 0.45 --path_heights 0.2932 0.1705 \
-  --duration_s 24.0 --seed 160142
+  --duration_s 24.0 --seed 160142 --save_timeseries
 
 # ID posture composition: 3,600 conditions on the same 200 geometries.
 ./isaaclab.sh -p scripts/diffusion_policy/evaluate_policy.py \
@@ -119,6 +119,24 @@ COMMON=(
   --speeds 0.2 0.35 0.45 --transition_fractions 0.4 0.6 \
   --transition_directions both --duration_s 24.0 --seed 260542
 
+# Fast composition under geometric shift.  These are OOD stress tests, not ID
+# gates: 0.85/1.00 m/s can be infeasible on the sharpest randomized corners.
+./isaaclab.sh -p scripts/diffusion_policy/evaluate_policy.py \
+  "${COMMON[@]}" --route_bank "${OOD_BANK}" \
+  --output_dir "${OUTPUT_ROOT}/ood_fast_crouch_to_walk" \
+  --path_shapes ood_arc ood_s_curve ood_corner \
+  --speeds 0.65 0.85 1.0 --transition_fractions 0.2 \
+  --transition_directions crouch_to_walk --duration_s 8.0 --seed 260542 \
+  --save_timeseries
+
+./isaaclab.sh -p scripts/diffusion_policy/evaluate_policy.py \
+  "${COMMON[@]}" --route_bank "${OOD_BANK}" \
+  --output_dir "${OUTPUT_ROOT}/ood_fast_walk_to_crouch" \
+  --path_shapes ood_arc ood_s_curve ood_corner \
+  --speeds 0.65 0.85 1.0 --transition_fractions 0.8 \
+  --transition_directions walk_to_crouch --duration_s 8.0 --seed 260542 \
+  --save_timeseries
+
 # Fixed historical shapes are retained only as a backward-comparable stress
 # screen.  Their repeated conditions are not counted as independent routes.
 ./isaaclab.sh -p scripts/diffusion_policy/evaluate_policy.py \
@@ -132,9 +150,15 @@ COMMON=(
   --headless --require_empty_output_dir --device cuda:0
 
 python scripts/diffusion_policy/evaluation/analyze_temporal_allocation.py \
+  "${OUTPUT_ROOT}/id_constant" --segment_m 0.4
+python scripts/diffusion_policy/evaluation/analyze_temporal_allocation.py \
   "${OUTPUT_ROOT}/fast_crouch_to_walk" --segment_m 0.4
 python scripts/diffusion_policy/evaluation/analyze_temporal_allocation.py \
   "${OUTPUT_ROOT}/fast_walk_to_crouch" --segment_m 0.4
+python scripts/diffusion_policy/evaluation/analyze_temporal_allocation.py \
+  "${OUTPUT_ROOT}/ood_fast_crouch_to_walk" --segment_m 0.4
+python scripts/diffusion_policy/evaluation/analyze_temporal_allocation.py \
+  "${OUTPUT_ROOT}/ood_fast_walk_to_crouch" --segment_m 0.4
 
 python "${PROTOCOL_DIR}/summarize_benchmark.py" \
   --suite id_constant="${OUTPUT_ROOT}/id_constant" \
@@ -143,6 +167,8 @@ python "${PROTOCOL_DIR}/summarize_benchmark.py" \
   --suite fast_walk_to_crouch="${OUTPUT_ROOT}/fast_walk_to_crouch" \
   --suite ood_constant="${OUTPUT_ROOT}/ood_constant" \
   --suite ood_transition="${OUTPUT_ROOT}/ood_transition" \
+  --suite ood_fast_crouch_to_walk="${OUTPUT_ROOT}/ood_fast_crouch_to_walk" \
+  --suite ood_fast_walk_to_crouch="${OUTPUT_ROOT}/ood_fast_walk_to_crouch" \
   --output_dir "${OUTPUT_ROOT}/summary"
 
 echo "WCT evaluation complete: ${OUTPUT_ROOT}"
