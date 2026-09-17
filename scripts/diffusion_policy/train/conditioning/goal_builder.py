@@ -789,7 +789,7 @@ def build_geometric_hindsight_goal_batch_from_path(
     *,
     goal_horizon_steps: int,
     dt: float,
-    speed: float,
+    speed: float | np.ndarray,
     path_progress: np.ndarray | None = None,
     v_avg_clip: float = 2.0,
 ) -> np.ndarray:
@@ -798,13 +798,17 @@ def build_geometric_hindsight_goal_batch_from_path(
     num_envs = robot_pos_w.shape[0]
     if path_progress is None:
         path_progress = np.zeros(num_envs, dtype=np.int32)
+    speed_values = np.broadcast_to(
+        np.asarray(speed, dtype=np.float32), (num_envs,)
+    )
     goals = []
     for index in range(num_envs):
         start_idx = advance_path_progress(path_w, robot_pos_w[index], int(path_progress[index]))
         path_progress[index] = start_idx
         goals.append(build_geometric_hindsight_goal_from_path(
             path_w, cumulative_xy, yaws_w, robot_pos_w[index], robot_quat_w[index],
-            goal_horizon_steps=goal_horizon_steps, dt=dt, speed=speed, start_idx=start_idx,
+            goal_horizon_steps=goal_horizon_steps, dt=dt,
+            speed=float(speed_values[index]), start_idx=start_idx,
             v_avg_clip=v_avg_clip,
         ))
     return np.stack(goals, axis=0).astype(np.float32)
@@ -819,7 +823,7 @@ def build_geometric_height_profile_goal_batch_from_path(
     *,
     goal_horizon_steps: int,
     dt: float,
-    speed: float,
+    speed: float | np.ndarray,
     path_progress: np.ndarray | None = None,
     v_avg_clip: float = 2.0,
 ) -> np.ndarray:
@@ -828,6 +832,9 @@ def build_geometric_height_profile_goal_batch_from_path(
     num_envs = robot_pos_w.shape[0]
     if path_progress is None:
         path_progress = np.zeros(num_envs, dtype=np.int32)
+    speed_values = np.broadcast_to(
+        np.asarray(speed, dtype=np.float32), (num_envs,)
+    )
     goals = []
     for index in range(num_envs):
         start_idx = advance_path_progress(path_w, robot_pos_w[index], int(path_progress[index]))
@@ -840,7 +847,7 @@ def build_geometric_height_profile_goal_batch_from_path(
             robot_quat_w[index],
             goal_horizon_steps=goal_horizon_steps,
             dt=dt,
-            speed=speed,
+            speed=float(speed_values[index]),
             start_idx=start_idx,
             v_avg_clip=v_avg_clip,
         ))

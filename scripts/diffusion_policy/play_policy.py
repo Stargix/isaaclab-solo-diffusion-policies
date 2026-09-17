@@ -117,6 +117,7 @@ from train.runtime.optimization import trace_denoiser
 from train.config import resolve_inference_steps
 from train.conditioning.geometry import cumulative_xy_lengths, quat_wxyz_to_rotmat, yaw_from_rotmat
 from train.conditioning.goal_builder import (
+    advance_path_progress,
     build_goal_batch_from_path,
     build_geometric_hindsight_goal_batch_from_path,
     build_geometric_height_profile_goal_batch_from_path,
@@ -477,10 +478,45 @@ def compute_goals(
     speed_budget_target_arc: np.ndarray | None = None,
     speed_budget_elapsed_s: np.ndarray | None = None,
     speed_budget_max_mps: float | None = None,
+    pace_consistent_preview: bool = False,
 ) -> torch.Tensor:
     robot = raw_env._robot
     pos_w = robot.data.root_pos_w.cpu().numpy()
     quat_w = robot.data.root_quat_w.cpu().numpy()
+    dynamic_budget = (
+        speed_budget_start_arc is not None
+        or speed_budget_target_arc is not None
+        or speed_budget_elapsed_s is not None
+    )
+    if dynamic_budget:
+        if any(value is None for value in (
+            speed_budget_start_arc, speed_budget_target_arc, speed_budget_elapsed_s
+        )):
+            raise ValueError("All dynamic speed-budget arrays must be provided together.")
+        if goal_representation not in {"hindsight_geom_avg12", "hindsight_geom_profile16"}:
+            raise ValueError("Dynamic speed budget requires a geometric average-speed goal schema.")
+
+    conditioning_speed: float | np.ndarray = speed
+    if dynamic_budget and pace_consistent_preview:
+        for index in range(len(path_progress)):
+            path_progress[index] = advance_path_progress(
+                path_w, pos_w[index], int(path_progress[index])
+            )
+        from scripts.dppo_diffusion_rl.conditioning import remaining_speed_budget
+
+        current_arc = cumulative_lengths[path_progress]
+        target_distance = np.maximum(speed_budget_target_arc - speed_budget_start_arc, 0.0)
+        remaining_distance = np.maximum(speed_budget_target_arc - current_arc, 0.0)
+        conditioning_speed = remaining_speed_budget(
+            remaining_distance=torch.as_tensor(remaining_distance, device=device),
+            route_length=torch.as_tensor(target_distance, device=device),
+            desired_mean_speed=torch.full(
+                (len(path_progress),), float(speed), device=device
+            ),
+            elapsed_s=torch.as_tensor(speed_budget_elapsed_s, device=device),
+            max_speed=float(speed_budget_max_mps or v_req_clip),
+            min_remaining_time_s=dt,
+        ).detach().cpu().numpy()
     if goal_representation == "path_guidance_se2_36":
         goals = build_path_guidance_goal_batch_from_path(
             path_w,
@@ -500,13 +536,13 @@ def compute_goals(
     elif goal_representation == "hindsight_geom_avg12":
         goals = build_geometric_hindsight_goal_batch_from_path(
             path_w, cumulative_lengths, yaws_w, pos_w, quat_w,
-            goal_horizon_steps=goal_horizon_steps, dt=dt, speed=speed,
+            goal_horizon_steps=goal_horizon_steps, dt=dt, speed=conditioning_speed,
             path_progress=path_progress, v_avg_clip=v_req_clip,
         )
     elif goal_representation == "hindsight_geom_profile16":
         goals = build_geometric_height_profile_goal_batch_from_path(
             path_w, cumulative_lengths, yaws_w, pos_w, quat_w,
-            goal_horizon_steps=goal_horizon_steps, dt=dt, speed=speed,
+            goal_horizon_steps=goal_horizon_steps, dt=dt, speed=conditioning_speed,
             path_progress=path_progress, v_avg_clip=v_req_clip,
         )
     else:
@@ -517,17 +553,7 @@ def compute_goals(
             dt=dt, speed=speed, path_progress=path_progress, v_req_clip=v_req_clip,
         )
     goals_tensor = torch.from_numpy(goals).to(device)
-    if (
-        speed_budget_start_arc is not None
-        or speed_budget_target_arc is not None
-        or speed_budget_elapsed_s is not None
-    ):
-        if any(value is None for value in (
-            speed_budget_start_arc, speed_budget_target_arc, speed_budget_elapsed_s
-        )):
-            raise ValueError("All dynamic speed-budget arrays must be provided together.")
-        if goal_representation not in {"hindsight_geom_avg12", "hindsight_geom_profile16"}:
-            raise ValueError("Dynamic speed budget requires a geometric average-speed goal schema.")
+    if dynamic_budget and not pace_consistent_preview:
         from scripts.dppo_diffusion_rl.conditioning import remaining_speed_budget
 
         current_arc = cumulative_lengths[path_progress]
@@ -778,13 +804,21 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     speed_budget_max_mps = float(
         checkpoint.get("dppo_task_config", {}).get("speed_budget_max_mps", 0.8)
     )
+    pace_consistent_preview = bool(
+        checkpoint.get("dppo_task_config", {}).get(
+            "pace_consistent_preview", False
+        )
+    )
     speed_budget_start_arc = path_plan.cumulative_lengths[path_progress].astype(np.float32)
     speed_budget_target_arc = np.full(
         num_envs, float(path_plan.cumulative_lengths[-1]), dtype=np.float32
     )
     speed_budget_elapsed_s = np.zeros(num_envs, dtype=np.float32)
     if dynamic_speed_budget:
-        print("[INFO] Actor conditioning: closed-loop remaining-route speed budget (task contract v3).")
+        print(
+            "[INFO] Actor conditioning: closed-loop remaining-route speed budget "
+            f"(pace-consistent preview={pace_consistent_preview})."
+        )
 
     # Benchmark latency over 50 runs.
     print("[INFO] Benchmarking policy latency over 50 passes...")
@@ -902,18 +936,24 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 speed_budget_target_arc=speed_budget_target_arc if dynamic_speed_budget else None,
                 speed_budget_elapsed_s=speed_budget_elapsed_s if dynamic_speed_budget else None,
                 speed_budget_max_mps=speed_budget_max_mps if dynamic_speed_budget else None,
+                pace_consistent_preview=pace_consistent_preview,
             )
             _, _, dones, _ = vec_env.step(action_step)
             speed_budget_elapsed_s += float(dt)
 
             if debug_viz is not None and step_count % args_cli.visualize_update_interval == 0:
+                visual_preview_speed = (
+                    float(goal_before_action[0, -1].item())
+                    if pace_consistent_preview
+                    else float(args_cli.desired_speed)
+                )
                 debug_goal_idx = visualization_goal_index(
                     path_plan.cumulative_lengths,
                     progress_index=int(path_progress[0]),
                     goal_representation=goal_representation,
                     goal_horizon_steps=goal_horizon_steps,
                     dt=dt,
-                    speed=args_cli.desired_speed,
+                    speed=visual_preview_speed,
                 )
                 debug_viz.update(
                     robot_position_w=raw_env._robot.data.root_pos_w[0].cpu().numpy(),

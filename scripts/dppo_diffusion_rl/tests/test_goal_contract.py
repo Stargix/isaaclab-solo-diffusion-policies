@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from scripts.diffusion_policy.train.conditioning.goal_builder import (
+    build_geometric_height_profile_goal_batch_from_path,
     build_geometric_height_profile_goal_from_path,
 )
 from scripts.residual_diffusion_rl.routes import RouteBank
@@ -80,3 +81,24 @@ def test_preview_speed_changes_geometry_and_vavg_consistently() -> None:
     # the scalar average pace, rather than either matching the raw request.
     assert float(nominal[-1]) == pytest.approx(float(nominal[9]) / 2.0, abs=1.0e-5)
     assert float(recovered[-1]) == pytest.approx(float(recovered[9]) / 2.0, abs=1.0e-5)
+
+
+def test_batch_goal_accepts_per_environment_preview_pace() -> None:
+    cumulative = np.linspace(0.0, 4.0, 101, dtype=np.float32)
+    path = np.column_stack(
+        (cumulative, np.zeros_like(cumulative), np.full_like(cumulative, 0.2932))
+    )
+    goals = build_geometric_height_profile_goal_batch_from_path(
+        path,
+        cumulative,
+        np.zeros_like(cumulative),
+        np.zeros((2, 3), dtype=np.float32),
+        np.tile(np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32), (2, 1)),
+        goal_horizon_steps=100,
+        dt=0.02,
+        speed=np.asarray([0.4, 0.8], dtype=np.float32),
+        path_progress=np.zeros(2, dtype=np.int32),
+        v_avg_clip=2.0,
+    )
+    assert goals[1, 9] > goals[0, 9]
+    np.testing.assert_allclose(goals[:, -1], goals[:, 9] / 2.0, atol=1.0e-5)

@@ -38,6 +38,11 @@ Therefore the ablation is interpretable: any change relative to v3 comes from
 coherent goal conditioning and better supported fast-task coverage, not reward
 retuning.
 
+With viewport debugging enabled, the red full route is unchanged. The orange
+segment is the actual policy preview, while the yellow sphere and gold arrow
+mark its endpoint and yaw. For v4 these overlays use the same remaining pace
+as the actor goal; older checkpoints retain nominal-speed visualization.
+
 ## Local preflight
 
 ```powershell
