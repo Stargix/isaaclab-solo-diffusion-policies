@@ -125,6 +125,8 @@ scripts/diffusion_policy/data/coverage/
 scripts/diffusion_policy/data/audits/
 scripts/diffusion_policy/evaluations/phase_a_causal_audit_v1/
 scripts/diffusion_policy/evaluations/phase_a_capability_audit_v1/
+# Generated WCT benchmark outputs (CSV/NPZ/plots); protocol stays tracked.
+scripts/dppo_diffusion_rl/evaluations/wct_final_evaluation_v1_*/
 
 # Local workspace links and SLURM outputs
 /sbs
