@@ -49,6 +49,25 @@ def bounded_huber(error: torch.Tensor, scale: float) -> torch.Tensor:
     return -torch.expm1(-normalized_huber(error, scale))
 
 
+def distance_weighted_rmse(
+    weighted_squared_error_sum: torch.Tensor,
+    distance_sum: torch.Tensor,
+    *,
+    eps: float = 1.0e-6,
+) -> torch.Tensor:
+    """Stable route RMSE for error statistics accumulated per metre."""
+
+    if eps <= 0.0:
+        raise ValueError("eps must be positive.")
+    if weighted_squared_error_sum.shape != distance_sum.shape:
+        raise ValueError("RMSE accumulators must have identical shapes.")
+    valid = distance_sum > eps
+    value = torch.sqrt(
+        weighted_squared_error_sum.clamp_min(0.0) / distance_sum.clamp_min(eps)
+    )
+    return torch.where(valid, value, torch.zeros_like(value))
+
+
 def average_speed_error(
     progress: torch.Tensor,
     elapsed_s: torch.Tensor,

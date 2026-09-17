@@ -1,0 +1,36 @@
+{
+  "seed": 20260917,
+  "samples": 4096,
+  "geometry_counts": [
+    2048,
+    1024,
+    1024
+  ],
+  "profile_counts": [
+    1024,
+    1024,
+    1024,
+    1024
+  ],
+  "transition_context_counts": [
+    1024,
+    512,
+    512
+  ],
+  "sampled_speed_mps": {
+    "p05": 0.21608220040798187,
+    "median": 0.36743709444999695,
+    "p95": 0.7956592440605164
+  },
+  "feasible_mean_speed_mps": {
+    "p05": 0.40000003576278687,
+    "median": 0.5623242855072021,
+    "p95": 1.1023516654968262
+  },
+  "speed_exceeds_private_ceiling": 0,
+  "transition_boundary_m": {
+    "p05": 0.9199999570846558,
+    "median": 1.9199999570846558,
+    "p95": 3.118104934692383
+  }
+}

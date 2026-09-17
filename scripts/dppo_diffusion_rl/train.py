@@ -37,16 +37,38 @@ parser.add_argument(
     default=2.0,
     help="Schema-8 per-metre dense height-tracking weight.",
 )
+parser.add_argument(
+    "--path_reward_weight",
+    type=float,
+    default=1.25,
+    help="Per-metre cross-track reward weight (historical default: 1.25).",
+)
+parser.add_argument(
+    "--route_cte_rmse_tolerance_m",
+    type=float,
+    default=None,
+    help=(
+        "Optional distance-weighted route CTE RMSE required for joint success. "
+        "supported_hybrid_v3 requires this explicitly."
+    ),
+)
 parser.add_argument("--route_stage", type=int, choices=(0, 1, 2), default=2)
 parser.add_argument(
     "--route_distribution",
-    choices=("legacy", "supported_procedural_v1", "supported_hybrid_v2"),
+    choices=(
+        "legacy",
+        "supported_procedural_v1",
+        "supported_hybrid_v2",
+        "supported_hybrid_v3",
+    ),
     default="legacy",
     help=(
         "legacy preserves prior experiments; supported_procedural_v1 samples a new "
         "smooth route per episode; supported_hybrid_v2 uses the audited 25/25/25/25 "
         "smooth-v1/coherent-smooth/rounded-waypoint/hard-waypoint distribution. "
-        "Both supported variants use only supported walk/crouch posture profiles."
+        "supported_hybrid_v3 preserves v2 geometry while adding transition-context "
+        "coverage and private feasibility filtering. All supported variants use "
+        "only supported walk/crouch posture profiles."
     ),
 )
 parser.add_argument(
@@ -75,6 +97,18 @@ parser.add_argument(
         "Keep a DPPO actor as a warm start but reset iteration, critic and Adam states. "
         "Required when migrating a legacy checkpoint to the first-arrival task contract."
     ),
+)
+parser.add_argument(
+    "--transition_boundary_min_m",
+    type=float,
+    default=1.6,
+    help="Minimum spatial boundary for supported walk/crouch transitions.",
+)
+parser.add_argument(
+    "--transition_boundary_max_m",
+    type=float,
+    default=2.4,
+    help="Maximum spatial boundary for supported walk/crouch transitions.",
 )
 parser.add_argument(
     "--require_phase_a_source",
@@ -143,6 +177,7 @@ from scripts.dppo_diffusion_rl.checkpointing import (
     checkpoint_goal_representation,
     load_policy_checkpoint,
     restore_training_state,
+    task_config_from_env_cfg,
     training_resume_state,
     validate_resume_task_config,
 )
@@ -224,11 +259,15 @@ def main() -> None:
     env_cfg.profile_height_reward_weight = float(
         args_cli.profile_height_reward_weight
     )
+    env_cfg.path_reward_weight = float(args_cli.path_reward_weight)
+    env_cfg.route_cte_rmse_tolerance_m = args_cli.route_cte_rmse_tolerance_m
     env_cfg.route_distribution = args_cli.route_distribution
     env_cfg.route_stage = int(args_cli.route_stage)
     env_cfg.height_profile_stage = args_cli.height_profile_stage
     env_cfg.route_speed_max_mps = args_cli.route_speed_max_mps
     env_cfg.speed_budget_max_mps = float(args_cli.speed_budget_max_mps)
+    env_cfg.transition_boundary_min_m = float(args_cli.transition_boundary_min_m)
+    env_cfg.transition_boundary_max_m = float(args_cli.transition_boundary_max_m)
     env_cfg.goal_representation = goal_representation
     # Use a generated flat mesh rather than the remote Grid USD.  Physics is
     # equivalent, while local and cluster runs no longer depend on asset-cache
@@ -251,40 +290,9 @@ def main() -> None:
         source_checkpoint, restart_optimization=args_cli.restart_optimization
     )
     if restore_optimization:
-        requested_task_config = {
-            "goal_representation": goal_representation,
-            "route_distribution": env_cfg.route_distribution,
-            "speed_budget_max_mps": float(env_cfg.speed_budget_max_mps),
-            "route_stage": int(env_cfg.route_stage),
-            "height_profile_stage": (
-                int(env_cfg.route_stage)
-                if env_cfg.route_distribution == "legacy"
-                and env_cfg.height_profile_stage is None
-                else env_cfg.height_profile_stage
-            ),
-            "route_speed_max_mps": env_cfg.route_speed_max_mps,
-            "episode_length_s": float(env_cfg.episode_length_s),
-            "profile_height_mae_tolerance_m": float(
-                env_cfg.profile_height_mae_tolerance_m
-            ),
-            "profile_height_reward_weight": float(
-                env_cfg.profile_height_reward_weight
-            ),
-            "procedural_curvature_knots": int(env_cfg.procedural_curvature_knots),
-            "procedural_max_curvature_rad_m": float(
-                env_cfg.procedural_max_curvature_rad_m
-            ),
-            "transition_boundary_min_m": float(env_cfg.transition_boundary_min_m),
-            "transition_boundary_max_m": float(env_cfg.transition_boundary_max_m),
-            "transition_margin_m": float(env_cfg.transition_margin_m),
-        }
-        if env_cfg.route_distribution == "supported_hybrid_v2":
-            requested_task_config["hybrid_route_contract_version"] = int(
-                env_cfg.hybrid_route_contract_version
-            )
         validate_resume_task_config(
             source_checkpoint,
-            requested_task_config,
+            task_config_from_env_cfg(env_cfg),
         )
     if args_cli.restart_optimization:
         # A new task contract is a new optimization run.  Anchor conservative

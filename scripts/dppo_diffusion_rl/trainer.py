@@ -11,7 +11,7 @@ from typing import Any
 import torch
 
 from .buffer import RolloutBatch
-from .checkpointing import save_checkpoint
+from .checkpointing import save_checkpoint, task_config_from_env_cfg
 from .critic import ValueCritic
 from .policy import DPPODiffusionPolicy
 from .ppo import DPPOUpdater
@@ -37,6 +37,10 @@ class EpisodeAccumulator:
     profile_height_success: float = 0.0
     profile_height_mae_m: float = 0.0
     profile_height_within_tolerance_fraction: float = 0.0
+    route_cte_constraint_active: float = 0.0
+    route_cte_success: float = 0.0
+    route_cte_rmse_m: float = 0.0
+    route_cte_tolerance_m: float = 0.0
     returns: list[float] = field(default_factory=list)
 
     def add_extras(self, extras: dict[str, Any], active: torch.Tensor) -> None:
@@ -67,6 +71,10 @@ class EpisodeAccumulator:
             "profile_height_success",
             "profile_height_mae_m",
             "profile_height_within_tolerance_fraction",
+            "route_cte_constraint_active",
+            "route_cte_success",
+            "route_cte_rmse_m",
+            "route_cte_tolerance_m",
         ):
             setattr(self, name, getattr(self, name) + float(event[name][keep].sum()))
 
@@ -97,6 +105,12 @@ class EpisodeAccumulator:
             "Episode/profile_height_within_tolerance_fraction": (
                 self.profile_height_within_tolerance_fraction / divisor
             ),
+            "Episode/route_cte_constraint_active": (
+                self.route_cte_constraint_active / divisor
+            ),
+            "Episode/route_cte_success_rate": self.route_cte_success / divisor,
+            "Episode/route_cte_rmse_m": self.route_cte_rmse_m / divisor,
+            "Episode/route_cte_tolerance_m": self.route_cte_tolerance_m / divisor,
             "Episode/return": sum(self.returns) / max(len(self.returns), 1),
         }
 
@@ -329,6 +343,13 @@ class DPPOTrainer:
                 2.0,
             )
             score -= 0.10 * normalized_mae
+        if metrics.get("Episode/route_cte_constraint_active", 0.0) > 0.5:
+            tolerance = max(metrics.get("Episode/route_cte_tolerance_m", 0.10), 1.0e-6)
+            normalized_cte = min(
+                metrics.get("Episode/route_cte_rmse_m", 0.0) / tolerance,
+                2.0,
+            )
+            score -= 0.10 * normalized_cte
         return score
 
     def _write_metrics(self, iteration: int, metrics: dict[str, float]) -> None:
@@ -339,43 +360,6 @@ class DPPOTrainer:
             self.logger.log(record, step=iteration)
 
     def _save(self, filename: str, iteration: int, metrics: dict[str, float]) -> None:
-        task_config = {
-            "goal_representation": self.raw_env.cfg.goal_representation,
-            "route_distribution": self.raw_env.cfg.route_distribution,
-            "speed_budget_max_mps": float(self.raw_env.cfg.speed_budget_max_mps),
-            "route_stage": int(self.raw_env.cfg.route_stage),
-            "height_profile_stage": (
-                int(self.raw_env.cfg.route_stage)
-                if self.raw_env.cfg.route_distribution == "legacy"
-                and self.raw_env.cfg.height_profile_stage is None
-                else self.raw_env.cfg.height_profile_stage
-            ),
-            "route_speed_max_mps": self.raw_env.cfg.route_speed_max_mps,
-            "episode_length_s": float(self.raw_env.cfg.episode_length_s),
-            "profile_height_mae_tolerance_m": float(
-                self.raw_env.cfg.profile_height_mae_tolerance_m
-            ),
-            "profile_height_reward_weight": float(
-                self.raw_env.cfg.profile_height_reward_weight
-            ),
-            "procedural_curvature_knots": int(
-                self.raw_env.cfg.procedural_curvature_knots
-            ),
-            "procedural_max_curvature_rad_m": float(
-                self.raw_env.cfg.procedural_max_curvature_rad_m
-            ),
-            "transition_boundary_min_m": float(
-                self.raw_env.cfg.transition_boundary_min_m
-            ),
-            "transition_boundary_max_m": float(
-                self.raw_env.cfg.transition_boundary_max_m
-            ),
-            "transition_margin_m": float(self.raw_env.cfg.transition_margin_m),
-        }
-        if self.raw_env.cfg.route_distribution == "supported_hybrid_v2":
-            task_config["hybrid_route_contract_version"] = int(
-                self.raw_env.cfg.hybrid_route_contract_version
-            )
         save_checkpoint(
             self.output_dir / filename,
             source_checkpoint=self.source_checkpoint,
@@ -387,7 +371,7 @@ class DPPOTrainer:
             total_physics_steps=self.total_physics_steps,
             metrics=metrics,
             best_score=self.best_score,
-            task_config=task_config,
+            task_config=task_config_from_env_cfg(self.raw_env.cfg),
         )
 
     def run(self, iterations: int) -> None:

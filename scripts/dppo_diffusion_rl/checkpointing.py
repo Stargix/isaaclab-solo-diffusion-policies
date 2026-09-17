@@ -22,7 +22,11 @@ from .ppo import DPPOUpdater
 
 
 DPPO_CHECKPOINT_VERSION = 1
-DPPO_TASK_CONTRACT_VERSION = 5
+DPPO_TASK_CONTRACT_VERSION = 6
+# V6 is additive: with the historical defaults (path=1.25, no CTE gate) its
+# return/termination semantics are identical to V5. Exact optimizer resume is
+# therefore safe only after the full saved task-config comparison succeeds.
+DPPO_RESUME_COMPATIBLE_TASK_CONTRACT_VERSIONS = {5, 6}
 DPPO_GOAL_CONTRACTS = {
     "hindsight_geom_avg12": "spatial_hindsight_geometry_ddpm",
     "hindsight_geom_profile16": "spatial_hindsight_height_profile_ddpm",
@@ -80,7 +84,10 @@ def training_resume_state(
             )
         return 0, 0, False
     saved_contract = int(checkpoint.get("dppo_task_contract_version", 1))
-    if saved_contract != DPPO_TASK_CONTRACT_VERSION and not restart_optimization:
+    if (
+        saved_contract not in DPPO_RESUME_COMPATIBLE_TASK_CONTRACT_VERSIONS
+        and not restart_optimization
+    ):
         raise ValueError(
             "This DPPO checkpoint was trained with task contract "
             f"v{saved_contract}, but the current environment uses v{DPPO_TASK_CONTRACT_VERSION}. "
@@ -113,6 +120,11 @@ def validate_resume_task_config(
     # the geometry stage for their height distribution.
     saved.setdefault("height_profile_stage", saved.get("route_stage"))
     requested.setdefault("height_profile_stage", requested.get("route_stage"))
+    # Additive v3 fields preserve exact historical semantics when absent.
+    saved.setdefault("path_reward_weight", 1.25)
+    saved.setdefault("route_cte_rmse_tolerance_m", None)
+    requested.setdefault("path_reward_weight", 1.25)
+    requested.setdefault("route_cte_rmse_tolerance_m", None)
     mismatches: list[str] = []
     for key, requested_value in requested.items():
         if key not in saved:
@@ -137,6 +149,49 @@ def validate_resume_task_config(
             + ", ".join(mismatches)
             + ". Use --restart_optimization and a new output directory."
         )
+
+
+def task_config_from_env_cfg(cfg: Any) -> dict[str, Any]:
+    """Build the single canonical checkpoint/resume task contract."""
+
+    task_config: dict[str, Any] = {
+        "goal_representation": cfg.goal_representation,
+        "route_distribution": cfg.route_distribution,
+        "speed_budget_max_mps": float(cfg.speed_budget_max_mps),
+        "route_stage": int(cfg.route_stage),
+        "height_profile_stage": (
+            int(cfg.route_stage)
+            if cfg.route_distribution == "legacy" and cfg.height_profile_stage is None
+            else cfg.height_profile_stage
+        ),
+        "route_speed_max_mps": cfg.route_speed_max_mps,
+        "episode_length_s": float(cfg.episode_length_s),
+        "profile_height_mae_tolerance_m": float(
+            cfg.profile_height_mae_tolerance_m
+        ),
+        "profile_height_reward_weight": float(cfg.profile_height_reward_weight),
+        "path_reward_weight": float(cfg.path_reward_weight),
+        "route_cte_rmse_tolerance_m": cfg.route_cte_rmse_tolerance_m,
+        "procedural_curvature_knots": int(cfg.procedural_curvature_knots),
+        "procedural_max_curvature_rad_m": float(
+            cfg.procedural_max_curvature_rad_m
+        ),
+        "transition_boundary_min_m": float(cfg.transition_boundary_min_m),
+        "transition_boundary_max_m": float(cfg.transition_boundary_max_m),
+        "transition_margin_m": float(cfg.transition_margin_m),
+    }
+    if cfg.route_distribution == "supported_hybrid_v2":
+        task_config["hybrid_route_contract_version"] = int(
+            cfg.hybrid_route_contract_version
+        )
+    if cfg.route_distribution == "supported_hybrid_v3":
+        task_config["hybrid_v3_route_contract_version"] = int(
+            cfg.hybrid_v3_route_contract_version
+        )
+        task_config["feasibility_contract_version"] = int(
+            cfg.feasibility_contract_version
+        )
+    return task_config
 
 
 def sha256_file(path: str | Path) -> str:

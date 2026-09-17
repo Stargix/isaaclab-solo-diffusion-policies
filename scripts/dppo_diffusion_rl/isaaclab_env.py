@@ -17,9 +17,15 @@ from scripts.residual_diffusion_rl.routes import RouteBank, RouteState
 from .conditioning import remaining_speed_budget
 from .hybrid_routes import HYBRID_ROUTE_CONTRACT_VERSION, SupportedHybridRouteBank
 from .procedural_routes import SupportedProceduralRouteBank
+from .route_feasibility import FEASIBILITY_CONTRACT_VERSION
+from .supported_hybrid_v3 import (
+    HYBRID_V3_ROUTE_CONTRACT_VERSION,
+    SupportedHybridV3RouteBank,
+)
 from .rewards import (
     TaskRewardWeights,
     average_speed_error,
+    distance_weighted_rmse,
     path_task_reward,
     schedule_error_improvement,
     terminal_pose_potential,
@@ -30,6 +36,7 @@ CRITIC_FEATURE_DIM = 14
 SUPPORTED_ROUTE_DISTRIBUTIONS = {
     "supported_procedural_v1",
     "supported_hybrid_v2",
+    "supported_hybrid_v3",
 }
 
 
@@ -44,6 +51,8 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
     procedural_curvature_knots: int = 6
     procedural_max_curvature_rad_m: float = 0.8
     hybrid_route_contract_version: int = HYBRID_ROUTE_CONTRACT_VERSION
+    hybrid_v3_route_contract_version: int = HYBRID_V3_ROUTE_CONTRACT_VERSION
+    feasibility_contract_version: int = FEASIBILITY_CONTRACT_VERSION
     transition_boundary_min_m: float = 1.6
     transition_boundary_max_m: float = 2.4
     transition_margin_m: float = 0.25
@@ -62,6 +71,10 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
     # waiting cannot improve or worsen the result.
     profile_height_mae_tolerance_m: float = 0.04
     profile_height_reward_weight: float = 2.0
+    path_reward_weight: float = 1.25
+    # ``None`` preserves every historical task contract. V3 enables a
+    # distance-weighted full-route precision gate explicitly.
+    route_cte_rmse_tolerance_m: float | None = None
     terminal_yaw_tolerance_rad: float = 0.40
     terminal_mean_speed_tolerance_mps: float = 0.08
     terminal_overshoot_m: float = 0.50
@@ -93,8 +106,8 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
         valid_distributions = {"legacy", *SUPPORTED_ROUTE_DISTRIBUTIONS}
         if self.route_distribution not in valid_distributions:
             raise ValueError(
-                "route_distribution must be 'legacy', 'supported_procedural_v1' "
-                "or 'supported_hybrid_v2'."
+                "route_distribution must be 'legacy', 'supported_procedural_v1', "
+                "'supported_hybrid_v2' or 'supported_hybrid_v3'."
             )
         if self.height_profile_stage is not None and self.height_profile_stage not in (0, 1, 2):
             raise ValueError("height_profile_stage must be 0, 1, 2 or None.")
@@ -131,6 +144,13 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
             raise ValueError("profile_height_mae_tolerance_m must be positive.")
         if self.profile_height_reward_weight <= 0.0:
             raise ValueError("profile_height_reward_weight must be positive.")
+        if self.path_reward_weight <= 0.0:
+            raise ValueError("path_reward_weight must be positive.")
+        if (
+            self.route_cte_rmse_tolerance_m is not None
+            and self.route_cte_rmse_tolerance_m <= 0.0
+        ):
+            raise ValueError("route_cte_rmse_tolerance_m must be positive when set.")
         if self.route_distribution in SUPPORTED_ROUTE_DISTRIBUTIONS:
             distribution_name = self.route_distribution
             if self.goal_representation != "hindsight_geom_profile16":
@@ -167,6 +187,24 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
                 "supported_hybrid_v2 requires hybrid route contract version "
                 f"{HYBRID_ROUTE_CONTRACT_VERSION}."
             )
+        if self.route_distribution == "supported_hybrid_v3":
+            if (
+                self.hybrid_v3_route_contract_version
+                != HYBRID_V3_ROUTE_CONTRACT_VERSION
+            ):
+                raise ValueError(
+                    "supported_hybrid_v3 requires route contract version "
+                    f"{HYBRID_V3_ROUTE_CONTRACT_VERSION}."
+                )
+            if self.feasibility_contract_version != FEASIBILITY_CONTRACT_VERSION:
+                raise ValueError(
+                    "supported_hybrid_v3 requires feasibility contract version "
+                    f"{FEASIBILITY_CONTRACT_VERSION}."
+                )
+            if self.route_cte_rmse_tolerance_m is None:
+                raise ValueError(
+                    "supported_hybrid_v3 requires an explicit route CTE RMSE tolerance."
+                )
 
 
 class DPPODiffusionEnv(Solo12Env):
@@ -179,7 +217,19 @@ class DPPODiffusionEnv(Solo12Env):
         # here so an impossible actor/reward contract cannot reach simulation.
         cfg.validate_task()
         super().__init__(cfg, render_mode, **kwargs)
-        if cfg.route_distribution == "supported_hybrid_v2":
+        if cfg.route_distribution == "supported_hybrid_v3":
+            self._routes = SupportedHybridV3RouteBank(
+                self.num_envs,
+                self.device,
+                points=cfg.route_points,
+                length_m=cfg.route_length_m,
+                curvature_knots=cfg.procedural_curvature_knots,
+                max_curvature_rad_m=cfg.procedural_max_curvature_rad_m,
+                transition_boundary_min_m=cfg.transition_boundary_min_m,
+                transition_boundary_max_m=cfg.transition_boundary_max_m,
+                transition_margin_m=cfg.transition_margin_m,
+            )
+        elif cfg.route_distribution == "supported_hybrid_v2":
             self._routes = SupportedHybridRouteBank(
                 self.num_envs,
                 self.device,
@@ -216,7 +266,10 @@ class DPPODiffusionEnv(Solo12Env):
             if cfg.goal_representation == "hindsight_geom_profile16"
             else TaskRewardWeights().height
         )
-        self._reward_weights = TaskRewardWeights(height=reward_height)
+        self._reward_weights = TaskRewardWeights(
+            path=cfg.path_reward_weight,
+            height=reward_height,
+        )
         self._route_state: RouteState | None = None
         self._goal = torch.zeros(
             self.num_envs,
@@ -252,6 +305,18 @@ class DPPODiffusionEnv(Solo12Env):
             self._profile_height_error_distance_sum
         )
         self._profile_height_success = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self._route_cte_sq_distance_sum = torch.zeros(
+            self.num_envs, device=self.device
+        )
+        self._route_cte_distance_sum = torch.zeros_like(
+            self._route_cte_sq_distance_sum
+        )
+        self._last_route_cte_rmse = torch.zeros_like(
+            self._route_cte_sq_distance_sum
+        )
+        self._route_cte_success = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device
         )
         all_ids = torch.arange(self.num_envs, device=self.device)
@@ -411,6 +476,26 @@ class DPPODiffusionEnv(Solo12Env):
             self._last_profile_height_mae
             <= self.cfg.profile_height_mae_tolerance_m
         )
+        cte_distance = state.progress_delta.clamp_min(0.0)
+        self._route_cte_sq_distance_sum += state.cross_track.square() * cte_distance
+        self._route_cte_distance_sum += cte_distance
+        has_cte_distance = self._route_cte_distance_sum > 1.0e-6
+        self._last_route_cte_rmse.copy_(
+            distance_weighted_rmse(
+                self._route_cte_sq_distance_sum,
+                self._route_cte_distance_sum,
+            )
+        )
+        cte_constraint_active = self.cfg.route_cte_rmse_tolerance_m is not None
+        route_cte_ok = (
+            has_cte_distance
+            & (
+                self._last_route_cte_rmse
+                <= float(self.cfg.route_cte_rmse_tolerance_m)
+            )
+            if cte_constraint_active
+            else torch.ones_like(has_cte_distance)
+        )
         terminal_yaw_error = torch.atan2(
             torch.sin(self._routes.yaw[:, -1] - self._robot_yaw()),
             torch.cos(self._routes.yaw[:, -1] - self._robot_yaw()),
@@ -447,11 +532,13 @@ class DPPODiffusionEnv(Solo12Env):
             & terminal_height_ok
             & terminal_mean_speed_ok
             & (profile_height_ok if profile_constraint_active else True)
+            & route_cte_ok
             & ~contact
             & ~corridor
             & ~overshoot
         )
         self._profile_height_success.copy_(arrival & profile_height_ok)
+        self._route_cte_success.copy_(arrival & route_cte_ok)
         arrival_failure = arrival & ~success & ~contact & ~corridor & ~overshoot
         terminated = contact | corridor | overshoot | arrival
         time_out_failure = timeout & ~terminated
@@ -546,6 +633,7 @@ class DPPODiffusionEnv(Solo12Env):
             "Metrics/profile_height_within_tolerance_fraction": float(
                 self._last_profile_height_within_tolerance.mean()
             ),
+            "Metrics/route_cte_rmse_m": float(self._last_route_cte_rmse.mean()),
             "Metrics/desired_mean_speed_mps": float(self._routes.speed.mean()),
             "Metrics/tangent_speed_mps": float(
                 (
@@ -634,6 +722,18 @@ class DPPODiffusionEnv(Solo12Env):
                     "profile_height_within_tolerance_fraction": float(
                         self._last_profile_height_within_tolerance[completed_ids].mean()
                     ),
+                    "route_cte_constraint_active": float(
+                        self.cfg.route_cte_rmse_tolerance_m is not None
+                    ),
+                    "route_cte_success": float(
+                        self._route_cte_success[completed_ids].float().mean()
+                    ),
+                    "route_cte_rmse_m": float(
+                        self._last_route_cte_rmse[completed_ids].mean()
+                    ),
+                    "route_cte_tolerance_m": float(
+                        self.cfg.route_cte_rmse_tolerance_m or 0.0
+                    ),
                     "count": float(len(completed_ids)),
                 }
                 episode_event = {
@@ -676,6 +776,22 @@ class DPPODiffusionEnv(Solo12Env):
                     "profile_height_within_tolerance_fraction": (
                         self._last_profile_height_within_tolerance[completed_ids].clone()
                     ),
+                    "route_cte_constraint_active": torch.full(
+                        (len(completed_ids),),
+                        float(self.cfg.route_cte_rmse_tolerance_m is not None),
+                        device=self.device,
+                    ),
+                    "route_cte_success": self._route_cte_success[
+                        completed_ids
+                    ].float().clone(),
+                    "route_cte_rmse_m": self._last_route_cte_rmse[
+                        completed_ids
+                    ].clone(),
+                    "route_cte_tolerance_m": torch.full(
+                        (len(completed_ids),),
+                        float(self.cfg.route_cte_rmse_tolerance_m or 0.0),
+                        device=self.device,
+                    ),
                 }
         else:
             episode_snapshot = None
@@ -708,4 +824,8 @@ class DPPODiffusionEnv(Solo12Env):
         self._last_profile_height_mae[env_ids] = 0.0
         self._last_profile_height_within_tolerance[env_ids] = 0.0
         self._profile_height_success[env_ids] = False
+        self._route_cte_sq_distance_sum[env_ids] = 0.0
+        self._route_cte_distance_sum[env_ids] = 0.0
+        self._last_route_cte_rmse[env_ids] = 0.0
+        self._route_cte_success[env_ids] = False
         self._route_state = None

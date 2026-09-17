@@ -13,19 +13,26 @@ the four route samples are `[x,y,h_required]` tokens and `h_now` is appended
 before terminal yaw and average speed. Task contract v5 adds support-aware
 procedural routes and evaluates sustained posture on the plateaus surrounding
 a physical transition without changing DPPO's likelihood mathematics.
+Task contract v6 is additive: it makes path weight configurable, optionally
+adds a distance-weighted CTE success gate, and registers a private feasibility
+filter that is never exposed to the actor or critic.
 
 ## Train
 
 The audited smooth baseline is documented in
 [`experiments/supported_procedural_v1`](experiments/supported_procedural_v1/README.md).
-The next controlled geometry expansion is
+The controlled geometry expansion is
 [`experiments/supported_hybrid_v2`](experiments/supported_hybrid_v2/README.md).
-Both start directly from the same pure Phase-A WCT imitation checkpoint and
+The final train candidate is
+[`experiments/supported_hybrid_v3`](experiments/supported_hybrid_v3/README.md).
+All start directly from the same pure Phase-A WCT imitation checkpoint and
 command only supported walk/crouch height endpoints in balanced constant and
-bidirectional-transition profiles. V2 changes only route geometry:
+bidirectional-transition profiles. V3 preserves v2 and adds transition-context
+coverage, a private feasibility filter, and an explicit route-precision
+contract without local speed targets or skill labels:
 
 ```bash
-sbatch scripts/dppo_diffusion_rl/experiments/supported_hybrid_v2/train_cluster.sbs
+sbatch scripts/dppo_diffusion_rl/experiments/supported_hybrid_v3/train_cluster.sbs
 ```
 
 It deliberately does not use `--restart_optimization`: Phase A has no PPO
