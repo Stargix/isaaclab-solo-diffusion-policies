@@ -1,0 +1,31 @@
+{
+  "seed": 20260917,
+  "samples": 4096,
+  "cell_counts_min_max": [
+    128,
+    128
+  ],
+  "pace_tier_counts": [
+    2048,
+    2048
+  ],
+  "sampled_speed_mps": {
+    "p05": 0.2360697090625763,
+    "median": 0.4334709346294403,
+    "p95": 0.9169055223464966
+  },
+  "feasible_ceiling_mps": {
+    "p05": 0.40000003576278687,
+    "median": 0.5509848594665527,
+    "p95": 1.0
+  },
+  "fraction_speed_above_0_65": 0.21337890625,
+  "fraction_speed_above_0_80": 0.139404296875,
+  "fast_fraction_by_family": {
+    "smooth-v1": 0.2314453125,
+    "coherent": 0.20703125,
+    "rounded": 0.1904296875,
+    "hard": 0.224609375
+  },
+  "speed_exceeds_private_ceiling": 0
+}

@@ -22,11 +22,11 @@ from .ppo import DPPOUpdater
 
 
 DPPO_CHECKPOINT_VERSION = 1
-DPPO_TASK_CONTRACT_VERSION = 6
-# V6 is additive: with the historical defaults (path=1.25, no CTE gate) its
-# return/termination semantics are identical to V5. Exact optimizer resume is
-# therefore safe only after the full saved task-config comparison succeeds.
-DPPO_RESUME_COMPATIBLE_TASK_CONTRACT_VERSIONS = {5, 6}
+DPPO_TASK_CONTRACT_VERSION = 7
+# V6/V7 are additive: their historical defaults preserve the earlier task.
+# Exact optimizer resume is safe only after the full saved task-config
+# comparison (including pace-consistent preview) succeeds.
+DPPO_RESUME_COMPATIBLE_TASK_CONTRACT_VERSIONS = {5, 6, 7}
 DPPO_GOAL_CONTRACTS = {
     "hindsight_geom_avg12": "spatial_hindsight_geometry_ddpm",
     "hindsight_geom_profile16": "spatial_hindsight_height_profile_ddpm",
@@ -123,8 +123,10 @@ def validate_resume_task_config(
     # Additive v3 fields preserve exact historical semantics when absent.
     saved.setdefault("path_reward_weight", 1.25)
     saved.setdefault("route_cte_rmse_tolerance_m", None)
+    saved.setdefault("pace_consistent_preview", False)
     requested.setdefault("path_reward_weight", 1.25)
     requested.setdefault("route_cte_rmse_tolerance_m", None)
+    requested.setdefault("pace_consistent_preview", False)
     mismatches: list[str] = []
     for key, requested_value in requested.items():
         if key not in saved:
@@ -158,6 +160,7 @@ def task_config_from_env_cfg(cfg: Any) -> dict[str, Any]:
         "goal_representation": cfg.goal_representation,
         "route_distribution": cfg.route_distribution,
         "speed_budget_max_mps": float(cfg.speed_budget_max_mps),
+        "pace_consistent_preview": bool(cfg.pace_consistent_preview),
         "route_stage": int(cfg.route_stage),
         "height_profile_stage": (
             int(cfg.route_stage)
@@ -190,6 +193,13 @@ def task_config_from_env_cfg(cfg: Any) -> dict[str, Any]:
         )
         task_config["feasibility_contract_version"] = int(
             cfg.feasibility_contract_version
+        )
+    if cfg.route_distribution == "supported_hybrid_v4":
+        task_config["hybrid_v4_route_contract_version"] = int(
+            cfg.hybrid_v4_route_contract_version
+        )
+        task_config["feasibility_contract_version_v2"] = int(
+            cfg.feasibility_contract_version_v2
         )
     return task_config
 

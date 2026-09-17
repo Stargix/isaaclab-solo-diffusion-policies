@@ -545,10 +545,46 @@ def compute_vectorized_goals(
     speed_budget_start_arc: np.ndarray | None = None,
     speed_budget_target_arc: np.ndarray | None = None,
     speed_budget_max_mps: float | None = None,
+    pace_consistent_preview: bool = False,
 ) -> torch.Tensor:
     robot = raw_env._robot
     pos_w = robot.data.root_pos_w.cpu().numpy()
     quat_w = robot.data.root_quat_w.cpu().numpy()
+    dynamic_budget = speed_budget_target_arc is not None or speed_budget_start_arc is not None
+    if dynamic_budget:
+        if speed_budget_target_arc is None or speed_budget_start_arc is None:
+            raise ValueError("Both speed-budget arc arrays must be provided together.")
+        if goal_representation not in {"hindsight_geom_avg12", "hindsight_geom_profile16"} or any(
+            plan.time_indexed for plan in path_plans
+        ):
+            raise ValueError("Dynamic speed budget currently requires an analytic geometric average-speed route.")
+
+    conditioning_speeds = np.asarray(speeds, dtype=np.float32)
+    if dynamic_budget and pace_consistent_preview:
+        # Project first, then construct the entire goal with one pace. Phase A
+        # never paired a short/long geometric preview with a contradictory
+        # final v_avg scalar, so v4 preserves that joint conditioning contract.
+        for i, plan in enumerate(path_plans):
+            path_progress[i] = advance_path_progress(
+                plan.path_w, pos_w[i], int(path_progress[i])
+            )
+        from scripts.dppo_diffusion_rl.conditioning import remaining_speed_budget
+
+        current_arc = np.asarray(
+            [plan.cumulative_lengths[int(path_progress[i])] for i, plan in enumerate(path_plans)],
+            dtype=np.float32,
+        )
+        target_distance = np.maximum(speed_budget_target_arc - speed_budget_start_arc, 0.0)
+        remaining_distance = np.maximum(speed_budget_target_arc - current_arc, 0.0)
+        elapsed_s = float(reference_step or 0) * float(dt)
+        conditioning_speeds = remaining_speed_budget(
+            remaining_distance=torch.as_tensor(remaining_distance, device=device),
+            route_length=torch.as_tensor(target_distance, device=device),
+            desired_mean_speed=torch.as_tensor(speeds, device=device),
+            elapsed_s=torch.full((len(path_plans),), elapsed_s, device=device),
+            max_speed=float(speed_budget_max_mps or v_req_clip),
+            min_remaining_time_s=dt,
+        ).detach().cpu().numpy()
     goals = []
     for i in range(len(path_plans)):
         plan = path_plans[i]
@@ -602,7 +638,7 @@ def compute_vectorized_goals(
                 plan.yaws_w,
                 pos_w[i],
                 quat_w[i],
-                speed=speeds[i],
+                speed=conditioning_speeds[i],
                 start_idx=start_idx,
             ))
         elif goal_representation == "holonomic_se2_32":
@@ -615,7 +651,7 @@ def compute_vectorized_goals(
                     quat_w[i],
                     goal_horizon_steps=goal_horizon_steps,
                     dt=dt,
-                    speed=speeds[i],
+                    speed=conditioning_speeds[i],
                     start_idx=start_idx,
                 )
             )
@@ -629,7 +665,7 @@ def compute_vectorized_goals(
                     quat_w[i],
                     goal_horizon_steps=goal_horizon_steps,
                     dt=dt,
-                    speed=speeds[i],
+                    speed=conditioning_speeds[i],
                     start_idx=start_idx,
                     v_avg_clip=v_req_clip,
                 )
@@ -644,7 +680,7 @@ def compute_vectorized_goals(
                     quat_w[i],
                     goal_horizon_steps=goal_horizon_steps,
                     dt=dt,
-                    speed=speeds[i],
+                    speed=conditioning_speeds[i],
                     start_idx=start_idx,
                     v_avg_clip=v_req_clip,
                 )
@@ -659,20 +695,14 @@ def compute_vectorized_goals(
                 quat_w[i],
                 goal_horizon_steps=goal_horizon_steps,
                 dt=dt,
-                speed=speeds[i],
+                speed=conditioning_speeds[i],
                 start_idx=start_idx,
                 waypoint_time_offsets_s=waypoint_time_offsets_s,
                 v_req_clip=v_req_clip,
                 )
             )
     goals_tensor = torch.from_numpy(np.stack(goals, axis=0)).to(device)
-    if speed_budget_target_arc is not None or speed_budget_start_arc is not None:
-        if speed_budget_target_arc is None or speed_budget_start_arc is None:
-            raise ValueError("Both speed-budget arc arrays must be provided together.")
-        if goal_representation not in {"hindsight_geom_avg12", "hindsight_geom_profile16"} or any(
-            plan.time_indexed for plan in path_plans
-        ):
-            raise ValueError("Dynamic speed budget currently requires an analytic geometric average-speed route.")
+    if dynamic_budget and not pace_consistent_preview:
         from scripts.dppo_diffusion_rl.conditioning import remaining_speed_budget
 
         current_arc = np.asarray(
@@ -1235,6 +1265,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     speed_budget_max_mps = float(
         checkpoint.get("dppo_task_config", {}).get("speed_budget_max_mps", 0.8)
     )
+    pace_consistent_preview = bool(
+        checkpoint.get("dppo_task_config", {}).get(
+            "pace_consistent_preview", False
+        )
+    )
     speed_budget_start_arc = np.asarray(
         [
             project_trajectory_to_polyline(
@@ -1257,7 +1292,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     if dynamic_speed_budget:
         print(
             "[INFO] Actor conditioning: closed-loop remaining-route speed budget "
-            f"(checkpoint task contract v{dppo_task_contract_version})."
+            f"(checkpoint task contract v{dppo_task_contract_version}, "
+            f"pace-consistent preview={pace_consistent_preview})."
         )
 
     # Track metrics
@@ -1311,6 +1347,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 speed_budget_start_arc=speed_budget_start_arc if dynamic_speed_budget else None,
                 speed_budget_target_arc=speed_budget_target_arc if dynamic_speed_budget else None,
                 speed_budget_max_mps=speed_budget_max_mps if dynamic_speed_budget else None,
+                pace_consistent_preview=pace_consistent_preview,
             )
             if goal_representation == "hindsight_geom_avg12":
                 commanded_heights.append(goals[:, 10].detach().cpu().numpy())
@@ -2167,6 +2204,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         "goal_representation": goal_representation,
         "dynamic_speed_budget": dynamic_speed_budget,
         "speed_budget_max_mps": speed_budget_max_mps if dynamic_speed_budget else None,
+        "pace_consistent_preview": pace_consistent_preview,
         "waypoint_time_offsets_s": waypoint_time_offsets_s,
         "speeds_evaluated": list(args_cli.speeds),
         "heights_evaluated": list(path_heights),

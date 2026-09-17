@@ -49,7 +49,7 @@ parser.add_argument(
     default=None,
     help=(
         "Optional distance-weighted route CTE RMSE required for joint success. "
-        "supported_hybrid_v3 requires this explicitly."
+        "supported_hybrid_v3/v4 require this explicitly."
     ),
 )
 parser.add_argument("--route_stage", type=int, choices=(0, 1, 2), default=2)
@@ -60,6 +60,7 @@ parser.add_argument(
         "supported_procedural_v1",
         "supported_hybrid_v2",
         "supported_hybrid_v3",
+        "supported_hybrid_v4",
     ),
     default="legacy",
     help=(
@@ -67,7 +68,9 @@ parser.add_argument(
         "smooth route per episode; supported_hybrid_v2 uses the audited 25/25/25/25 "
         "smooth-v1/coherent-smooth/rounded-waypoint/hard-waypoint distribution. "
         "supported_hybrid_v3 preserves v2 geometry while adding transition-context "
-        "coverage and private feasibility filtering. All supported variants use "
+        "coverage and private feasibility filtering. supported_hybrid_v4 adds "
+        "fast-balanced feasible deadlines and pace-consistent previews. All "
+        "supported variants use "
         "only supported walk/crouch posture profiles."
     ),
 )
@@ -120,6 +123,14 @@ parser.add_argument(
     type=float,
     default=0.8,
     help="Maximum remaining-route pace exposed to the actor; keep within the Phase-A support.",
+)
+parser.add_argument(
+    "--pace_consistent_preview",
+    action="store_true",
+    help=(
+        "Use the closed-loop remaining pace consistently for both geometric "
+        "preview length and v_avg. Required by supported_hybrid_v4."
+    ),
 )
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--inference_steps", type=int, default=10)
@@ -266,6 +277,7 @@ def main() -> None:
     env_cfg.height_profile_stage = args_cli.height_profile_stage
     env_cfg.route_speed_max_mps = args_cli.route_speed_max_mps
     env_cfg.speed_budget_max_mps = float(args_cli.speed_budget_max_mps)
+    env_cfg.pace_consistent_preview = bool(args_cli.pace_consistent_preview)
     env_cfg.transition_boundary_min_m = float(args_cli.transition_boundary_min_m)
     env_cfg.transition_boundary_max_m = float(args_cli.transition_boundary_max_m)
     env_cfg.goal_representation = goal_representation

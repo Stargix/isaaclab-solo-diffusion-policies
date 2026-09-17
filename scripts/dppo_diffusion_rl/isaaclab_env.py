@@ -17,10 +17,17 @@ from scripts.residual_diffusion_rl.routes import RouteBank, RouteState
 from .conditioning import remaining_speed_budget
 from .hybrid_routes import HYBRID_ROUTE_CONTRACT_VERSION, SupportedHybridRouteBank
 from .procedural_routes import SupportedProceduralRouteBank
-from .route_feasibility import FEASIBILITY_CONTRACT_VERSION
+from .route_feasibility import (
+    FEASIBILITY_CONTRACT_VERSION,
+    FEASIBILITY_CONTRACT_VERSION_V2,
+)
 from .supported_hybrid_v3 import (
     HYBRID_V3_ROUTE_CONTRACT_VERSION,
     SupportedHybridV3RouteBank,
+)
+from .supported_hybrid_v4 import (
+    HYBRID_V4_ROUTE_CONTRACT_VERSION,
+    SupportedHybridV4RouteBank,
 )
 from .rewards import (
     TaskRewardWeights,
@@ -37,6 +44,7 @@ SUPPORTED_ROUTE_DISTRIBUTIONS = {
     "supported_procedural_v1",
     "supported_hybrid_v2",
     "supported_hybrid_v3",
+    "supported_hybrid_v4",
 }
 
 
@@ -52,7 +60,9 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
     procedural_max_curvature_rad_m: float = 0.8
     hybrid_route_contract_version: int = HYBRID_ROUTE_CONTRACT_VERSION
     hybrid_v3_route_contract_version: int = HYBRID_V3_ROUTE_CONTRACT_VERSION
+    hybrid_v4_route_contract_version: int = HYBRID_V4_ROUTE_CONTRACT_VERSION
     feasibility_contract_version: int = FEASIBILITY_CONTRACT_VERSION
+    feasibility_contract_version_v2: int = FEASIBILITY_CONTRACT_VERSION_V2
     transition_boundary_min_m: float = 1.6
     transition_boundary_max_m: float = 2.4
     transition_margin_m: float = 0.25
@@ -83,6 +93,9 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
     # Keep headroom above the stage-2 nominal maximum (0.6 m/s): a delayed
     # route at the upper nominal speed must be allowed to recover time.
     speed_budget_max_mps: float = 0.8
+    # Historical checkpoints intentionally retain the old mixed conditioning.
+    # V4 requires the same closed-loop pace for preview geometry and v_avg.
+    pace_consistent_preview: bool = False
     reset_x_pos = 0.0
     reset_y_pos = 0.0
     reset_yaw = 0.0
@@ -107,7 +120,8 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
         if self.route_distribution not in valid_distributions:
             raise ValueError(
                 "route_distribution must be 'legacy', 'supported_procedural_v1', "
-                "'supported_hybrid_v2' or 'supported_hybrid_v3'."
+                "'supported_hybrid_v2', 'supported_hybrid_v3' or "
+                "'supported_hybrid_v4'."
             )
         if self.height_profile_stage is not None and self.height_profile_stage not in (0, 1, 2):
             raise ValueError("height_profile_stage must be 0, 1, 2 or None.")
@@ -166,9 +180,13 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
                 raise ValueError(
                     f"{distribution_name} is preregistered for 4.0 m routes."
                 )
-            if sampled_speed_max > 1.2:
+            supported_speed_limit = (
+                1.5 if self.route_distribution == "supported_hybrid_v4" else 1.2
+            )
+            if sampled_speed_max > supported_speed_limit:
                 raise ValueError(
-                    f"{distribution_name} is bounded by the audited 1.2 m/s fast envelope."
+                    f"{distribution_name} is bounded by the audited "
+                    f"{supported_speed_limit} m/s fast envelope."
                 )
             if not (
                 0.0
@@ -205,6 +223,28 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
                 raise ValueError(
                     "supported_hybrid_v3 requires an explicit route CTE RMSE tolerance."
                 )
+        if self.route_distribution == "supported_hybrid_v4":
+            if (
+                self.hybrid_v4_route_contract_version
+                != HYBRID_V4_ROUTE_CONTRACT_VERSION
+            ):
+                raise ValueError(
+                    "supported_hybrid_v4 requires route contract version "
+                    f"{HYBRID_V4_ROUTE_CONTRACT_VERSION}."
+                )
+            if self.feasibility_contract_version_v2 != FEASIBILITY_CONTRACT_VERSION_V2:
+                raise ValueError(
+                    "supported_hybrid_v4 requires feasibility contract version "
+                    f"{FEASIBILITY_CONTRACT_VERSION_V2}."
+                )
+            if self.route_cte_rmse_tolerance_m is None:
+                raise ValueError(
+                    "supported_hybrid_v4 requires an explicit route CTE RMSE tolerance."
+                )
+            if not self.pace_consistent_preview:
+                raise ValueError(
+                    "supported_hybrid_v4 requires pace_consistent_preview=True."
+                )
 
 
 class DPPODiffusionEnv(Solo12Env):
@@ -217,7 +257,19 @@ class DPPODiffusionEnv(Solo12Env):
         # here so an impossible actor/reward contract cannot reach simulation.
         cfg.validate_task()
         super().__init__(cfg, render_mode, **kwargs)
-        if cfg.route_distribution == "supported_hybrid_v3":
+        if cfg.route_distribution == "supported_hybrid_v4":
+            self._routes = SupportedHybridV4RouteBank(
+                self.num_envs,
+                self.device,
+                points=cfg.route_points,
+                length_m=cfg.route_length_m,
+                curvature_knots=cfg.procedural_curvature_knots,
+                max_curvature_rad_m=cfg.procedural_max_curvature_rad_m,
+                transition_boundary_min_m=cfg.transition_boundary_min_m,
+                transition_boundary_max_m=cfg.transition_boundary_max_m,
+                transition_margin_m=cfg.transition_margin_m,
+            )
+        elif cfg.route_distribution == "supported_hybrid_v3":
             self._routes = SupportedHybridV3RouteBank(
                 self.num_envs,
                 self.device,
@@ -358,6 +410,14 @@ class DPPODiffusionEnv(Solo12Env):
 
     def _update_route_and_goal(self) -> RouteState:
         self._route_state = self._routes.update(self._local_position())
+        pace_budget = remaining_speed_budget(
+            remaining_distance=self._route_state.remaining_distance,
+            route_length=self._routes.length,
+            desired_mean_speed=self._routes.speed,
+            elapsed_s=self._task_step.float() * self.step_dt,
+            max_speed=self.cfg.speed_budget_max_mps,
+            min_remaining_time_s=self.step_dt,
+        )
         goal_builder = (
             self._routes.geometric_height_profile_goal
             if self.cfg.goal_representation == "hindsight_geom_profile16"
@@ -368,20 +428,14 @@ class DPPODiffusionEnv(Solo12Env):
             self._robot_yaw(),
             horizon_s=self.cfg.goal_horizon_steps * self.step_dt,
             v_clip=self.cfg.v_req_clip,
+            preview_speed=(pace_budget if self.cfg.pace_consistent_preview else None),
         )
-        # Preserve the selected Phase-A goal layout and its nominal geometric
-        # preview.  Only the final v_avg scalar becomes closed-loop: it is the
-        # pace required to meet the route-level first-arrival time from the
-        # current progress.  This makes accumulated timing debt observable to
-        # the actor without imposing an instantaneous velocity controller.
-        self._goal[:, -1] = remaining_speed_budget(
-            remaining_distance=self._route_state.remaining_distance,
-            route_length=self._routes.length,
-            desired_mean_speed=self._routes.speed,
-            elapsed_s=self._task_step.float() * self.step_dt,
-            max_speed=self.cfg.speed_budget_max_mps,
-            min_remaining_time_s=self.step_dt,
-        )
+        # Historical contracts preserve their nominal geometric preview and
+        # replace only v_avg. V4 instead uses ``pace_budget`` above to build
+        # both preview and scalar coherently, matching Phase-A goal semantics.
+        # Neither mode imposes an instantaneous velocity controller.
+        if not self.cfg.pace_consistent_preview:
+            self._goal[:, -1] = pace_budget
         return self._route_state
 
     def _mean_speed_error(self, state: RouteState) -> torch.Tensor:

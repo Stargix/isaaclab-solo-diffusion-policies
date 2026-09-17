@@ -16,6 +16,9 @@ a physical transition without changing DPPO's likelihood mathematics.
 Task contract v6 is additive: it makes path weight configurable, optionally
 adds a distance-weighted CTE success gate, and registers a private feasibility
 filter that is never exposed to the actor or critic.
+Task contract v7 adds an opt-in pace-consistent preview: the geometric
+look-ahead and final average-speed scalar are generated from the same
+closed-loop remaining pace. Historical checkpoints retain the v6 behavior.
 
 ## Train
 
@@ -23,8 +26,10 @@ The audited smooth baseline is documented in
 [`experiments/supported_procedural_v1`](experiments/supported_procedural_v1/README.md).
 The controlled geometry expansion is
 [`experiments/supported_hybrid_v2`](experiments/supported_hybrid_v2/README.md).
-The final train candidate is
+The strict path-tracking candidate is
 [`experiments/supported_hybrid_v3`](experiments/supported_hybrid_v3/README.md).
+The final fast-tracking candidate is
+[`experiments/supported_hybrid_v4`](experiments/supported_hybrid_v4/README.md).
 All start directly from the same pure Phase-A WCT imitation checkpoint and
 command only supported walk/crouch height endpoints in balanced constant and
 bidirectional-transition profiles. V3 preserves v2 and adds transition-context
@@ -33,6 +38,13 @@ contract without local speed targets or skill labels:
 
 ```bash
 sbatch scripts/dppo_diffusion_rl/experiments/supported_hybrid_v3/train_cluster.sbs
+```
+
+V4 preserves that task and fixes the contradictory preview/pace tuple while
+balancing supported fast targets:
+
+```bash
+sbatch scripts/dppo_diffusion_rl/experiments/supported_hybrid_v4/train_cluster.sbs
 ```
 
 It deliberately does not use `--restart_optimization`: Phase A has no PPO

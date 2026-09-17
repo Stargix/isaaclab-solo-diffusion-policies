@@ -203,13 +203,19 @@ class RouteBank:
         *,
         horizon_s: float,
         v_clip: float,
+        preview_speed: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Torch equivalent of the checkpoint's geometric hindsight goal12."""
 
         if horizon_s <= 0.0:
             raise ValueError("horizon_s must be positive")
+        pace = self.speed if preview_speed is None else preview_speed
+        if pace.shape != self.speed.shape:
+            raise ValueError("preview_speed must have one value per environment")
+        if not torch.isfinite(pace).all() or torch.any(pace < 0.0):
+            raise ValueError("preview_speed must be finite and non-negative")
         start_s = self.progress
-        end_s = torch.minimum(start_s + self.speed * horizon_s, self.length)
+        end_s = torch.minimum(start_s + pace * horizon_s, self.length)
         fractions = torch.tensor((0.25, 0.5, 0.75), device=self.device)
         target_s = start_s[:, None] + fractions[None, :] * (end_s - start_s)[:, None]
         # Float32 cumulative sums can place an exact grid target a few ulps
@@ -257,6 +263,7 @@ class RouteBank:
         *,
         horizon_s: float,
         v_clip: float,
+        preview_speed: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Torch equivalent of Phase A's geometric height-profile goal16.
 
@@ -270,8 +277,13 @@ class RouteBank:
 
         if horizon_s <= 0.0:
             raise ValueError("horizon_s must be positive")
+        pace = self.speed if preview_speed is None else preview_speed
+        if pace.shape != self.speed.shape:
+            raise ValueError("preview_speed must have one value per environment")
+        if not torch.isfinite(pace).all() or torch.any(pace < 0.0):
+            raise ValueError("preview_speed must be finite and non-negative")
         start_s = self.progress
-        requested_end_s = torch.minimum(start_s + self.speed * horizon_s, self.length)
+        requested_end_s = torch.minimum(start_s + pace * horizon_s, self.length)
         end_idx = torch.searchsorted(
             self.arc.contiguous(), requested_end_s[:, None].contiguous()
         ).squeeze(1).clamp_max(self.points - 1)
