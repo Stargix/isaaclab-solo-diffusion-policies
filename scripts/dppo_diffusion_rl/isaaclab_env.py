@@ -29,6 +29,10 @@ from .supported_hybrid_v4 import (
     HYBRID_V4_ROUTE_CONTRACT_VERSION,
     SupportedHybridV4RouteBank,
 )
+from .supported_hybrid_v5 import (
+    HYBRID_V5_ROUTE_CONTRACT_VERSION,
+    SupportedHybridV5RouteBank,
+)
 from .rewards import (
     TaskRewardWeights,
     average_speed_error,
@@ -45,6 +49,7 @@ SUPPORTED_ROUTE_DISTRIBUTIONS = {
     "supported_hybrid_v2",
     "supported_hybrid_v3",
     "supported_hybrid_v4",
+    "supported_hybrid_v5",
 }
 
 
@@ -61,6 +66,7 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
     hybrid_route_contract_version: int = HYBRID_ROUTE_CONTRACT_VERSION
     hybrid_v3_route_contract_version: int = HYBRID_V3_ROUTE_CONTRACT_VERSION
     hybrid_v4_route_contract_version: int = HYBRID_V4_ROUTE_CONTRACT_VERSION
+    hybrid_v5_route_contract_version: int = HYBRID_V5_ROUTE_CONTRACT_VERSION
     feasibility_contract_version: int = FEASIBILITY_CONTRACT_VERSION
     feasibility_contract_version_v2: int = FEASIBILITY_CONTRACT_VERSION_V2
     transition_boundary_min_m: float = 1.6
@@ -121,7 +127,7 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
             raise ValueError(
                 "route_distribution must be 'legacy', 'supported_procedural_v1', "
                 "'supported_hybrid_v2', 'supported_hybrid_v3' or "
-                "'supported_hybrid_v4'."
+                "'supported_hybrid_v4' or 'supported_hybrid_v5'."
             )
         if self.height_profile_stage is not None and self.height_profile_stage not in (0, 1, 2):
             raise ValueError("height_profile_stage must be 0, 1, 2 or None.")
@@ -245,6 +251,29 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
                 raise ValueError(
                     "supported_hybrid_v4 requires pace_consistent_preview=True."
                 )
+        if self.route_distribution == "supported_hybrid_v5":
+            if (
+                self.hybrid_v5_route_contract_version
+                != HYBRID_V5_ROUTE_CONTRACT_VERSION
+            ):
+                raise ValueError(
+                    "supported_hybrid_v5 requires route contract version "
+                    f"{HYBRID_V5_ROUTE_CONTRACT_VERSION}."
+                )
+            if self.feasibility_contract_version_v2 != FEASIBILITY_CONTRACT_VERSION_V2:
+                raise ValueError(
+                    "supported_hybrid_v5 requires feasibility contract version "
+                    f"{FEASIBILITY_CONTRACT_VERSION_V2}."
+                )
+            if self.route_cte_rmse_tolerance_m is None:
+                raise ValueError(
+                    "supported_hybrid_v5 requires an explicit route CTE RMSE tolerance."
+                )
+            if self.pace_consistent_preview:
+                raise ValueError(
+                    "supported_hybrid_v5 restores the successful v3 preview; "
+                    "do not enable pace_consistent_preview."
+                )
 
 
 class DPPODiffusionEnv(Solo12Env):
@@ -257,7 +286,19 @@ class DPPODiffusionEnv(Solo12Env):
         # here so an impossible actor/reward contract cannot reach simulation.
         cfg.validate_task()
         super().__init__(cfg, render_mode, **kwargs)
-        if cfg.route_distribution == "supported_hybrid_v4":
+        if cfg.route_distribution == "supported_hybrid_v5":
+            self._routes = SupportedHybridV5RouteBank(
+                self.num_envs,
+                self.device,
+                points=cfg.route_points,
+                length_m=cfg.route_length_m,
+                curvature_knots=cfg.procedural_curvature_knots,
+                max_curvature_rad_m=cfg.procedural_max_curvature_rad_m,
+                transition_boundary_min_m=cfg.transition_boundary_min_m,
+                transition_boundary_max_m=cfg.transition_boundary_max_m,
+                transition_margin_m=cfg.transition_margin_m,
+            )
+        elif cfg.route_distribution == "supported_hybrid_v4":
             self._routes = SupportedHybridV4RouteBank(
                 self.num_envs,
                 self.device,

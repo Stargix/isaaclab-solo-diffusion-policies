@@ -1,0 +1,77 @@
+{
+  "seed": 20260918,
+  "samples": 4096,
+  "coverage_counts": {
+    "v3 replay": 2048,
+    "fast C->W": 512,
+    "fast W->C": 512,
+    "repeated W start": 512,
+    "repeated C start": 512
+  },
+  "coverage_by_geometry": {
+    "v3 replay": {
+      "smooth-v1": 512,
+      "coherent": 512,
+      "rounded": 512,
+      "hard": 512
+    },
+    "fast C->W": {
+      "smooth-v1": 128,
+      "coherent": 128,
+      "rounded": 128,
+      "hard": 128
+    },
+    "fast W->C": {
+      "smooth-v1": 128,
+      "coherent": 128,
+      "rounded": 128,
+      "hard": 128
+    },
+    "repeated W start": {
+      "smooth-v1": 128,
+      "coherent": 128,
+      "rounded": 128,
+      "hard": 128
+    },
+    "repeated C start": {
+      "smooth-v1": 128,
+      "coherent": 128,
+      "rounded": 128,
+      "hard": 128
+    }
+  },
+  "speed_mps": {
+    "v3 replay": {
+      "p05": 0.21685253083705902,
+      "median": 0.36174696683883667,
+      "p95": 0.7884816527366638
+    },
+    "fast C->W": {
+      "p05": 0.6559973359107971,
+      "median": 0.7164186239242554,
+      "p95": 0.7997621297836304
+    },
+    "fast W->C": {
+      "p05": 0.6558734774589539,
+      "median": 0.7156695127487183,
+      "p95": 0.7986542582511902
+    },
+    "repeated W start": {
+      "p05": 0.3541603088378906,
+      "median": 0.4012778401374817,
+      "p95": 0.4447568356990814
+    },
+    "repeated C start": {
+      "p05": 0.35495564341545105,
+      "median": 0.3942973017692566,
+      "p95": 0.4393005967140198
+    }
+  },
+  "fast_target_exceeds_private_ceiling": 0,
+  "repeated_profile_boundaries": {
+    "p05": 3.0,
+    "median": 4.0,
+    "p95": 4.0
+  },
+  "pace_consistent_preview": false
+}

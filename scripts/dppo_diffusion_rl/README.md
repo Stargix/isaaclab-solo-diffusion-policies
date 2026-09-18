@@ -19,6 +19,8 @@ filter that is never exposed to the actor or critic.
 Task contract v7 adds an opt-in pace-consistent preview: the geometric
 look-ahead and final average-speed scalar are generated from the same
 closed-loop remaining pace. Historical checkpoints retain the v6 behavior.
+Task contract v8 adds the final coverage-corrected sampler while explicitly
+restoring the successful v3 preview semantics.
 
 ## Train
 
@@ -30,6 +32,8 @@ The strict path-tracking candidate is
 [`experiments/supported_hybrid_v3`](experiments/supported_hybrid_v3/README.md).
 The final fast-tracking candidate is
 [`experiments/supported_hybrid_v4`](experiments/supported_hybrid_v4/README.md).
+The final evidence-driven coverage correction is
+[`experiments/supported_hybrid_v5`](experiments/supported_hybrid_v5/README.md).
 All start directly from the same pure Phase-A WCT imitation checkpoint and
 command only supported walk/crouch height endpoints in balanced constant and
 bidirectional-transition profiles. V3 preserves v2 and adds transition-context
@@ -45,6 +49,14 @@ balancing supported fast targets:
 
 ```bash
 sbatch scripts/dppo_diffusion_rl/experiments/supported_hybrid_v4/train_cluster.sbs
+```
+
+The paired v4 result rejected that combined intervention. V5 restores v3
+conditioning and changes only task coverage for feasible fast transitions and
+repeated binary posture profiles:
+
+```bash
+sbatch scripts/dppo_diffusion_rl/experiments/supported_hybrid_v5/train_cluster.sbs
 ```
 
 It deliberately does not use `--restart_optimization`: Phase A has no PPO

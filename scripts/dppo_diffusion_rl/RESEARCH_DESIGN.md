@@ -400,3 +400,29 @@ episode fragment is discarded at the boundary, but shortening likelihood
 support per environment would require a separate variable-horizon DPPO
 derivation. The official implementation also uses a fixed reward horizon; this
 is documented rather than patched with an unverified mask.
+
+# Final coverage-correction decision (task contract v8)
+
+The frozen-bank v3 evaluation isolates the remaining error rather than
+motivating another reward redesign. Constant and single-transition ID/OOD
+conditions are already solved at 99.6--100% success. The unresolved cases are
+repeated binary height composition at 0.45 m/s and fast composite routes where
+the global speed and CTE gates fail while survival remains high.
+
+V4 is retained as a negative ablation. It changed both the sampling
+distribution and preview representation; fast-transition coverage remained
+rare and the dynamic preview reduced achieved/required speed ratio. Therefore
+v5 returns to v3 observations and rewards and changes **only** reset-time task
+coverage. Its fixed mixture is 50% exact v3 replay, 25% feasible fast single
+transitions with a 0.8--1.2 m crouch section, and 25% repeated binary profiles.
+All targeted cases are balanced by direction and geometry family. The private
+support envelope filters impossible deadlines but is not an input, target, or
+reward term.
+
+Fast training targets stop at 0.85 m/s. The feasibility audit found that
+0.95/1.0 m/s composite routes have effectively zero conservative support, so
+they remain reported OOD stress tests. This prevents test-driven reward tuning
+and preserves the central claim: a diffusion actor discovers local gait/speed
+allocation from a global mean-speed objective without a skill index or local
+speed schedule. Full implementation and preregistered gates are documented in
+`experiments/supported_hybrid_v5/README.md`.

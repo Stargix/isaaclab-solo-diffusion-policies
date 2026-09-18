@@ -49,7 +49,7 @@ parser.add_argument(
     default=None,
     help=(
         "Optional distance-weighted route CTE RMSE required for joint success. "
-        "supported_hybrid_v3/v4 require this explicitly."
+        "supported_hybrid_v3/v4/v5 require this explicitly."
     ),
 )
 parser.add_argument("--route_stage", type=int, choices=(0, 1, 2), default=2)
@@ -61,6 +61,7 @@ parser.add_argument(
         "supported_hybrid_v2",
         "supported_hybrid_v3",
         "supported_hybrid_v4",
+        "supported_hybrid_v5",
     ),
     default="legacy",
     help=(
@@ -68,8 +69,10 @@ parser.add_argument(
         "smooth route per episode; supported_hybrid_v2 uses the audited 25/25/25/25 "
         "smooth-v1/coherent-smooth/rounded-waypoint/hard-waypoint distribution. "
         "supported_hybrid_v3 preserves v2 geometry while adding transition-context "
-        "coverage and private feasibility filtering. supported_hybrid_v4 adds "
-        "fast-balanced feasible deadlines and pace-consistent previews. All "
+        "coverage and private feasibility filtering. supported_hybrid_v4 is the "
+        "historical pace-preview ablation. supported_hybrid_v5 restores v3 "
+        "conditioning and targets feasible fast transitions plus repeated binary "
+        "height profiles. All "
         "supported variants use "
         "only supported walk/crouch posture profiles."
     ),

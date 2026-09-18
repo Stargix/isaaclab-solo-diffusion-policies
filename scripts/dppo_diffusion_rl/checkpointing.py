@@ -22,11 +22,11 @@ from .ppo import DPPOUpdater
 
 
 DPPO_CHECKPOINT_VERSION = 1
-DPPO_TASK_CONTRACT_VERSION = 7
-# V6/V7 are additive: their historical defaults preserve the earlier task.
+DPPO_TASK_CONTRACT_VERSION = 8
+# V6/V7/V8 are additive: their historical defaults preserve the earlier task.
 # Exact optimizer resume is safe only after the full saved task-config
 # comparison (including pace-consistent preview) succeeds.
-DPPO_RESUME_COMPATIBLE_TASK_CONTRACT_VERSIONS = {5, 6, 7}
+DPPO_RESUME_COMPATIBLE_TASK_CONTRACT_VERSIONS = {5, 6, 7, 8}
 DPPO_GOAL_CONTRACTS = {
     "hindsight_geom_avg12": "spatial_hindsight_geometry_ddpm",
     "hindsight_geom_profile16": "spatial_hindsight_height_profile_ddpm",
@@ -197,6 +197,13 @@ def task_config_from_env_cfg(cfg: Any) -> dict[str, Any]:
     if cfg.route_distribution == "supported_hybrid_v4":
         task_config["hybrid_v4_route_contract_version"] = int(
             cfg.hybrid_v4_route_contract_version
+        )
+        task_config["feasibility_contract_version_v2"] = int(
+            cfg.feasibility_contract_version_v2
+        )
+    if cfg.route_distribution == "supported_hybrid_v5":
+        task_config["hybrid_v5_route_contract_version"] = int(
+            cfg.hybrid_v5_route_contract_version
         )
         task_config["feasibility_contract_version_v2"] = int(
             cfg.feasibility_contract_version_v2
