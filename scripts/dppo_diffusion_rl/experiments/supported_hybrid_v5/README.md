@@ -30,7 +30,9 @@ coverage changes:
 - **50% v3 replay:** the exact v3 profile and speed draw is retained;
 - **25% fast single transitions:** both directions are balanced, the crouch
   section is continuously sampled in `[0.8, 1.2]` m, and route-average speed
-  is sampled in `[0.65, min(0.85, private ceiling)]` m/s;
+  is sampled from the upper feasible quartile. With
+  `c = min(0.85, private ceiling)` and
+  `l = 0.65 + 0.75 (c - 0.65)`, the target is `Uniform(l, c)` m/s;
 - **25% repeated profiles:** both starting postures are balanced, binary
   section lengths are continuously randomized around the 0.8 m evaluation
   case, and speed lies in `[0.35, 0.45]` m/s.
@@ -40,6 +42,13 @@ hard-waypoint geometry. Fast labels are assigned only where the private
 Phase-A support model admits at least 0.65 m/s. If an asynchronous reset batch
 has no feasible matched replacement, that sample falls back to v3 replay; an
 impossible deadline is never inserted.
+
+The upper-quartile draw is deliberate task-frontier sampling. The 50% v3
+replay already retains the broad/easy speed distribution, while the dedicated
+fast bucket must put useful mass near the measured 0.75--0.85 m/s failure
+range. Sampling its whole feasible interval overrepresented already-solved
+0.65--0.75 m/s cases. This changes only which feasible deadlines are sampled;
+it neither supplies a local speed controller nor changes the actor inputs.
 
 This is sampling, not a controller. The actor still sees only path preview,
 required height profile, terminal pose and one global remaining-speed budget.

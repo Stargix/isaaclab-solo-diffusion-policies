@@ -46,6 +46,13 @@ def test_v5_has_exact_initial_coverage_and_supported_targets() -> None:
     )
     assert torch.all(bank.speed[fast] >= bank.FAST_SPEED_MIN_MPS)
     assert torch.all(bank.speed[fast] <= bank.FAST_SPEED_MAX_MPS)
+    feasible = bank.maximum_feasible_mean_speed[fast].clamp(
+        max=bank.FAST_SPEED_MAX_MPS
+    )
+    frontier_low = bank.FAST_SPEED_MIN_MPS + bank.FAST_FRONTIER_FRACTION * (
+        feasible - bank.FAST_SPEED_MIN_MPS
+    )
+    assert torch.all(bank.speed[fast] >= frontier_low - 1.0e-6)
     assert torch.all(
         bank.speed[fast] <= bank.maximum_feasible_mean_speed[fast] + 1.0e-6
     )

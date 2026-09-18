@@ -426,3 +426,9 @@ and preserves the central claim: a diffusion actor discovers local gait/speed
 allocation from a global mean-speed objective without a skill index or local
 speed schedule. Full implementation and preregistered gates are documented in
 `experiments/supported_hybrid_v5/README.md`.
+
+Within the dedicated fast-transition bucket, v5 samples only the upper
+quartile of each route's feasible `[0.65, min(0.85, ceiling)]` interval. This
+keeps every target inside the private Phase-A support estimate while focusing
+the intervention on the measured 0.75--0.85 m/s frontier; the unchanged 50%
+v3 replay supplies the broader and easier speed coverage.

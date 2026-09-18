@@ -5,7 +5,8 @@ contract.  It changes only reset-time task coverage:
 
 * 50% exact v3 replay;
 * 25% feasible single transitions with a short (0.8--1.2 m) crouch section
-  and a global mean-speed target in [0.65, 0.85] m/s;
+  and a global mean-speed target in the upper quartile of each route's
+  feasible [0.65, min(0.85, ceiling)] m/s interval;
 * 25% repeated binary height profiles at [0.35, 0.45] m/s.
 
 The feasibility estimate and coverage labels are private sampler state.  No
@@ -44,6 +45,7 @@ class SupportedHybridV5RouteBank(SupportedHybridV3RouteBank):
 
     FAST_SPEED_MIN_MPS = 0.65
     FAST_SPEED_MAX_MPS = 0.85
+    FAST_FRONTIER_FRACTION = 0.75
     REPEATED_SPEED_MIN_MPS = 0.35
     REPEATED_SPEED_MAX_MPS = 0.45
     RESTRICTED_SECTION_MIN_M = 0.8
@@ -306,9 +308,12 @@ class SupportedHybridV5RouteBank(SupportedHybridV3RouteBank):
             if torch.any(feasible < self.FAST_SPEED_MIN_MPS):
                 raise RuntimeError("An infeasible route reached the v5 fast sampler.")
             self.maximum_feasible_mean_speed[selected_ids] = ceiling[mask]
-            self.speed[selected_ids] = self.FAST_SPEED_MIN_MPS + torch.rand(
+            frontier_low = self.FAST_SPEED_MIN_MPS + self.FAST_FRONTIER_FRACTION * (
+                feasible - self.FAST_SPEED_MIN_MPS
+            )
+            self.speed[selected_ids] = frontier_low + torch.rand(
                 int(mask.sum()), device=self.device
-            ) * (feasible - self.FAST_SPEED_MIN_MPS)
+            ) * (feasible - frontier_low)
 
         repeated_mask = (coverage == self.REPEATED_WALK_START) | (
             coverage == self.REPEATED_CROUCH_START

@@ -147,6 +147,12 @@ def main() -> None:
             )
             for coverage_class in range(5)
         },
+        "fast_frontier_fraction": bank.FAST_FRONTIER_FRACTION,
+        "fast_target_fraction_at_or_above": {
+            "0.75_mps": float((bank.speed[fast] >= 0.75).float().mean()),
+            "0.80_mps": float((bank.speed[fast] >= 0.80).float().mean()),
+            "0.84_mps": float((bank.speed[fast] >= 0.84).float().mean()),
+        },
         "fast_target_exceeds_private_ceiling": int(
             (bank.speed[fast] > bank.maximum_feasible_mean_speed[fast] + 1.0e-6).sum()
         ),
