@@ -49,7 +49,7 @@ parser.add_argument(
     default=None,
     help=(
         "Optional distance-weighted route CTE RMSE required for joint success. "
-        "supported_hybrid_v3/v4/v5 require this explicitly."
+        "supported_hybrid_v3/v4/v5/v6 require this explicitly."
     ),
 )
 parser.add_argument("--route_stage", type=int, choices=(0, 1, 2), default=2)
@@ -62,6 +62,7 @@ parser.add_argument(
         "supported_hybrid_v3",
         "supported_hybrid_v4",
         "supported_hybrid_v5",
+        "supported_hybrid_v6",
     ),
     default="legacy",
     help=(
@@ -72,7 +73,8 @@ parser.add_argument(
         "coverage and private feasibility filtering. supported_hybrid_v4 is the "
         "historical pace-preview ablation. supported_hybrid_v5 restores v3 "
         "conditioning and targets feasible fast transitions plus repeated binary "
-        "height profiles. All "
+        "height profiles. supported_hybrid_v6 adds low-fast calibration anchors "
+        "for retention-aware consolidation. All "
         "supported variants use "
         "only supported walk/crouch posture profiles."
     ),
@@ -162,6 +164,15 @@ parser.add_argument(
         "Leave at zero for canonical DPPO; enable explicitly for reference-anchored fine-tuning."
     ),
 )
+parser.add_argument(
+    "--reference_kl_update_group",
+    type=int,
+    default=None,
+    help=(
+        "Optional private sampler-group id on which to apply reference KL. "
+        "It never enters actor or critic observations; omitted means global KL."
+    ),
+)
 parser.add_argument("--update_epochs", type=int, default=5)
 parser.add_argument("--minibatch_size", type=int, default=8192)
 parser.add_argument("--critic_minibatch_size", type=int, default=4096)
@@ -224,6 +235,7 @@ def _dppo_config() -> DPPOConfig:
         clip_ratio=args_cli.clip_ratio,
         target_kl=args_cli.target_kl,
         reference_kl_coef=args_cli.reference_kl_coef,
+        reference_kl_update_group=args_cli.reference_kl_update_group,
         update_epochs=args_cli.update_epochs,
         minibatch_size=args_cli.minibatch_size,
         critic_minibatch_size=args_cli.critic_minibatch_size,

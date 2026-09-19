@@ -38,6 +38,10 @@ class DPPOConfig:
     # path-speed v3 experiment enables it explicitly to prevent cumulative
     # drift away from the stable path_1 gait.
     reference_kl_coef: float = 0.0
+    # Optionally apply the immutable-reference KL only to one private sampler
+    # group.  This is optimizer metadata, never an actor/critic observation.
+    # ``None`` preserves the historical global KL exactly.
+    reference_kl_update_group: int | None = None
     # Keep rare terminal outcomes intact. In a large vectorized batch, a
     # symmetric 1 % quantile clip can erase every success/fall when its event
     # rate is below 1 %.
@@ -74,6 +78,13 @@ class DPPOConfig:
             raise ValueError("target_kl must be positive.")
         if self.reference_kl_coef < 0.0:
             raise ValueError("reference_kl_coef must be non-negative.")
+        if self.reference_kl_update_group is not None:
+            if self.reference_kl_update_group < 0:
+                raise ValueError("reference_kl_update_group must be non-negative.")
+            if self.reference_kl_coef <= 0.0:
+                raise ValueError(
+                    "reference_kl_update_group requires a positive reference_kl_coef."
+                )
         if self.update_epochs < 1 or self.minibatch_size < 1 or self.critic_minibatch_size < 1:
             raise ValueError("update epochs and minibatch sizes must be positive.")
         if self.critic_warmup_iterations < 0:

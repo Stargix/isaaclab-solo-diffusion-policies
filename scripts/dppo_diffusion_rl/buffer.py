@@ -18,6 +18,7 @@ class RolloutBatch:
     old_values: torch.Tensor
     rewards: torch.Tensor
     dones: torch.Tensor
+    update_groups: torch.Tensor | None = None
     advantages: torch.Tensor | None = None
     returns: torch.Tensor | None = None
 
@@ -65,6 +66,9 @@ class RolloutBatch:
             old_values=merge(self.old_values),
             rewards=merge(self.rewards),
             dones=merge(self.dones),
+            update_groups=(
+                None if self.update_groups is None else merge(self.update_groups)
+            ),
             advantages=merge(self.advantages),
             returns=merge(self.returns),
         )

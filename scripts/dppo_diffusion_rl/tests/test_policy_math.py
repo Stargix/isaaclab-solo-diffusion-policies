@@ -315,6 +315,21 @@ def test_negative_reference_kl_coefficient_is_rejected() -> None:
         cfg.validate(prediction_horizon=16, execution_offset=8)
 
 
+def test_grouped_reference_kl_selects_only_requested_group() -> None:
+    kl = torch.tensor([1.0, 3.0, 10.0], requires_grad=True)
+    groups = torch.tensor([0, 0, 1])
+    selected = DPPOUpdater._reference_kl_for_group(kl, groups, 0)
+    torch.testing.assert_close(selected, torch.tensor(2.0))
+    selected.backward()
+    torch.testing.assert_close(kl.grad, torch.tensor([0.5, 0.5, 0.0]))
+
+
+def test_grouped_reference_kl_requires_positive_coefficient() -> None:
+    cfg = DPPOConfig(reference_kl_update_group=0)
+    with pytest.raises(ValueError, match="positive reference_kl_coef"):
+        cfg.validate(prediction_horizon=16, execution_offset=8)
+
+
 def test_discount_below_one_is_rejected_for_endpoint_potentials() -> None:
     cfg = DPPOConfig(gamma=0.995)
     with pytest.raises(ValueError, match="gamma must be 1.0"):

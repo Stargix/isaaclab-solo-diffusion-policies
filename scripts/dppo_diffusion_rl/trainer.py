@@ -247,6 +247,7 @@ class DPPOTrainer:
                 "old_values",
                 "rewards",
                 "dones",
+                "update_groups",
             )
         }
         episodes = EpisodeAccumulator()
@@ -255,6 +256,12 @@ class DPPOTrainer:
             proprio = self.proprio_history.clone()
             action_history = self.action_history.clone()
             goals = self.goal_history.clone()
+            group_getter = getattr(self.raw_env, "get_policy_update_group", None)
+            update_groups = (
+                torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+                if group_getter is None
+                else group_getter().clone()
+            )
             critic_observation = self._critic_observation()
             values = self.critic(critic_observation)
             sample = self.policy.sample(proprio, action_history, goals)
@@ -299,6 +306,7 @@ class DPPOTrainer:
             stored["old_values"].append(values)
             stored["rewards"].append(macro_reward)
             stored["dones"].append(macro_done)
+            stored["update_groups"].append(update_groups)
 
         last_value = self.critic(self._critic_observation())
         rollout = RolloutBatch(**{name: torch.stack(values) for name, values in stored.items()})

@@ -77,6 +77,30 @@ class DPPOUpdater:
         return normalized
 
     @staticmethod
+    def _reference_kl_for_group(
+        reference_kl: torch.Tensor,
+        update_groups: torch.Tensor | None,
+        required_group: int | None,
+    ) -> torch.Tensor:
+        """Average reference KL globally or on one private update group.
+
+        Multiplying the empty case by zero keeps a differentiable scalar and
+        makes asynchronous minibatches safe.  The group is deliberately not
+        part of either policy observation.
+        """
+
+        if required_group is None:
+            return reference_kl.mean()
+        if update_groups is None:
+            raise ValueError(
+                "reference_kl_update_group was configured, but rollout update groups are missing."
+            )
+        selected = update_groups == required_group
+        if not torch.any(selected):
+            return reference_kl.sum() * 0.0
+        return reference_kl[selected].mean()
+
+    @staticmethod
     def _value_loss(
         value: torch.Tensor,
         old_value: torch.Tensor,
@@ -134,7 +158,17 @@ class DPPOUpdater:
                 unclipped = -advantage * ratio
                 clipped = -advantage * torch.clamp(ratio, 1.0 - clip, 1.0 + clip)
                 policy_loss = torch.maximum(unclipped, clipped).mean()
-                reference_kl_loss = self.cfg.reference_kl_coef * reference_kl.mean()
+                minibatch_groups = (
+                    None
+                    if batch.update_groups is None
+                    else batch.update_groups[physical_index]
+                )
+                reference_kl_mean = self._reference_kl_for_group(
+                    reference_kl,
+                    minibatch_groups,
+                    self.cfg.reference_kl_update_group,
+                )
+                reference_kl_loss = self.cfg.reference_kl_coef * reference_kl_mean
                 loss = policy_loss + reference_kl_loss
                 approximate_kl = ((ratio - 1.0) - logratio).mean()
                 clip_fraction = ((ratio - 1.0).abs() > clip).float().mean()
@@ -149,7 +183,7 @@ class DPPOUpdater:
                 self.actor_optimizer.step()
                 metrics.policy_loss += float(policy_loss.detach())
                 metrics.approximate_kl += float(approximate_kl.detach())
-                metrics.reference_kl += float(reference_kl.mean().detach())
+                metrics.reference_kl += float(reference_kl_mean.detach())
                 metrics.reference_kl_loss += float(reference_kl_loss.detach())
                 metrics.clip_fraction += float(clip_fraction.detach())
                 metrics.ratio_mean += float(ratio.mean().detach())

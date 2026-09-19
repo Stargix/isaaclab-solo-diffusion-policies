@@ -432,3 +432,28 @@ quartile of each route's feasible `[0.65, min(0.85, ceiling)]` interval. This
 keeps every target inside the private Phase-A support estimate while focusing
 the intervention on the measured 0.75--0.85 m/s frontier; the unchanged 50%
 v3 replay supplies the broader and easier speed coverage.
+
+## Final v6 consolidation after the paired v3/v5 benchmark
+
+The frozen-bank comparison on the same 1,800 route keys rejects v5 as a
+uniform replacement for v3. V5 improves fast C->W by 14.2 percentage points
+and its OOD counterpart by 13.1 points, but loses about 4.7 points on the core
+ID suites and 10.7 points on OOD fast W->C. Survival remains above 97.7%, so
+adding fall penalties is not a causal response. The raw traces instead show a
+shared positive mean-speed bias and premature lowering in high-speed W->C.
+
+V6 is a consolidation stage from the exact evaluated v3 actor, not another
+reward redesign. It preserves the v3 observation, preview, reward and success
+contracts and preserves v5's 50/25/25 task mixture. Two targeted changes map
+directly to the two failures:
+
+1. one quarter of each fast-direction bucket is anchored at 0.65--0.70 m/s;
+   the remainder stays at v5's feasible upper frontier;
+2. a small transition-kernel KL to the frozen v3 actor is applied only to the
+   exact v3 replay group. New fast and repeated-height cases remain
+   unregularized.
+
+The replay label is optimizer-only metadata. It is not supplied to the actor
+or critic and therefore cannot become a skill selector. The complete
+preregistration, exact checkpoint hash and rejection criteria are in
+`experiments/supported_hybrid_v6/README.md`.

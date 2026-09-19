@@ -34,7 +34,9 @@ The final fast-tracking candidate is
 [`experiments/supported_hybrid_v4`](experiments/supported_hybrid_v4/README.md).
 The final evidence-driven coverage correction is
 [`experiments/supported_hybrid_v5`](experiments/supported_hybrid_v5/README.md).
-All start directly from the same pure Phase-A WCT imitation checkpoint and
+The retention-aware final consolidation is
+[`experiments/supported_hybrid_v6`](experiments/supported_hybrid_v6/README.md).
+V1--v5 start directly from the same pure Phase-A WCT imitation checkpoint and
 command only supported walk/crouch height endpoints in balanced constant and
 bidirectional-transition profiles. V3 preserves v2 and adds transition-context
 coverage, a private feasibility filter, and an explicit route-precision
@@ -57,6 +59,14 @@ repeated binary posture profiles:
 
 ```bash
 sbatch scripts/dppo_diffusion_rl/experiments/supported_hybrid_v5/train_cluster.sbs
+```
+
+The paired v3/v5 benchmark found useful fast adaptation but measurable core
+forgetting. V6 therefore consolidates from the exact evaluated v3 actor, with
+reference KL only on v3 replay samples and no constraint on new cases:
+
+```bash
+sbatch scripts/dppo_diffusion_rl/experiments/supported_hybrid_v6/train_cluster.sbs
 ```
 
 It deliberately does not use `--restart_optimization`: Phase A has no PPO

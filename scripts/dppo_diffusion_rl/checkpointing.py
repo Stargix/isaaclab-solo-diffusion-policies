@@ -208,6 +208,13 @@ def task_config_from_env_cfg(cfg: Any) -> dict[str, Any]:
         task_config["feasibility_contract_version_v2"] = int(
             cfg.feasibility_contract_version_v2
         )
+    if cfg.route_distribution == "supported_hybrid_v6":
+        task_config["hybrid_v6_route_contract_version"] = int(
+            cfg.hybrid_v6_route_contract_version
+        )
+        task_config["feasibility_contract_version_v2"] = int(
+            cfg.feasibility_contract_version_v2
+        )
     return task_config
 
 
