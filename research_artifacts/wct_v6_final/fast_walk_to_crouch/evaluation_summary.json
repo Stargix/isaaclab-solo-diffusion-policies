@@ -1,0 +1,167 @@
+{
+  "timestamp": "2026-09-20T11:36:10.368141",
+  "task": "solo12-v0",
+  "checkpoint": "scripts/dppo_diffusion_rl/runs/dppo_wct_supported_hybrid_v6_consolidation/best.pt",
+  "checkpoint_sha256": "E3614CFF8FCC7483FA5FB6CD75CC2B7C562992032F72628EB2A13F5A726F470D",
+  "git_commit": "927bbf4440b9baf8024d9369d44accd7e67b0e03",
+  "git_dirty_before_evaluation": true,
+  "config": {
+    "dataset": {
+      "hdf5_paths": [
+        "scripts/diffusion_policy/data/datasets/walk_crouch_sprint_phase_a_waypoint_v4.hdf5"
+      ],
+      "history": 8,
+      "prediction_horizon": 16,
+      "execution_offset": 8,
+      "goal_horizon_steps": 100,
+      "waypoint_time_offsets_s": [
+        0.5,
+        1.0,
+        1.5
+      ],
+      "step_stride": 1,
+      "dt": 0.02,
+      "v_req_clip": 2.0,
+      "goal_source": "achieved",
+      "goal_representation": "hindsight_geom_profile16",
+      "waypoint_noise_std_m": 0.0,
+      "waypoint_noise_clip_m": 0.0,
+      "include_padded_starts": true,
+      "startup_sample_multiplier": 1,
+      "symmetry_mode": "quadruped",
+      "max_stats_samples": 20000,
+      "val_fraction": 0.05
+    },
+    "model": {
+      "proprio_dim": 30,
+      "action_hist_dim": 12,
+      "goal_dim": 16,
+      "action_dim": 12,
+      "d_model": 128,
+      "nhead": 4,
+      "num_layers": 4,
+      "dim_feedforward": 512,
+      "p_drop_emb": 0.0,
+      "p_drop_attn": 0.3,
+      "separate_goal_conditioning": true
+    },
+    "diffusion": {
+      "num_train_timesteps": 10,
+      "num_inference_steps": 10,
+      "beta_start": 0.0001,
+      "beta_end": 0.02,
+      "beta_schedule": "squaredcos_cap_v2",
+      "prediction_type": "epsilon",
+      "variance_type": "fixed_small",
+      "clip_sample": true,
+      "cfg_dropout_prob": 0.0
+    },
+    "optim": {
+      "batch_size": 4096,
+      "epochs": 50,
+      "learning_rate": 0.0001,
+      "weight_decay": 0.001,
+      "grad_clip_norm": 1.0,
+      "ema_decay": 0.9999,
+      "lr_warmup_steps": 10000,
+      "num_workers": 4,
+      "seed": 42,
+      "mixed_precision": true,
+      "save_every": 5,
+      "log_every": 50
+    },
+    "output_dir": "scripts/diffusion_policy/runs/walk_crouch_sprint_hindsight_geom_profile16_a_wcs_v1_k10",
+    "run_name": "walk_crouch_sprint_hindsight_geom_profile16_a_wcs_v1_k10",
+    "wandb_project": "solo12-diffusion-policy",
+    "wandb_entity": null,
+    "schema_version": 8,
+    "policy_kind": "spatial_hindsight_height_profile_ddpm",
+    "goal_schema": "hindsight_geometric_height_profile16_v1"
+  },
+  "dataset_sha256": {
+    "scripts/diffusion_policy/data/datasets/walk_crouch_sprint_phase_a_waypoint_v4.hdf5": "4E323BD426CCB6F503E70EE255B397899E0DA2F847EB60FA6A21F147F7A6B730"
+  },
+  "policy_kind": "spatial_hindsight_height_profile_ddpm",
+  "dppo_task_contract_version": 8,
+  "profile_height_mae_tolerance_m": 0.04,
+  "seed": 160142,
+  "route_bank": "scripts/dppo_diffusion_rl/experiments/wct_final_evaluation_v1/route_banks/wct_id_routes_v1.npz",
+  "route_bank_sha256": "aeb472364efcdef0f244769a3816a00b7590b5983f25616e705a3d2e59b2b138",
+  "duration_s": 8.0,
+  "route_length_m": 4.0,
+  "num_scenarios": 1000,
+  "num_inference_steps": 10,
+  "exec_horizon": 4,
+  "goal_horizon_steps": 100,
+  "goal_representation": "hindsight_geom_profile16",
+  "dynamic_speed_budget": true,
+  "speed_budget_max_mps": 1.5,
+  "pace_consistent_preview": false,
+  "waypoint_time_offsets_s": [
+    0.5,
+    1.0,
+    1.5
+  ],
+  "speeds_evaluated": [
+    0.65,
+    0.75,
+    0.85,
+    0.95,
+    1.0
+  ],
+  "heights_evaluated": [
+    0.2800000011920929
+  ],
+  "transition_fractions": [
+    0.8
+  ],
+  "transition_directions": "walk_to_crouch",
+  "profile_transition_margin_m": 0.25,
+  "height_profile": "constant",
+  "height_segment_m": null,
+  "height_cycle": [],
+  "posture_settle_steps": 50,
+  "reference_replay_dataset": null,
+  "deterministic_resets": true,
+  "overall_survival_rate": 0.99,
+  "overall_base_failure_rate": 0.008,
+  "overall_physical_sanity_failure_rate": 0.002,
+  "overall_route_completion_ratio": 0.9899550333681417,
+  "overall_route_horizon_speed_ratio": 0.6039535242435943,
+  "overall_route_arrival_rate": 0.954,
+  "overall_route_arrival_speed_ratio": 0.9575807984710462,
+  "overall_active_cross_track_rmse_m": 0.07283882511323611,
+  "overall_active_cross_track_p95_m": 0.1389466512631625,
+  "overall_active_cross_track_max_m": 0.15689307598769664,
+  "overall_active_height_mae_m": 0.03158477221802456,
+  "overall_transition_cross_track_rmse_m": 0.07717061662619248,
+  "overall_transition_height_mae_m": 0.05068468014172574,
+  "overall_task_success_rate": 0.849,
+  "task_success_scenarios": 1000,
+  "overall_task_arrival_rate": 0.99,
+  "arrival_conditional_yaw_success_rate": 0.9838383838383838,
+  "arrival_conditional_terminal_height_success_rate": 1.0,
+  "arrival_conditional_mean_speed_success_rate": 0.897979797979798,
+  "arrival_conditional_profile_height_success_rate": 0.9515151515151515,
+  "arrival_profile_height_mae_m": 0.02919936473551808,
+  "overall_route_cross_track_rmse_m": 0.06545643997751176,
+  "overall_route_terminal_position_error_m": 0.06858229235147376,
+  "survival_by_path": {
+    "coherent_smooth": 0.984,
+    "hard_waypoint": 0.98,
+    "procedural": 1.0,
+    "rounded_waypoint": 0.996
+  },
+  "arrival_rate_by_path": {
+    "coherent_smooth": 0.956,
+    "hard_waypoint": 0.952,
+    "procedural": 0.948,
+    "rounded_waypoint": 0.96
+  },
+  "mean_xy_rmse_by_path": {
+    "coherent_smooth": 0.056492097699358645,
+    "hard_waypoint": 0.07764638680084963,
+    "procedural": 0.05427192851827658,
+    "rounded_waypoint": 0.08265517751633907
+  }
+}

@@ -56,6 +56,10 @@ docker/.container.cfg
 **/.vscode/settings.json
 **/.vscode/launch.json
 
+# Local coding-agent state
+/.agents/
+/.codex/
+
 # Local outputs and run artifacts
 /logs/
 **/logs/
@@ -85,6 +89,10 @@ docker/artifacts/
 *.swp
 *.orig
 *.rej
+
+# Local iterative research notes. Reproducible experiment contracts and
+# publication-facing results remain tracked in their dedicated directories.
+scripts/diffusion_policy/experiments/FINAL_PROJECT_AND_PAPER_PLAN.md
 
 # Doc Outputs
 **/docs/_build/*
@@ -123,13 +131,13 @@ tests/
 **/*.hdf5
 scripts/diffusion_policy/data/datasets/
 # Generated closed-loop evaluation and dataset-coverage artifacts.
-scripts/baseline_diffuseloco/evaluations/
+# Compact, publication-facing summaries belong under research_artifacts/.
+scripts/**/evaluations/
 scripts/diffusion_policy/data/coverage/
 scripts/diffusion_policy/data/audits/
-scripts/diffusion_policy/evaluations/phase_a_causal_audit_v1/
-scripts/diffusion_policy/evaluations/phase_a_capability_audit_v1/
-# Generated WCT benchmark outputs (CSV/NPZ/plots); protocol stays tracked.
-scripts/dppo_diffusion_rl/evaluations/wct_final_evaluation_v1_*/
+
+# Accidental installer output retained locally only.
+/2.7.0+cu128
 
 # Local workspace links and SLURM outputs
 /sbs
