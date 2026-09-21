@@ -152,6 +152,25 @@ sbatch scripts/dppo_diffusion_rl/experiments/wct_final_evaluation_v1/evaluate_cl
   /absolute/path/to/wct_final_evaluation_v1
 ```
 
+For the separate contact-level audit, compare the final DPPO actor and its
+Phase-A source on matched straight routes, and anchor both against the original
+walk and fast-trot experts:
+
+```bash
+sbatch scripts/dppo_diffusion_rl/experiments/wct_final_evaluation_v1/evaluate_gait_audit_cluster.sbs \
+  /absolute/path/to/dppo_v6.pt \
+  /absolute/path/to/phase_a_wct.pt \
+  /absolute/path/to/walk_final.pt \
+  /absolute/path/to/flying_trot.pt \
+  /absolute/path/to/new_empty_output_root
+```
+
+This audit evaluates `0.8`, `1.0` and `1.2 m/s`; `1.2 m/s` is a boundary
+probe, not part of the supported-range gate.  It does not assign a skill label
+to either diffusion actor.  Its purpose is to determine whether their raw
+contact signatures resemble either expert while measuring what DPPO changed
+relative to Phase A.
+
 Each evaluator output is protected by `--require_empty_output_dir`.  The
 launcher can therefore be resumed only by deliberately choosing a new output
 root or removing an incomplete directory after inspecting it.

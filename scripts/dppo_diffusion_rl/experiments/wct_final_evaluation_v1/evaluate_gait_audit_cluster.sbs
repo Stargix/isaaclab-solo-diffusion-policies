@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+#SBATCH --job-name=wct_gait_audit
+#SBATCH --output=/home/sflores/i2r/slurm_logs/slurm-%x-%j.out
+#SBATCH --error=/home/sflores/i2r/slurm_logs/slurm-%x-%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=50G
+#SBATCH --time=08:00:00
+#SBATCH --gres=gpu:lovelace:1
+
+set -Eeuo pipefail
+
+export EGL_VISIBLE_DEVICES=0
+export PHYSX_GPU_DEVICE=0
+export OMNI_KIT_GPU_ID=0
+
+if [[ -f "${HOME}/miniconda3/etc/profile.d/conda.sh" ]]; then
+  CONDA_SH="${HOME}/miniconda3/etc/profile.d/conda.sh"
+elif [[ -f "/etc/profile.d/conda.sh" ]]; then
+  CONDA_SH="/etc/profile.d/conda.sh"
+else
+  CONDA_SH="$(conda info --base)/etc/profile.d/conda.sh"
+fi
+set +eu
+source "${CONDA_SH}"
+conda activate env_isaaclab
+set -eu
+
+ISAACLAB_DIR="${HOME}/i2r/isaaclab-solo-diffusion-policies"
+cd "${ISAACLAB_DIR}"
+export PYTHONPATH="${ISAACLAB_DIR}:${PYTHONPATH:-}"
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export NCCL_P2P_DISABLE=1
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:1024
+export MALLOC_ARENA_MAX=1
+export TMPDIR="${HOME}/i2r/tmp"
+mkdir -p "${TMPDIR}"
+
+DPPO_CHECKPOINT="${1:-${ISAACLAB_DIR}/scripts/dppo_diffusion_rl/runs/dppo_wct_supported_hybrid_v6_consolidation/best.pt}"
+PHASE_A_CHECKPOINT="${2:-${ISAACLAB_DIR}/scripts/diffusion_policy/runs/walk_crouch_sprint_hindsight_geom_profile16_a_wcs_v1_k10/best.pt}"
+WALK_CHECKPOINT="${3:-${ISAACLAB_DIR}/checkpoints/walk_final.pt}"
+FAST_TROT_CHECKPOINT="${4:-${ISAACLAB_DIR}/checkpoints_iri/checkpoints_bound/flying_trot.pt}"
+OUTPUT_ROOT="${5:-${ISAACLAB_DIR}/scripts/dppo_diffusion_rl/evaluations/wct_gait_audit_v1}"
+
+for required in \
+  "${DPPO_CHECKPOINT}" \
+  "${PHASE_A_CHECKPOINT}" \
+  "${WALK_CHECKPOINT}" \
+  "${FAST_TROT_CHECKPOINT}"; do
+  if [[ ! -f "${required}" ]]; then
+    echo "Missing required checkpoint: ${required}" >&2
+    exit 2
+  fi
+done
+
+if [[ -d "${OUTPUT_ROOT}" ]] && [[ -n "$(find "${OUTPUT_ROOT}" -mindepth 1 -print -quit)" ]]; then
+  echo "Output directory is not empty: ${OUTPUT_ROOT}" >&2
+  exit 2
+fi
+mkdir -p "${OUTPUT_ROOT}"
+
+echo "DPPO checkpoint: ${DPPO_CHECKPOINT}"
+echo "Phase-A checkpoint: ${PHASE_A_CHECKPOINT}"
+echo "Walk expert: ${WALK_CHECKPOINT}"
+echo "Fast-trot expert: ${FAST_TROT_CHECKPOINT}"
+echo "Output root: ${OUTPUT_ROOT}"
+sha256sum \
+  "${DPPO_CHECKPOINT}" \
+  "${PHASE_A_CHECKPOINT}" \
+  "${WALK_CHECKPOINT}" \
+  "${FAST_TROT_CHECKPOINT}"
+nvidia-smi
+
+COMMON_POLICY_ARGS=(
+  --path_shapes straight
+  --route_length_m 4.0
+  --speeds 0.8 1.0 1.2
+  --path_height 0.2932
+  --repeats 50
+  --duration_s 8.0
+  --num_inference_steps 10
+  --exec_horizon 4
+  --profile_transition_margin_m 0.25
+  --posture_settle_steps 50
+  --seed 4208
+  --deterministic_resets
+  --save_timeseries
+  --require_empty_output_dir
+  --headless
+  --device cuda:0
+)
+
+# Match the two diffusion actors on an identical straight-route protocol.  The
+# 1.2 m/s condition is a boundary probe and must be reported separately from
+# the supported 0.8--1.0 m/s range.
+./isaaclab.sh -p scripts/diffusion_policy/evaluate_policy.py \
+  --checkpoint "${DPPO_CHECKPOINT}" \
+  --output_dir "${OUTPUT_ROOT}/dppo_v6" \
+  "${COMMON_POLICY_ARGS[@]}"
+
+./isaaclab.sh -p scripts/diffusion_policy/evaluate_policy.py \
+  --checkpoint "${PHASE_A_CHECKPOINT}" \
+  --output_dir "${OUTPUT_ROOT}/phase_a" \
+  "${COMMON_POLICY_ARGS[@]}"
+
+python scripts/diffusion_policy/evaluation/analyze_temporal_allocation.py \
+  "${OUTPUT_ROOT}/dppo_v6" --segment_m 0.4
+python scripts/diffusion_policy/evaluation/analyze_temporal_allocation.py \
+  "${OUTPUT_ROOT}/phase_a" --segment_m 0.4
+
+# The expert comparison is a contact-signature anchor, not a gait label for the
+# diffusion policies.  It uses the repository's shared base environment and
+# reports raw duty, flight, diagonal/ipsilateral and contact-transition data.
+for speed in 0.8 1.0 1.2; do
+  speed_tag="${speed/./p}"
+  ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/evaluate_gait_comparison.py \
+    --comparison walk_flying_trot \
+    --walk_checkpoint "${WALK_CHECKPOINT}" \
+    --flying_trot_checkpoint "${FAST_TROT_CHECKPOINT}" \
+    --speed "${speed}" \
+    --duration_s 8.0 \
+    --warmup_s 2.0 \
+    --num_envs 16 \
+    --seed 4208 \
+    --contact_threshold_n 1.0 \
+    --output_dir "${OUTPUT_ROOT}/experts_${speed_tag}" \
+    --headless \
+    --device cuda:0
+done
+
+echo "WCT gait audit complete: ${OUTPUT_ROOT}"
