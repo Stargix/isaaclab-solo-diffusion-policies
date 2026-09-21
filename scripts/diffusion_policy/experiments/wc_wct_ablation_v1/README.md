@@ -71,3 +71,93 @@ WCT.  The final four-way comparison uses the frozen route banks and
 The primary causal outcome is supported fast-route success (up to 0.85 m/s),
 with survival, CTE, height error, mean-speed error and OOD generalization
 reported jointly.  Contact-pattern similarity is diagnostic only.
+
+## Frozen continuation protocol
+
+The following order is part of the experiment. Do not tune a reward or alter a
+route distribution after seeing an intermediate result.
+
+### 1. Phase-A WC integrity and sanity gate
+
+Use `best.pt`, not the final epoch, and first verify that its embedded config,
+dataset path, schema, seed and split manifest match this experiment. Run the
+same frozen-bank evaluator used for Phase-A WCT with `exec_horizon=4`.
+
+This gate is not expected to solve the downstream task: Phase A WCT itself was
+weak before DPPO. It only rejects a technically invalid WC fit (non-finite
+losses, corrupt checkpoint, incompatible schema, unstable native walk/crouch,
+or an obvious training failure). Validation losses between WC and WCT are not
+a causal performance comparison because their data distributions differ.
+
+### 2. DPPO WC acquisition stage
+
+Create a WC-specific launcher rather than weakening the hash checks of
+`supported_hybrid_v3`. It must start from the new pure Phase-A WC `best.pt` and
+copy the v3 training contract exactly:
+
+- `supported_hybrid_v3`, 4096 environments, 150 iterations and seed 42;
+- route maximum 1.0 m/s and speed budget 1.5 m/s;
+- transition boundary 0.8--3.2 m;
+- path weight 2.0, CTE tolerance 0.10 m;
+- profile-height weight 0.75, height tolerance 0.04 m;
+- reference KL 0, 32 rollout chunks and save interval 10.
+
+No skill id, contact target, gait reward or WC-specific feasibility rule is
+allowed. This stage tests whether online optimization alone can recover the
+fast capability when its Phase-A prior never saw fast-trot demonstrations.
+
+### 3. DPPO WC consolidation stage
+
+Starting from the selected WC-v3 actor, repeat the v6 consolidation contract
+in a separate WC launcher:
+
+- `supported_hybrid_v6`, 120 iterations, seed 42;
+- restart critic and optimizer;
+- replay-only reference KL 0.01 on update group 0;
+- actor LR `5e-6`, 4096 environments and save interval 5;
+- every remaining route/reward parameter identical to WCT-v6.
+
+The WCT-v6 launcher has an intentionally hard-coded WCT-v3 checksum. Do not
+edit or relax it. The WC launcher must instead freeze the checksum of the
+newly selected WC-v3 source.
+
+### 4. Four-way final evaluation
+
+Evaluate Phase-A WC, DPPO WC, the exact Phase-A WCT ancestor and DPPO WCT-v6
+with the same code commit, frozen ID/OOD route banks, seeds, conditions and
+`exec_horizon=4`. Report route-clustered confidence intervals and keep these
+groups separate:
+
+- ordinary constant and transition routes;
+- repeated height profiles;
+- supported fast routes at 0.65, 0.75 and 0.85 m/s, split C->W and W->C;
+- 0.95--1.0 m/s as boundary/stress only;
+- ID and OOD geometries.
+
+Primary metrics are task success, arrival, survival, CTE RMSE, height MAE and
+mean-speed error. Local speed allocation along the route tests whether time is
+recovered by accelerating in safe sections and slowing near corners/crouch.
+Gait/contact plots are mechanism diagnostics, never success criteria.
+
+### 5. Preregistered interpretation
+
+Evidence that fast demonstrations add causal capability requires:
+
+- at least +10 percentage points supported-fast success for DPPO WCT over
+  DPPO WC;
+- survival at least 95% and no more than 2 percentage points regression on
+  ordinary navigation;
+- the advantage to remain visible on OOD routes and in speed allocation, not
+  only in a gait-similarity statistic.
+
+If WC matches WCT, the correct conclusion is that DPPO, rather than fast-trot
+data, supplied the fast capability. If both fail, do not tune the reward again:
+the prior/support hypothesis is not established. If WCT wins clearly, repeat
+the decisive WC and WCT training conditions with at least three total seeds
+before a paper claim; route bootstrap intervals do not measure train-seed
+variance.
+
+A 75-epoch WC Phase-A run is reserved as a secondary equal-update control
+because WCT has 1.5 times as many demonstrations. It is justified only after a
+clear primary WCT advantage; it must not replace the primary equal-exposure
+comparison.
