@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+#SBATCH --job-name=solo_wc_a
+#SBATCH --output=/home/sflores/i2r/slurm_logs/slurm-%x-%j.out
+#SBATCH --error=/home/sflores/i2r/slurm_logs/slurm-%x-%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=50G
+#SBATCH --time=72:00:00
+#SBATCH --gres=gpu:lovelace:1
+
+set -Eeuo pipefail
+
+if [[ -f "${HOME}/miniconda3/etc/profile.d/conda.sh" ]]; then
+  CONDA_SH="${HOME}/miniconda3/etc/profile.d/conda.sh"
+elif [[ -f "/etc/profile.d/conda.sh" ]]; then
+  CONDA_SH="/etc/profile.d/conda.sh"
+else
+  CONDA_SH="$(conda info --base)/etc/profile.d/conda.sh"
+fi
+
+set +eu
+source "${CONDA_SH}"
+conda activate env_isaaclab
+set -eu
+
+ISAACLAB_DIR="${HOME}/i2r/isaaclab-solo-diffusion-policies"
+cd "${ISAACLAB_DIR}"
+export PYTHONPATH="${ISAACLAB_DIR}:${PYTHONPATH:-}"
+export HDF5_USE_FILE_LOCKING=FALSE
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+WC_DATASET="scripts/diffusion_policy/data/datasets/walk_crouch_phase_a_waypoint_v3.hdf5"
+WCT_DATASET="scripts/diffusion_policy/data/datasets/walk_crouch_sprint_phase_a_waypoint_v4.hdf5"
+CONFIG="scripts/diffusion_policy/train/configs/walk_crouch_hindsight_geom_profile16_a0_faithful_k10.json"
+OUTPUT="scripts/diffusion_policy/runs/wc_wct_ablation_v1_phase_a_wc_k10"
+
+EXPECTED_WC_SHA="00aea50b71d7ce3fb69c05996f51ae43f6a56623ac8a3314f7b684ae903e3a3f"
+EXPECTED_WCT_SHA="4e323bd426ccb6f503e70ee255b397899e0da2f847eb60fa6a21f147f7a6b730"
+EXPECTED_CONFIG_SHA="df066b2a27be2c56c3d59b051ebf6f2f04b6f217ef990758c6967d47fc803a87"
+
+for artifact in "${WC_DATASET}" "${WCT_DATASET}" "${CONFIG}"; do
+  [[ -f "${artifact}" ]] || { echo "Missing required artifact: ${artifact}" >&2; exit 2; }
+done
+
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "Refusing to train from a dirty Git worktree." >&2
+  git status --short >&2
+  exit 3
+fi
+
+if [[ -d "${OUTPUT}" ]] && [[ -n "$(find "${OUTPUT}" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+  echo "Refusing to mix runs in non-empty output directory: ${OUTPUT}" >&2
+  exit 4
+fi
+
+WC_SHA="$(sha256sum "${WC_DATASET}" | awk '{print $1}')"
+WCT_SHA="$(sha256sum "${WCT_DATASET}" | awk '{print $1}')"
+CONFIG_SHA="$(sha256sum "${CONFIG}" | awk '{print $1}')"
+
+[[ "${WC_SHA}" == "${EXPECTED_WC_SHA}" ]] || { echo "WC dataset SHA mismatch: ${WC_SHA}" >&2; exit 5; }
+[[ "${WCT_SHA}" == "${EXPECTED_WCT_SHA}" ]] || { echo "WCT dataset SHA mismatch: ${WCT_SHA}" >&2; exit 6; }
+[[ "${CONFIG_SHA}" == "${EXPECTED_CONFIG_SHA}" ]] || { echo "Config SHA mismatch: ${CONFIG_SHA}" >&2; exit 7; }
+
+mkdir -p "${OUTPUT}"
+{
+  echo "experiment=wc_wct_ablation_v1"
+  echo "condition=phase_a_wc"
+  echo "start_mode=from_scratch"
+  echo "git_commit=$(git rev-parse HEAD)"
+  echo "wc_dataset_sha256=${WC_SHA}"
+  echo "wct_dataset_sha256=${WCT_SHA}"
+  echo "config_sha256=${CONFIG_SHA}"
+  echo "slurm_job_id=${SLURM_JOB_ID:-N/A}"
+} > "${OUTPUT}/provenance.txt"
+
+echo "SLURM_JOB_ID=${SLURM_JOB_ID:-N/A}"
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-N/A}"
+echo "git_commit=$(git rev-parse HEAD)"
+echo "wc_dataset_sha256=${WC_SHA}"
+echo "paired_wct_dataset_sha256=${WCT_SHA}"
+echo "config_sha256=${CONFIG_SHA}"
+nvidia-smi
+
+python scripts/diffusion_policy/train/train.py \
+  --config "${CONFIG}" \
+  --datasets "${WC_DATASET}" \
+  --output_dir "${OUTPUT}" \
+  --run_name wc_wct_ablation_v1_phase_a_wc_k10 \
+  --device cuda \
+  --wandb_project solo12-diffusion-policy
