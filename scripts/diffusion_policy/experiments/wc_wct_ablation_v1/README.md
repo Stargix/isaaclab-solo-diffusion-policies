@@ -91,9 +91,23 @@ a causal performance comparison because their data distributions differ.
 
 ### 2. DPPO WC acquisition stage
 
-Create a WC-specific launcher rather than weakening the hash checks of
-`supported_hybrid_v3`. It must start from the new pure Phase-A WC `best.pt` and
-copy the v3 training contract exactly:
+```bash
+sbatch scripts/dppo_diffusion_rl/experiments/wc_wct_ablation_v1/train_dppo_wc_v3_cluster.sbs
+```
+
+Expected output:
+
+```text
+scripts/dppo_diffusion_rl/runs/dppo_wc_supported_hybrid_v3/best.pt
+```
+
+The admitted source is `checkpoints_iri/checkpoints_dp/wc_wct_phase_a.pt`
+(SHA-256 `b94a6ae7e1da298ff0a33b314adc5e6639a059a61452d423cd926fd9103fedbd`).
+The launcher falls back to the Phase-A WC run `best.pt` if that alias is
+absent, and aborts on any other hash. Do not reuse or relax
+`supported_hybrid_v3/train_cluster.sbs`.
+
+It copies the v3 training contract exactly:
 
 - `supported_hybrid_v3`, 4096 environments, 150 iterations and seed 42;
 - route maximum 1.0 m/s and speed budget 1.5 m/s;
@@ -105,6 +119,25 @@ copy the v3 training contract exactly:
 No skill id, contact target, gait reward or WC-specific feasibility rule is
 allowed. This stage tests whether online optimization alone can recover the
 fast capability when its Phase-A prior never saw fast-trot demonstrations.
+
+Evaluate the selected WC-v3 `best.pt` on the same frozen banks after the
+train job finishes. Submit with Slurm `afterok` so the eval reads the final
+checkpoint rather than a mid-run file:
+
+```bash
+sbatch --dependency=afterok:<train_jobid> \
+  scripts/dppo_diffusion_rl/experiments/wc_wct_ablation_v1/evaluate_dppo_wc_v3_cluster.sbs
+```
+
+Expected output:
+
+```text
+scripts/dppo_diffusion_rl/evaluations/wc_wct_ablation_v1_dppo_wc_v3
+```
+
+The launcher does not hash-lock the actor; it records the SHA of whatever
+`best.pt` exists at eval start. Do not point it at Phase-A WC or any WCT
+actor.
 
 ### 3. DPPO WC consolidation stage
 
