@@ -89,6 +89,7 @@ docker/artifacts/
 *.swp
 *.orig
 *.rej
+/*.tar.gz
 
 # Local iterative research notes. Reproducible experiment contracts and
 # publication-facing results remain tracked in their dedicated directories.

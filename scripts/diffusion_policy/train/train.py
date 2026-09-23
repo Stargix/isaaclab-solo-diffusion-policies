@@ -30,6 +30,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from model.ema_model import EMAModel
     from model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
+    from model.solo12_deterministic_chunk_policy import Solo12DeterministicChunkPolicy, Solo12DeterministicChunkPolicyConfig
     from train.config import (
         DATASET_DEFAULTS,
         DIFFUSION_DEFAULTS,
@@ -49,6 +50,7 @@ if __package__ in (None, ""):
 else:  # pragma: no cover
     from ..model.ema_model import EMAModel
     from ..model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
+    from ..model.solo12_deterministic_chunk_policy import Solo12DeterministicChunkPolicy, Solo12DeterministicChunkPolicyConfig
     from .config import (
         DATASET_DEFAULTS,
         DIFFUSION_DEFAULTS,
@@ -85,6 +87,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run_name", default="solo12_diffusion_policy", help="Run name for logs.")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--resume", type=str, default=None, help="Resume model/EMA/optimizer/scheduler from a compatible checkpoint.")
+    parser.add_argument(
+        "--policy_backend",
+        choices=("diffusion", "deterministic_chunk"),
+        default="diffusion",
+        help="Policy output parameterization. Default preserves every legacy diffusion command.",
+    )
 
     parser.add_argument("--history", type=int, default=DATASET_DEFAULTS.history)
     parser.add_argument("--prediction_horizon", type=int, default=DATASET_DEFAULTS.prediction_horizon)
@@ -199,6 +207,11 @@ def set_seed(seed: int) -> None:
 
 def make_config(args: argparse.Namespace) -> TrainConfig:
     is_reference = args.goal_source == "reference"
+    if args.policy_backend == "deterministic_chunk" and args.goal_representation != "hindsight_geom_profile16":
+        raise ValueError(
+            "deterministic_chunk is frozen for the schema-8 hindsight_geom_profile16 control; "
+            "do not compare a different conditioning contract."
+        )
     if args.waypoint_noise_std_m < 0.0 or args.waypoint_noise_clip_m < 0.0:
         raise ValueError("Waypoint-noise magnitudes must be non-negative.")
     if args.waypoint_noise_std_m > 0.0 and (args.goal_source != "achieved" or args.goal_representation != "path11"):
@@ -266,7 +279,9 @@ def make_config(args: argparse.Namespace) -> TrainConfig:
                         else 6 if args.goal_representation == "path_guidance_se2_36"
                         else 5 if args.goal_representation == "holonomic_se2_32"
                         else 4 if is_reference else 3),
-        policy_kind=("spatial_hindsight_height_profile_ddpm" if args.goal_representation == "hindsight_geom_profile16"
+        policy_kind=("spatial_hindsight_height_profile_deterministic_chunk_bc" if (
+                         args.policy_backend == "deterministic_chunk" and args.goal_representation == "hindsight_geom_profile16"
+                     ) else "spatial_hindsight_height_profile_ddpm" if args.goal_representation == "hindsight_geom_profile16"
                      else "spatial_hindsight_geometry_ddpm" if args.goal_representation == "hindsight_geom_avg12"
                      else "holonomic_reference_path_ddpm" if args.goal_representation == "holonomic_se2_32"
                      else "path_guidance_terminal_ddpm" if args.goal_representation == "path_guidance_se2_36"
@@ -310,7 +325,23 @@ def build_lr_scheduler(
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
-def build_policy(cfg: TrainConfig) -> Solo12DiffusionPolicy:
+def build_policy(cfg: TrainConfig) -> Solo12DiffusionPolicy | Solo12DeterministicChunkPolicy:
+    if cfg.policy_kind == "spatial_hindsight_height_profile_deterministic_chunk_bc":
+        return Solo12DeterministicChunkPolicy(
+            Solo12DeterministicChunkPolicyConfig(
+                proprio_dim=cfg.model.proprio_dim,
+                action_hist_dim=cfg.model.action_hist_dim,
+                goal_dim=cfg.model.goal_dim,
+                history=cfg.dataset.history,
+                prediction_horizon=cfg.dataset.prediction_horizon,
+                execution_offset=cfg.dataset.execution_offset,
+                d_model=cfg.model.d_model,
+                nhead=cfg.model.nhead,
+                num_layers=cfg.model.num_layers,
+                p_drop_emb=cfg.model.p_drop_emb,
+                p_drop_attn=cfg.model.p_drop_attn,
+            )
+        )
     policy_cfg = Solo12DiffusionPolicyConfig(
         proprio_dim=cfg.model.proprio_dim,
         action_hist_dim=cfg.model.action_hist_dim,
@@ -367,7 +398,7 @@ class NoisyHindsightWaypointDataset(Dataset):
 
 
 @torch.no_grad()
-def evaluate(policy: Solo12DiffusionPolicy, loader: DataLoader, device: torch.device, max_batches: int | None = None) -> float:
+def evaluate(policy: Solo12DiffusionPolicy | Solo12DeterministicChunkPolicy, loader: DataLoader, device: torch.device, max_batches: int | None = None) -> float:
     policy.eval()
     losses = []
     for i, batch in enumerate(loader):
@@ -383,7 +414,7 @@ def save_checkpoint(
     path: Path,
     *,
     cfg: TrainConfig,
-    policy: Solo12DiffusionPolicy,
+    policy: Solo12DiffusionPolicy | Solo12DeterministicChunkPolicy,
     ema: EMAModel,
     optimizer: torch.optim.Optimizer,
     lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
@@ -402,7 +433,12 @@ def save_checkpoint(
             "config": cfg.to_dict(),
             "model_state_dict": policy.state_dict(),
             "ema_model_state_dict": ema.averaged_model.state_dict(),
-            "noise_scheduler_config": dict(policy.noise_scheduler.config),
+            **({"noise_scheduler_config": dict(policy.noise_scheduler.config)} if isinstance(policy, Solo12DiffusionPolicy) else {
+                "algorithm": "deterministic_chunk_bc",
+                "policy_backend": "deterministic_chunk",
+                "denoising_steps": 0,
+                "forward_passes_per_chunk": 1,
+            }),
             "optimizer_state_dict": optimizer.state_dict(),
             "lr_scheduler_state_dict": lr_scheduler.state_dict(),
             "scaler_state_dict": scaler.state_dict(),
@@ -427,11 +463,17 @@ def main() -> None:
     with (output_dir / "config.json").open("w", encoding="utf-8") as f:
         json.dump(cfg.to_dict(), f, indent=2)
 
+    deterministic_backend = "deterministic_chunk" in cfg.policy_kind
+    sampling_description = (
+        "denoising_steps=0 forward_passes_per_chunk=1"
+        if deterministic_backend
+        else f"K_train={cfg.diffusion.num_train_timesteps} K_infer={cfg.diffusion.num_inference_steps}"
+    )
     print(
-        f"[INFO] d_model={cfg.model.d_model} layers={cfg.model.num_layers} "
-        f"nhead={cfg.model.nhead} K_train={cfg.diffusion.num_train_timesteps} "
-        f"K_infer={cfg.diffusion.num_inference_steps} trajectory={cfg.dataset.prediction_horizon} "
-        f"execute_from={cfg.dataset.execution_offset}"
+        f"[INFO] backend={'deterministic_chunk' if deterministic_backend else 'diffusion'} "
+        f"d_model={cfg.model.d_model} layers={cfg.model.num_layers} "
+        f"nhead={cfg.model.nhead} {sampling_description} "
+        f"trajectory={cfg.dataset.prediction_horizon} execute_from={cfg.dataset.execution_offset}"
     )
 
     device = torch.device(args.device)
@@ -492,6 +534,7 @@ def main() -> None:
     )
 
     policy = build_policy(cfg).to(device)
+    print(f"[INFO] trainable_parameters={sum(parameter.numel() for parameter in policy.parameters() if parameter.requires_grad)}")
     policy.set_normalizer_stats(normalizer_stats)
     ema = EMAModel(deepcopy(policy), max_value=cfg.optim.ema_decay, power=0.75)
     ema.averaged_model.to(device)
@@ -564,9 +607,17 @@ def main() -> None:
             train_losses.append(float(loss.item()))
             if global_step % cfg.optim.log_every == 0:
                 lr = optimizer.param_groups[0]["lr"]
-                print(f"[TRAIN] epoch={epoch} step={global_step} loss={loss.item():.6f} lr={lr:.3e}")
+                metrics = getattr(policy, "last_loss_metrics", {})
+                future_suffix = (
+                    f" future_mse={metrics['executable_future_mse']:.6f}"
+                    if "executable_future_mse" in metrics else ""
+                )
+                print(f"[TRAIN] epoch={epoch} step={global_step} loss={loss.item():.6f}{future_suffix} lr={lr:.3e}")
                 if wandb is not None:
-                    wandb.log({"train/loss": loss.item(), "train/lr": lr, "step": global_step})
+                    log_payload = {"train/loss": loss.item(), "train/lr": lr, "step": global_step}
+                    if "executable_future_mse" in metrics:
+                        log_payload["train/executable_future_mse"] = metrics["executable_future_mse"]
+                    wandb.log(log_payload)
 
             # Validation and checkpointing every 5000 steps
             if global_step % 5000 == 0:

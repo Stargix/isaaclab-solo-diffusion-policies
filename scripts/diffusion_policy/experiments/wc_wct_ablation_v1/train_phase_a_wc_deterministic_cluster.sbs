@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Matched deterministic Phase-A control.  Do not modify the scientific contract
+# here: compare this run only with the frozen WC diffusion prior.
+#SBATCH --job-name=solo_wc_det
+#SBATCH --output=/home/sflores/i2r/slurm_logs/slurm-%x-%j.out
+#SBATCH --error=/home/sflores/i2r/slurm_logs/slurm-%x-%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=50G
+#SBATCH --time=72:00:00
+#SBATCH --gres=gpu:lovelace:1
+
+set -Eeuo pipefail
+source "${HOME}/miniconda3/etc/profile.d/conda.sh"
+conda activate env_isaaclab
+ISAACLAB_DIR="${HOME}/i2r/isaaclab-solo-diffusion-policies"
+cd "${ISAACLAB_DIR}"
+export PYTHONPATH="${ISAACLAB_DIR}:${PYTHONPATH:-}"
+export HDF5_USE_FILE_LOCKING=FALSE OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
+
+DATASET="scripts/diffusion_policy/data/datasets/walk_crouch_phase_a_waypoint_v3.hdf5"
+CONFIG="scripts/diffusion_policy/train/configs/walk_crouch_hindsight_geom_profile16_deterministic_chunk_v1.json"
+OUTPUT="scripts/diffusion_policy/runs/wc_wct_ablation_v1_phase_a_wc_deterministic_v1"
+EXPECTED_DATASET_SHA="00aea50b71d7ce3fb69c05996f51ae43f6a56623ac8a3314f7b684ae903e3a3f"
+EXPECTED_CONFIG_SHA="df066b2a27be2c56c3d59b051ebf6f2f04b6f217ef990758c6967d47fc803a87"
+
+[[ -f "${DATASET}" && -f "${CONFIG}" ]] || { echo "Missing dataset or config" >&2; exit 2; }
+[[ -z "$(git status --porcelain)" ]] || { echo "Refusing dirty worktree" >&2; git status --short >&2; exit 3; }
+[[ ! -d "${OUTPUT}" || -z "$(find "${OUTPUT}" -mindepth 1 -print -quit)" ]] || { echo "Output is non-empty" >&2; exit 4; }
+DATASET_SHA="$(sha256sum "${DATASET}" | awk '{print $1}')"
+CONFIG_SHA="$(sha256sum "${CONFIG}" | awk '{print $1}')"
+[[ "${DATASET_SHA}" == "${EXPECTED_DATASET_SHA}" ]] || { echo "Dataset SHA mismatch: ${DATASET_SHA}" >&2; exit 5; }
+[[ "${CONFIG_SHA}" == "${EXPECTED_CONFIG_SHA}" ]] || { echo "Config SHA mismatch: ${CONFIG_SHA}" >&2; exit 6; }
+
+mkdir -p "${OUTPUT}"
+{
+  echo "experiment=wc_wct_ablation_v1_deterministic_control"
+  echo "git_commit=$(git rev-parse HEAD)"
+  echo "git_dirty=$(git status --porcelain | wc -l)"
+  echo "dataset_sha256=${DATASET_SHA}"
+  echo "config_sha256=${CONFIG_SHA}"
+  echo "slurm_job_id=${SLURM_JOB_ID:-N/A}"
+  echo "command=python scripts/diffusion_policy/train/train.py --policy_backend deterministic_chunk ..."
+} > "${OUTPUT}/provenance.txt"
+
+python scripts/diffusion_policy/train/train.py \
+  --policy_backend deterministic_chunk \
+  --config "${CONFIG}" \
+  --datasets "${DATASET}" \
+  --output_dir "${OUTPUT}" \
+  --run_name wc_wct_ablation_v1_phase_a_wc_deterministic_v1 \
+  --device cuda \
+  --wandb_project solo12-diffusion-policy

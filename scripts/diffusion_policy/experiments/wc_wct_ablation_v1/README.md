@@ -194,3 +194,40 @@ A 75-epoch WC Phase-A run is reserved as a secondary equal-update control
 because WCT has 1.5 times as many demonstrations. It is justified only after a
 clear primary WCT advantage; it must not replace the primary equal-exposure
 comparison.
+
+## Conditional-multimodality audit
+
+The following CPU-only diagnostic tests whether different expert futures remain
+after matching the complete Phase-A conditioning, rather than assuming that a
+multi-skill dataset is automatically conditionally multimodal:
+
+```powershell
+conda run --no-capture-output -n env_isaaclab python scripts/diffusion_policy/experiments/wc_wct_ablation_v1/audit_conditional_multimodality.py `
+  --wc_dataset scripts/diffusion_policy/data/datasets/walk_crouch_phase_a_waypoint_v3.hdf5 `
+  --wct_dataset scripts/diffusion_policy/data/datasets/walk_crouch_sprint_phase_a_waypoint_v4.hdf5 `
+  --output_dir scripts/diffusion_policy/data/audits/wc_wct_conditional_multimodality_v2 `
+  --samples_per_skill 5000 `
+  --projection_dimensions 64 `
+  --candidate_neighbors 64 `
+  --temporal_exclusion_steps 50 `
+  --seed 42
+```
+
+Skill labels are used only after matching for diagnosis. They are never policy
+inputs. The audit compares only future executable tokens and excludes trivial
+nearby frames from the same episode.
+
+## Matched deterministic action-chunk control
+
+`train_phase_a_wc_deterministic_cluster.sbs` is the registered one-seed
+control for the diffusion-necessity question. It uses the same WC HDF5,
+schema-8 profile conditioning, split, quadruped augmentation, 16-token target
+and execution offset as the Phase-A diffusion prior. Only the output objective
+changes: a direct Transformer predicts the normalized 16-action chunk in one
+forward pass instead of DDPM noise prediction and reverse denoising. It does
+not add a skill label, gait loss, smoothness loss, reward term or DPPO update.
+
+Before submitting it, commit the implementation so the launcher's clean-tree
+gate can pass. The launcher checks the frozen dataset and config hashes and
+writes its exact provenance. The subsequent evaluator must use the same frozen
+route banks and `--exec_horizon 4` as the clean WC Phase-A benchmark.

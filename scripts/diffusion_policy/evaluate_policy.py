@@ -185,6 +185,7 @@ from train.conditioning.goal_builder import (
     build_path_guidance_goal_from_path,
 )
 from model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
+from model.solo12_deterministic_chunk_policy import Solo12DeterministicChunkPolicy, Solo12DeterministicChunkPolicyConfig
 from evaluation.metrics import (
     compute_active_tracking_metrics,
     compute_first_task_success,
@@ -777,6 +778,23 @@ def _model_cfg_from_checkpoint(config_dict: dict) -> Solo12DiffusionPolicyConfig
     )
 
 
+def _deterministic_model_cfg_from_checkpoint(config_dict: dict) -> Solo12DeterministicChunkPolicyConfig:
+    model = config_dict["model"]
+    return Solo12DeterministicChunkPolicyConfig(
+        proprio_dim=model.get("proprio_dim", 30),
+        action_hist_dim=model.get("action_hist_dim", 12),
+        goal_dim=model.get("goal_dim", 16),
+        history=config_dict["dataset"]["history"],
+        prediction_horizon=config_dict["dataset"]["prediction_horizon"],
+        execution_offset=config_dict["dataset"]["execution_offset"],
+        d_model=model["d_model"],
+        nhead=model["nhead"],
+        num_layers=model["num_layers"],
+        p_drop_emb=model.get("p_drop_emb", model.get("dropout", 0.0)),
+        p_drop_attn=model.get("p_drop_attn", model.get("dropout", 0.3)),
+    )
+
+
 def make_scenarios(path_heights: tuple[float, ...]) -> list[Scenario]:
     if args_cli.reference_replay_dataset:
         # For holonomic evaluation, we need at least 76 extra lookahead steps (1.52s) to prevent the goal lookahead horizon check from exceeding the reference endpoint.
@@ -843,6 +861,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             "spatial_time_preview_ddpm", "spatial_reference_path_ddpm", "holonomic_reference_path_ddpm",
             "path_guidance_terminal_ddpm", "spatial_hindsight_geometry_ddpm",
             "spatial_hindsight_height_profile_ddpm",
+            "spatial_hindsight_height_profile_deterministic_chunk_bc",
         ),
         allow_dppo=True,
     )
@@ -949,11 +968,28 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         raise ValueError("The randomized ood_* families require --route_bank.")
     num_envs = len(scenarios)
     print(f"[INFO] Evaluating {num_envs} vectorized scenarios in parallel.")
-    inference_steps = resolve_inference_steps(args_cli.num_inference_steps, config["diffusion"])
-    policy_cfg = _model_cfg_from_checkpoint(config)
-    policy_cfg.num_inference_steps = inference_steps
+    deterministic_backend = checkpoint.get("policy_backend") == "deterministic_chunk" or (
+        checkpoint.get("policy_kind") == "spatial_hindsight_height_profile_deterministic_chunk_bc"
+    )
+    if deterministic_backend:
+        if args_cli.num_inference_steps is not None:
+            print("[WARN] --num_inference_steps is ignored for deterministic_chunk checkpoints.")
+        inference_steps = None
+        policy_cfg = _deterministic_model_cfg_from_checkpoint(config)
+    else:
+        inference_steps = resolve_inference_steps(args_cli.num_inference_steps, config["diffusion"])
+        policy_cfg = _model_cfg_from_checkpoint(config)
+        policy_cfg.num_inference_steps = inference_steps
 
-    if checkpoint.get("algorithm") == "dppo":
+    if deterministic_backend:
+        if checkpoint.get("algorithm") != "deterministic_chunk_bc":
+            raise ValueError("deterministic_chunk policy_kind requires algorithm='deterministic_chunk_bc'.")
+        policy = Solo12DeterministicChunkPolicy(policy_cfg)
+        policy.load_state_dict(checkpoint["ema_model_state_dict"])
+        policy.set_normalizer_stats(checkpoint["normalizer_stats"])
+        policy.to(device).eval()
+        print("[INFO] Deterministic action-chunk backend: one forward pass per action chunk.")
+    elif checkpoint.get("algorithm") == "dppo":
         if str(_PROJECT_ROOT) not in sys.path:
             sys.path.insert(0, str(_PROJECT_ROOT))
         from scripts.dppo_diffusion_rl.checkpointing import build_inference_policy
@@ -2188,6 +2224,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         "config": config,
         "dataset_sha256": dataset_hashes(config),
         "policy_kind": checkpoint.get("policy_kind", "unknown"),
+        "policy_backend": checkpoint.get("policy_backend", "diffusion"),
         "dppo_task_contract_version": dppo_task_contract_version,
         "profile_height_mae_tolerance_m": (
             profile_height_mae_tolerance_m if profile_task_active else None
@@ -2199,6 +2236,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         "route_length_m": args_cli.route_length_m,
         "num_scenarios": len(scenarios),
         "num_inference_steps": inference_steps,
+        "denoising_steps": 0 if deterministic_backend else inference_steps,
+        "forward_passes_per_chunk": 1 if deterministic_backend else inference_steps,
         "exec_horizon": args_cli.exec_horizon,
         "goal_horizon_steps": goal_horizon_steps,
         "goal_representation": goal_representation,
