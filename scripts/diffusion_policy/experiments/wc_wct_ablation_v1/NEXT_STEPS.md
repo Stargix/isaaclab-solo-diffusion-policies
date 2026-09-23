@@ -17,7 +17,8 @@ changes while the replication and evaluation protocol is in progress.
 - [x] Freeze the WC/WCT conclusion and select WC seed 42 as the current
   deployment candidate.
 - [x] Audit whether the demonstrations are conditionally multimodal.
-- [ ] Train one matched non-diffusion action-chunk BC baseline.
+- [~] Train one matched non-diffusion action-chunk BC baseline (WC seed 42
+  currently running on the cluster, 2026-09-24).
 - [ ] Implement and evaluate the matched end-to-end RL-from-scratch baseline.
 - [ ] Assemble final paper/I2R tables, plots, limitations and provenance.
 - [ ] Profile/export the frozen candidate and begin sim2sim.
@@ -258,12 +259,22 @@ Implementation is frozen in
 seed 42 only; it must stop after tests, local smoke and preparation of the
 cluster launcher so the diff can be reviewed before training.
 
-Only after Step 3 is frozen, add an end-to-end joint-action PPO baseline with
+Only after the deterministic Phase-A decision is frozen, add an end-to-end
+joint-action PPO baseline with
 the same observations, route generator, reward, termination rules, action
 frequency, environment count, and interaction budget. A randomly initialized
 diffusion model optimized with DPPO is not the appropriate baseline because
 DPPO is a diffusion fine-tuning algorithm and assumes a meaningful denoising
 prior.
+
+A randomly initialized DPPO actor is a narrower initialization ablation but not
+the primary full run. It may receive one cheap smoke test: continue only if it
+produces finite gradients, non-degenerate chunks, measurable progress and
+improving survival. Its failure would be ambiguous because DPPO is designed for
+fine-tuning a pretrained denoising policy; it would not by itself prove that
+Phase A is fundamentally necessary. The primary practical comparison remains
+direct joint-action PPO from scratch. The complete rationale and claim matrix
+are frozen in `CAUSAL_BASELINES_AND_DECISION_TREE.md`.
 
 Compare at least:
 

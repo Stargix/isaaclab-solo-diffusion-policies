@@ -231,3 +231,9 @@ Before submitting it, commit the implementation so the launcher's clean-tree
 gate can pass. The launcher checks the frozen dataset and config hashes and
 writes its exact provenance. The subsequent evaluator must use the same frozen
 route banks and `--exec_horizon 4` as the clean WC Phase-A benchmark.
+
+The interpretation of this control, the distinct RL-from-scratch question and
+the reason direct PPO is primary while random-initialized DPPO is optional are
+recorded in `CAUSAL_BASELINES_AND_DECISION_TREE.md`. This separation prevents a
+Phase-A comparison from being misreported as evidence that imitation learning
+itself is necessary.
