@@ -32,6 +32,12 @@ ID_FAMILIES = (
     "hard_waypoint",
 )
 OOD_FAMILIES = ("ood_arc", "ood_s_curve", "ood_corner")
+DIAGNOSTIC_FAMILIES = (
+    "sweep_s_curve",
+    "sweep_hard_turn",
+    "sweep_rounded_turn",
+    "sweep_compound_turn",
+)
 
 
 @dataclass(frozen=True)
@@ -185,6 +191,90 @@ def _ood_corner(seed: int, *, points: int, length_m: float) -> tuple[np.ndarray,
     return _sample_polyline(vertices, points=points)
 
 
+def _sweep_s_curve(seed: int, *, points: int, length_m: float) -> tuple[np.ndarray, np.ndarray]:
+    """Parameterized S-turn stress family with smooth, finite curvature.
+
+    The parameter ranges intentionally overlap the supported curves at their
+    lower end and extend beyond the original OOD S curves at their upper end.
+    This produces a capability boundary rather than a binary ID/OOD label.
+    """
+
+    rng = np.random.default_rng(seed)
+    peak = float(rng.uniform(0.40, 1.20))
+    reversals = int(rng.integers(1, 4))
+    phase = float(rng.uniform(-0.25 * np.pi, 0.25 * np.pi))
+    arc = (np.arange(points - 1, dtype=np.float64) + 0.5) * length_m / (points - 1)
+    curvature = peak * np.sin(
+        2.0 * np.pi * reversals * arc / length_m + phase
+    )
+    return _integrate_curvature(curvature, length_m)
+
+
+def _sweep_hard_turn(seed: int, *, points: int, length_m: float) -> tuple[np.ndarray, np.ndarray]:
+    """One randomized 45--135 degree polyline turn for braking diagnosis."""
+
+    rng = np.random.default_rng(seed)
+    first_length = float(rng.uniform(0.30, 0.70) * length_m)
+    turn = np.deg2rad(float(rng.uniform(45.0, 135.0)))
+    if rng.random() < 0.5:
+        turn *= -1.0
+    remaining = length_m - first_length
+    vertices = np.asarray(
+        [
+            [0.0, 0.0],
+            [first_length, 0.0],
+            [first_length + remaining * np.cos(turn), remaining * np.sin(turn)],
+        ],
+        dtype=np.float64,
+    )
+    return _sample_polyline(vertices, points=points)
+
+
+def _sweep_rounded_turn(seed: int, *, points: int, length_m: float) -> tuple[np.ndarray, np.ndarray]:
+    """A single smooth turn matched in heading range to ``sweep_hard_turn``."""
+
+    rng = np.random.default_rng(seed)
+    turn = np.deg2rad(float(rng.uniform(45.0, 135.0)))
+    if rng.random() < 0.5:
+        turn *= -1.0
+    width = float(rng.uniform(0.75, 1.50))
+    center = float(rng.uniform(0.35 * length_m, 0.65 * length_m))
+    start = max(0.0, center - 0.5 * width)
+    end = min(length_m, center + 0.5 * width)
+    width = max(end - start, 1.0e-4)
+    arc = (np.arange(points - 1, dtype=np.float64) + 0.5) * length_m / (points - 1)
+    local = (arc - start) / width
+    # Integral of sin(pi*x) over [0, 1] is 2/pi, hence the scale below
+    # yields exactly the sampled heading change in the continuum limit.
+    curvature = np.where(
+        (local >= 0.0) & (local <= 1.0),
+        turn * np.pi / (2.0 * width) * np.sin(np.pi * local),
+        0.0,
+    )
+    return _integrate_curvature(curvature, length_m)
+
+
+def _sweep_compound_turn(seed: int, *, points: int, length_m: float) -> tuple[np.ndarray, np.ndarray]:
+    """Two spatially separated smooth turns with independently signed yaw."""
+
+    rng = np.random.default_rng(seed)
+    arc = (np.arange(points - 1, dtype=np.float64) + 0.5) * length_m / (points - 1)
+    curvature = np.zeros_like(arc)
+    for center in (float(rng.uniform(0.22, 0.36) * length_m), float(rng.uniform(0.64, 0.78) * length_m)):
+        width = float(rng.uniform(0.45, 0.85))
+        turn = np.deg2rad(float(rng.uniform(30.0, 85.0)))
+        if rng.random() < 0.5:
+            turn *= -1.0
+        start, end = center - 0.5 * width, center + 0.5 * width
+        local = (arc - start) / width
+        curvature += np.where(
+            (local >= 0.0) & (local <= 1.0),
+            turn * np.pi / (2.0 * width) * np.sin(np.pi * local),
+            0.0,
+        )
+    return _integrate_curvature(curvature, length_m)
+
+
 def generate_route(
     family: str,
     *,
@@ -208,6 +298,14 @@ def generate_route(
         xy, yaw = _ood_s_curve(seed, points=points, length_m=length_m)
     elif family == "ood_corner":
         xy, yaw = _ood_corner(seed, points=points, length_m=length_m)
+    elif family == "sweep_s_curve":
+        xy, yaw = _sweep_s_curve(seed, points=points, length_m=length_m)
+    elif family == "sweep_hard_turn":
+        xy, yaw = _sweep_hard_turn(seed, points=points, length_m=length_m)
+    elif family == "sweep_rounded_turn":
+        xy, yaw = _sweep_rounded_turn(seed, points=points, length_m=length_m)
+    elif family == "sweep_compound_turn":
+        xy, yaw = _sweep_compound_turn(seed, points=points, length_m=length_m)
     else:
         raise ValueError(f"Unknown route-bank family: {family}")
     return MaterializedRoute(family, int(repeat), int(seed), split, xy, yaw)

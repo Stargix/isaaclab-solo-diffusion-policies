@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+#SBATCH --job-name=wct_eval_v2
+#SBATCH --output=/home/sflores/i2r/slurm_logs/slurm-%x-%j.out
+#SBATCH --error=/home/sflores/i2r/slurm_logs/slurm-%x-%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=50G
+#SBATCH --time=72:00:00
+#SBATCH --gres=gpu:lovelace:1
+
+# Evaluation only.  It is intentionally separate from v1 so no existing
+# benchmark artifact or paper-facing rate is overwritten.
+set -Eeuo pipefail
+export EGL_VISIBLE_DEVICES=0 PHYSX_GPU_DEVICE=0 OMNI_KIT_GPU_ID=0
+source "${HOME}/miniconda3/etc/profile.d/conda.sh"
+conda activate env_isaaclab
+
+ISAACLAB_DIR="${HOME}/i2r/isaaclab-solo-diffusion-policies"
+cd "${ISAACLAB_DIR}"
+export PYTHONPATH="${ISAACLAB_DIR}:${PYTHONPATH:-}"
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
+export NCCL_P2P_DISABLE=1 PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:1024 MALLOC_ARENA_MAX=1
+export TMPDIR="${HOME}/i2r/tmp"
+mkdir -p "${TMPDIR}"
+
+CHECKPOINT_PATH="${1:?pass the frozen DPPO best.pt as argument 1}"
+OUTPUT_ROOT="${2:?pass a new empty output directory as argument 2}"
+PROTOCOL_DIR="${ISAACLAB_DIR}/scripts/dppo_diffusion_rl/experiments/wct_final_evaluation_v2"
+V1_DIR="${ISAACLAB_DIR}/scripts/dppo_diffusion_rl/experiments/wct_final_evaluation_v1"
+ID_BANK="${V1_DIR}/route_banks/wct_id_routes_v1.npz"
+SWEEP_BANK="${PROTOCOL_DIR}/route_banks/wct_geometry_sweep_v2.npz"
+
+for required in "${CHECKPOINT_PATH}" "${ID_BANK}" "${SWEEP_BANK}"; do
+  [[ -f "${required}" ]] || { echo "Missing required file: ${required}" >&2; exit 2; }
+done
+[[ ! -e "${OUTPUT_ROOT}" ]] || { echo "Output root must not exist: ${OUTPUT_ROOT}" >&2; exit 2; }
+mkdir -p "${OUTPUT_ROOT}"
+
+COMMON=(
+  --checkpoint "${CHECKPOINT_PATH}" --route_length_m 4.0 --repeats 50
+  --num_inference_steps 10 --exec_horizon 4 --profile_transition_margin_m 0.25
+  --posture_settle_steps 50 --deterministic_resets --headless --require_empty_output_dir
+  --device cuda:0 --save_timeseries
+)
+
+# Route-distance-aligned transition diagnosis.  The three locations are
+# spatially meaningful and are reported separately by the postprocessor.
+./isaaclab.sh -p scripts/diffusion_policy/evaluate_policy.py "${COMMON[@]}" \
+  --route_bank "${ID_BANK}" --output_dir "${OUTPUT_ROOT}/id_transition_aligned" \
+  --path_shapes procedural coherent_smooth rounded_waypoint hard_waypoint \
+  --speeds 0.35 0.65 0.85 --transition_fractions 0.2 0.5 0.8 \
+  --transition_directions both --duration_s 12.0 --seed 160142
+
+# Intermediate-height interpolation.  Constant plateaus and repeated changes
+# are intentionally distinct from the binary endpoint transition claim.
+./isaaclab.sh -p scripts/diffusion_policy/evaluate_policy.py "${COMMON[@]}" \
+  --route_bank "${ID_BANK}" --output_dir "${OUTPUT_ROOT}/id_intermediate_constant" \
+  --path_shapes procedural coherent_smooth rounded_waypoint hard_waypoint \
+  --speeds 0.35 0.65 --path_heights 0.1705 0.20 0.23 0.26 0.2932 \
+  --duration_s 12.0 --seed 160142
+
+./isaaclab.sh -p scripts/diffusion_policy/evaluate_policy.py "${COMMON[@]}" \
+  --route_bank "${ID_BANK}" --output_dir "${OUTPUT_ROOT}/id_intermediate_repeated_walk_start" \
+  --path_shapes procedural coherent_smooth rounded_waypoint hard_waypoint \
+  --speeds 0.35 0.65 --height_profile interleaved --height_segment_m 0.8 \
+  --height_cycle 0.2932 0.26 0.23 0.20 0.1705 0.20 0.23 0.26 \
+  --duration_s 12.0 --seed 160142
+
+./isaaclab.sh -p scripts/diffusion_policy/evaluate_policy.py "${COMMON[@]}" \
+  --route_bank "${ID_BANK}" --output_dir "${OUTPUT_ROOT}/id_intermediate_repeated_crouch_start" \
+  --path_shapes procedural coherent_smooth rounded_waypoint hard_waypoint \
+  --speeds 0.35 0.65 --height_profile interleaved --height_segment_m 0.8 \
+  --height_cycle 0.1705 0.20 0.23 0.26 0.2932 0.26 0.23 0.20 \
+  --duration_s 12.0 --seed 160142
+
+# Independent geometry/speed capability boundary. This bank is never mixed
+# with v1 ID/OOD headline rates.
+./isaaclab.sh -p scripts/diffusion_policy/evaluate_policy.py "${COMMON[@]}" \
+  --route_bank "${SWEEP_BANK}" --output_dir "${OUTPUT_ROOT}/geometry_speed_sweep" \
+  --path_shapes sweep_s_curve sweep_hard_turn sweep_rounded_turn sweep_compound_turn \
+  --speeds 0.35 0.65 0.85 1.0 --path_heights 0.1705 0.2932 \
+  --duration_s 12.0 --seed 390771
+
+# Pace counterfactuals use the same route conditions and checkpoint. The
+# normal dynamic condition is the reference; frozen and shuffled are causal
+# diagnostics, not alternatives used for training.
+for mode in dynamic frozen shuffled; do
+  ./isaaclab.sh -p scripts/diffusion_policy/evaluate_policy.py "${COMMON[@]}" \
+    --route_bank "${SWEEP_BANK}" --output_dir "${OUTPUT_ROOT}/pace_${mode}" \
+    --path_shapes sweep_s_curve sweep_hard_turn sweep_rounded_turn sweep_compound_turn \
+    --speeds 0.35 0.65 0.85 1.0 --transition_fractions 0.5 \
+    --transition_directions both --duration_s 12.0 --seed 390771 \
+    --pace_budget_mode "${mode}"
+done
+
+for trace_dir in "${OUTPUT_ROOT}"/*; do
+  python scripts/diffusion_policy/evaluation/diagnostic_v2.py "${trace_dir}"
+done
+
+echo "Evaluation v2 complete: ${OUTPUT_ROOT}"

@@ -50,13 +50,17 @@ parser.add_argument(
         "ood_arc",
         "ood_s_curve",
         "ood_corner",
+        "sweep_s_curve",
+        "sweep_hard_turn",
+        "sweep_rounded_turn",
+        "sweep_compound_turn",
     ),
     default=("straight", "circle", "s_curve", "right_angle", "random_polyline"),
     help=(
         "Path families to evaluate. procedural is the smooth-v1 generator; "
         "coherent_smooth, rounded_waypoint and hard_waypoint reproduce the "
         "three additional supported_hybrid_v2 geometry families at 4 m. "
-        "The ood_* families require a frozen --route_bank."
+        "The ood_* and sweep_* families require a frozen --route_bank."
     ),
 )
 parser.add_argument(
@@ -150,6 +154,16 @@ parser.add_argument(
 parser.add_argument(
     "--save_timeseries", action="store_true",
     help="Save per-step route progress, tangent speed, height and validity for temporal-allocation analysis.",
+)
+parser.add_argument(
+    "--pace_budget_mode",
+    choices=("checkpoint", "dynamic", "frozen", "shuffled"),
+    default="checkpoint",
+    help=(
+        "Evaluation-only intervention for DPPO contracts with a remaining-route pace budget. "
+        "checkpoint preserves embedded behavior; dynamic is an explicit alias; frozen holds "
+        "the initial requested pace; shuffled permutes initial pace across vectorized scenarios."
+    ),
 )
 parser.add_argument(
     "--reference_replay_dataset",
@@ -547,6 +561,7 @@ def compute_vectorized_goals(
     speed_budget_target_arc: np.ndarray | None = None,
     speed_budget_max_mps: float | None = None,
     pace_consistent_preview: bool = False,
+    conditioning_speed_override: np.ndarray | None = None,
 ) -> torch.Tensor:
     robot = raw_env._robot
     pos_w = robot.data.root_pos_w.cpu().numpy()
@@ -586,6 +601,11 @@ def compute_vectorized_goals(
             max_speed=float(speed_budget_max_mps or v_req_clip),
             min_remaining_time_s=dt,
         ).detach().cpu().numpy()
+    if conditioning_speed_override is not None:
+        override = np.asarray(conditioning_speed_override, dtype=np.float32)
+        if override.shape != conditioning_speeds.shape:
+            raise ValueError("conditioning_speed_override must match the scenario speed vector.")
+        conditioning_speeds = override
     goals = []
     for i in range(len(path_plans)):
         plan = path_plans[i]
@@ -713,7 +733,7 @@ def compute_vectorized_goals(
         target_distance = np.maximum(speed_budget_target_arc - speed_budget_start_arc, 0.0)
         remaining_distance = np.maximum(speed_budget_target_arc - current_arc, 0.0)
         elapsed_s = float(reference_step or 0) * float(dt)
-        goals_tensor[:, -1] = remaining_speed_budget(
+        final_speed_budget = remaining_speed_budget(
             remaining_distance=torch.as_tensor(remaining_distance, device=device),
             route_length=torch.as_tensor(target_distance, device=device),
             desired_mean_speed=torch.as_tensor(speeds, device=device),
@@ -721,6 +741,11 @@ def compute_vectorized_goals(
             max_speed=float(speed_budget_max_mps or v_req_clip),
             min_remaining_time_s=dt,
         )
+        if conditioning_speed_override is not None:
+            final_speed_budget = torch.as_tensor(
+                conditioning_speed_override, dtype=goals_tensor.dtype, device=device
+            )
+        goals_tensor[:, -1] = final_speed_budget
     return goals_tensor
 
 
@@ -964,8 +989,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             f"[INFO] Frozen route bank: {route_bank_path} "
             f"(sha256={route_bank_hash[:12]}..., {len(materialized_routes)} routes)."
         )
-    elif any(shape.startswith("ood_") for shape in args_cli.path_shapes):
-        raise ValueError("The randomized ood_* families require --route_bank.")
+    elif any(shape.startswith(("ood_", "sweep_")) for shape in args_cli.path_shapes):
+        raise ValueError("The randomized ood_* and sweep_* families require --route_bank.")
     num_envs = len(scenarios)
     print(f"[INFO] Evaluating {num_envs} vectorized scenarios in parallel.")
     deterministic_backend = checkpoint.get("policy_backend") == "deterministic_chunk" or (
@@ -1298,6 +1323,10 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         checkpoint.get("algorithm") == "dppo"
         and int(checkpoint.get("dppo_task_contract_version", 1)) >= 3
     )
+    if args_cli.pace_budget_mode != "checkpoint" and not dynamic_speed_budget:
+        raise ValueError(
+            "--pace_budget_mode interventions require a DPPO checkpoint with task contract >= 3."
+        )
     speed_budget_max_mps = float(
         checkpoint.get("dppo_task_config", {}).get("speed_budget_max_mps", 0.8)
     )
@@ -1331,6 +1360,24 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             f"(checkpoint task contract v{dppo_task_contract_version}, "
             f"pace-consistent preview={pace_consistent_preview})."
         )
+    effective_pace_budget_mode = (
+        "dynamic" if args_cli.pace_budget_mode == "checkpoint" and dynamic_speed_budget
+        else args_cli.pace_budget_mode
+    )
+    if effective_pace_budget_mode == "shuffled":
+        # Preserve the exact marginal pace distribution while breaking its
+        # pairing to route/height conditions.  A cyclic shift would be nearly
+        # inert because vectorized scenarios are often ordered by speed.
+        conditioning_speed_override = np.random.default_rng(args_cli.seed + 91_027).permutation(
+            speeds.astype(np.float32)
+        )
+    elif effective_pace_budget_mode == "frozen":
+        # The remaining-speed budget equals requested pace at reset.
+        conditioning_speed_override = speeds.astype(np.float32).copy()
+    else:
+        conditioning_speed_override = None
+    if effective_pace_budget_mode in {"frozen", "shuffled"}:
+        print(f"[INFO] Evaluation-only pace intervention: {effective_pace_budget_mode}.")
 
     # Track metrics
     trajectories = {i: {"ref": [], "actual": []} for i in range(num_envs)}
@@ -1348,6 +1395,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     foot_contacts = []
     commanded_heights = []
     conditioned_height_profiles = []
+    conditioning_speeds_trace = []
     required_heights = []
     failures = np.zeros(num_envs, dtype=bool)
     base_failures = np.zeros(num_envs, dtype=bool)
@@ -1384,7 +1432,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 speed_budget_target_arc=speed_budget_target_arc if dynamic_speed_budget else None,
                 speed_budget_max_mps=speed_budget_max_mps if dynamic_speed_budget else None,
                 pace_consistent_preview=pace_consistent_preview,
+                conditioning_speed_override=conditioning_speed_override,
             )
+            conditioning_speeds_trace.append(goals[:, -1].detach().cpu().numpy())
             if goal_representation == "hindsight_geom_avg12":
                 commanded_heights.append(goals[:, 10].detach().cpu().numpy())
             elif goal_representation == "hindsight_geom_profile16":
@@ -1499,6 +1549,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         if conditioned_height_profiles
         else np.empty((duration_steps, num_envs, 0), dtype=np.float32)
     )
+    conditioning_speed_trace = np.stack(conditioning_speeds_trace, axis=0)
 
     if args_cli.save_timeseries:
         # Keep the trace opt-in: broad evaluations otherwise only need the
@@ -1513,9 +1564,12 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             planar_speed_m_s=achieved_planar_speeds,
             achieved_height_m=achieved_heights,
             achieved_yaw_rad=achieved_yaws,
+            tilt_deg=tilts,
+            action_delta_rms=action_deltas,
             required_height_m=target_heights,
             commanded_height_m=preview_target_heights,
             conditioned_height_profile_m=height_profile_previews,
+            conditioning_speed_m_s=conditioning_speed_trace,
             valid=trace_valid,
             requested_speed_m_s=speeds,
             failure_step=failure_step,
@@ -1540,6 +1594,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                     "path_shape": s.path_shape,
                     "repeat": s.repeat,
                     "requested_speed_m_s": float(s.speed),
+                    "transition_fraction": s.transition_fraction,
+                    "transition_direction": s.transition_direction,
                     "path_height_m": s.path_height,
                     "height_schedule_m": list(path_plans[i].height_schedule or []),
                     "path_xy": path_plans[i].path_w[:, :2].tolist(),
@@ -1547,6 +1603,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 }
                 for i, s in enumerate(scenarios)
             ],
+            "pace_budget_mode": effective_pace_budget_mode,
+            "pace_budget_override_m_s": (
+                conditioning_speed_override.tolist()
+                if conditioning_speed_override is not None else None
+            ),
         }
         with open(output_dir / "timeseries_metadata.json", "w", encoding="utf-8") as trace_file:
             json.dump(trace_metadata, trace_file, indent=2)
@@ -2226,6 +2287,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         "policy_kind": checkpoint.get("policy_kind", "unknown"),
         "policy_backend": checkpoint.get("policy_backend", "diffusion"),
         "dppo_task_contract_version": dppo_task_contract_version,
+        "pace_budget_mode": effective_pace_budget_mode,
         "profile_height_mae_tolerance_m": (
             profile_height_mae_tolerance_m if profile_task_active else None
         ),
