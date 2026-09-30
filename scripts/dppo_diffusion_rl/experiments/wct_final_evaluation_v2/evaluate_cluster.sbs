@@ -98,4 +98,10 @@ for trace_dir in "${OUTPUT_ROOT}"/*; do
   python scripts/diffusion_policy/evaluation/diagnostic_v2.py "${trace_dir}"
 done
 
+python scripts/diffusion_policy/evaluation/summarize_diagnostic_v2.py \
+  --condition "dynamic=${OUTPUT_ROOT}/pace_dynamic" \
+  --condition "frozen=${OUTPUT_ROOT}/pace_frozen" \
+  --condition "shuffled=${OUTPUT_ROOT}/pace_shuffled" \
+  --output_dir "${OUTPUT_ROOT}/pace_intervention_summary"
+
 echo "Evaluation v2 complete: ${OUTPUT_ROOT}"

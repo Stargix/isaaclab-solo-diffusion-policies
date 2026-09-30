@@ -1597,6 +1597,12 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                     "transition_fraction": s.transition_fraction,
                     "transition_direction": s.transition_direction,
                     "path_height_m": s.path_height,
+                    "height_profile": args_cli.height_profile,
+                    "height_segment_m": (
+                        float(args_cli.height_segment_m)
+                        if args_cli.height_profile in {"interleaved", "random"}
+                        else None
+                    ),
                     "height_schedule_m": list(path_plans[i].height_schedule or []),
                     "path_xy": path_plans[i].path_w[:, :2].tolist(),
                     "path_cumulative_m": path_plans[i].cumulative_lengths.tolist(),
