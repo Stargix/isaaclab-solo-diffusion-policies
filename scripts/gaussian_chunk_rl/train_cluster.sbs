@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+#SBATCH --job-name=ppo_wc_bc
+#SBATCH --output=/home/sflores/i2r/slurm_logs/slurm-%x-%j.out
+#SBATCH --error=/home/sflores/i2r/slurm_logs/slurm-%x-%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=50G
+#SBATCH --time=24:00:00
+#SBATCH --gres=gpu:lovelace:1
+
+set -Eeuo pipefail
+MODE="${1:-train}"
+[[ "${MODE}" == train || "${MODE}" == smoke ]] || { echo 'Use train or smoke' >&2; exit 2; }
+export EGL_VISIBLE_DEVICES=0 PHYSX_GPU_DEVICE=0 OMNI_KIT_GPU_ID=0
+if [[ -f "${HOME}/miniconda3/etc/profile.d/conda.sh" ]]; then
+  CONDA_SH="${HOME}/miniconda3/etc/profile.d/conda.sh"
+elif [[ -f /etc/profile.d/conda.sh ]]; then
+  CONDA_SH=/etc/profile.d/conda.sh
+else
+  CONDA_SH="$(conda info --base)/etc/profile.d/conda.sh"
+fi
+set +eu
+source "${CONDA_SH}"
+conda activate env_isaaclab
+set -eu
+ISAACLAB_DIR="${HOME}/i2r/isaaclab-solo-diffusion-policies"
+cd "${ISAACLAB_DIR}"
+export PYTHONPATH="${ISAACLAB_DIR}:${PYTHONPATH:-}"
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
+export NCCL_P2P_DISABLE=1 MALLOC_ARENA_MAX=1 PYTHONUNBUFFERED=1
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:1024
+export TMPDIR="${HOME}/i2r/tmp"
+mkdir -p "${TMPDIR}"
+SEED="${2:-42}"
+[[ "${SEED}" =~ ^[0-9]+$ ]] || { echo 'Seed must be a nonnegative integer' >&2; exit 2; }
+CHECKPOINT="${3:-scripts/diffusion_policy/runs/wc_wct_ablation_v1_phase_a_wc_deterministic_v1/best.pt}"
+EXPECTED_SHA=c874b2ad0a44cfaa69b0400ec354ec17fd3cad6d303923e1f55a91cc52305352
+[[ -f "${CHECKPOINT}" ]] || { echo "Missing BC checkpoint: ${CHECKPOINT}" >&2; exit 3; }
+ACTUAL_SHA="$(sha256sum "${CHECKPOINT}" | awk '{print $1}')"
+[[ "${ACTUAL_SHA}" == "${EXPECTED_SHA}" ]] || { echo "Wrong checkpoint SHA: ${ACTUAL_SHA}" >&2; exit 3; }
+[[ -z "$(git status --porcelain)" ]] || { echo 'Commit/pull changes first: worktree is dirty' >&2; git status --short >&2; exit 4; }
+RUN="scripts/gaussian_chunk_rl/runs/ppo_wc_supported_hybrid_v3_seed${SEED}"
+SMOKE="scripts/gaussian_chunk_rl/runs/smoke_seed${SEED}_job${SLURM_JOB_ID:-manual}"
+[[ ! -e "${SMOKE}" ]] || { echo "Smoke output exists: ${SMOKE}" >&2; exit 4; }
+if [[ "${MODE}" == train ]]; then
+  [[ ! -e "${RUN}" ]] || { echo "Run output exists: ${RUN}" >&2; exit 4; }
+fi
+nvidia-smi
+python -m pytest scripts/gaussian_chunk_rl/tests -q
+python -m scripts.gaussian_chunk_rl.preflight --checkpoint "${CHECKPOINT}" --device cuda:0
+./isaaclab.sh -p scripts/gaussian_chunk_rl/train.py \
+  --checkpoint "${CHECKPOINT}" --output_dir "${SMOKE}" \
+  --num_envs 64 --iterations 2 --rollout_chunks 2 --seed "${SEED}" \
+  --smoke --headless --device cuda:0
+[[ "${MODE}" == train ]] || exit 0
+./isaaclab.sh -p scripts/gaussian_chunk_rl/train.py \
+  --checkpoint "${CHECKPOINT}" --output_dir "${RUN}" \
+  --run_name "ppo_wc_supported_hybrid_v3_seed${SEED}" \
+  --num_envs 4096 --iterations 150 --rollout_chunks 32 --save_interval 10 \
+  --actor_lr 0.0001 --initial_std 0.04 --clip_ratio 0.2 --target_kl 0.02 \
+  --seed "${SEED}" --headless --device cuda:0 --wandb

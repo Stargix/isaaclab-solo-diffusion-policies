@@ -119,6 +119,8 @@ _build
 tests/
 !scripts/dppo_diffusion_rl/tests/
 !scripts/dppo_diffusion_rl/tests/**
+!scripts/gaussian_chunk_rl/tests/
+!scripts/gaussian_chunk_rl/tests/**
 **/__pycache__/
 
 # Docker history

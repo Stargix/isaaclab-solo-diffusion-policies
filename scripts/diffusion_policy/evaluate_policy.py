@@ -118,6 +118,10 @@ parser.add_argument(
 )
 parser.add_argument("--warmup_steps", type=int, default=25)
 parser.add_argument(
+    "--record_staging_failures", action="store_true",
+    help="Evaluation-only: retain initial-posture resets as failed attempts instead of aborting the batch.",
+)
+parser.add_argument(
     "--posture_settle_steps",
     type=int,
     default=0,
@@ -133,7 +137,7 @@ parser.add_argument(
     "--exec_horizon",
     type=int,
     default=None,
-    help="Executed actions per sample; defaults to the DPPO training value or 8 for Phase A.",
+    help="Executed actions per sample; defaults to the saved RL training value or 8 for Phase A.",
 )
 parser.add_argument("--guidance_scale", type=float, default=1.0)
 parser.add_argument("--seed", type=int, default=42)
@@ -900,6 +904,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         args_cli.exec_horizon = (
             int(checkpoint["dppo_config"]["exec_horizon"])
             if checkpoint.get("algorithm") == "dppo"
+            else int(checkpoint["gaussian_ppo_config"]["exec_horizon"])
+            if checkpoint.get("algorithm") == "gaussian_chunk_ppo"
             else 8
         )
     if args_cli.path_height is not None and args_cli.path_heights is not None:
@@ -1007,8 +1013,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         policy_cfg.num_inference_steps = inference_steps
 
     if deterministic_backend:
-        if checkpoint.get("algorithm") != "deterministic_chunk_bc":
-            raise ValueError("deterministic_chunk policy_kind requires algorithm='deterministic_chunk_bc'.")
+        if checkpoint.get("algorithm") not in {"deterministic_chunk_bc", "gaussian_chunk_ppo"}:
+            raise ValueError("deterministic_chunk requires a BC or Gaussian PPO checkpoint.")
         policy = Solo12DeterministicChunkPolicy(policy_cfg)
         policy.load_state_dict(checkpoint["ema_model_state_dict"])
         policy.set_normalizer_stats(checkpoint["normalizer_stats"])
@@ -1259,6 +1265,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     # the route.  This is explicit staging, not post-hoc trace trimming.  Any
     # reset during staging aborts the benchmark so an unstable initialization
     # cannot be silently replaced by a fresh robot.
+    staging_failed = np.zeros(num_envs, dtype=bool)
+    staging_failure_step = np.full(num_envs, -1, dtype=np.int64)
     if args_cli.posture_settle_steps > 0:
         print(
             "[INFO] Initial-posture staging: "
@@ -1266,7 +1274,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         )
         settle_chunk: torch.Tensor | None = None
         settle_chunk_index = 0
-        for _ in range(args_cli.posture_settle_steps):
+        for settle_step in range(args_cli.posture_settle_steps):
             with torch.inference_mode():
                 if settle_chunk is None or settle_chunk_index == 0:
                     full_trajectory = policy.predict_action_denormalized(
@@ -1310,22 +1318,27 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 previous_action = action.clone()
             if bool(torch.any(staging_dones)):
                 failed_count = int(torch.count_nonzero(staging_dones).item())
-                raise RuntimeError(
-                    f"{failed_count} environment(s) reset during unscored initial-posture "
-                    "staging. Refusing to hide initialization instability."
-                )
+                if not args_cli.record_staging_failures:
+                    raise RuntimeError(
+                        f"{failed_count} environment(s) reset during unscored initial-posture "
+                        "staging. Refusing to hide initialization instability."
+                    )
+                current_failed = staging_dones.cpu().numpy().astype(bool)
+                newly_staging_failed = current_failed & ~staging_failed
+                staging_failure_step[newly_staging_failed] = settle_step + 1
+                staging_failed |= current_failed
 
     # The requested speed horizon starts after history warm-up.  Keep this
     # state separate from the original spawn so warm-up drift cannot be counted
     # as free route progress.
     rollout_start_pos = raw_env._robot.data.root_pos_w.cpu().numpy().copy()
     dynamic_speed_budget = bool(
-        checkpoint.get("algorithm") == "dppo"
+        checkpoint.get("algorithm") in {"dppo", "gaussian_chunk_ppo"}
         and int(checkpoint.get("dppo_task_contract_version", 1)) >= 3
     )
     if args_cli.pace_budget_mode != "checkpoint" and not dynamic_speed_budget:
         raise ValueError(
-            "--pace_budget_mode interventions require a DPPO checkpoint with task contract >= 3."
+            "--pace_budget_mode interventions require an RL checkpoint with task contract >= 3."
         )
     speed_budget_max_mps = float(
         checkpoint.get("dppo_task_config", {}).get("speed_budget_max_mps", 0.8)
@@ -1397,10 +1410,13 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     conditioned_height_profiles = []
     conditioning_speeds_trace = []
     required_heights = []
-    failures = np.zeros(num_envs, dtype=bool)
-    base_failures = np.zeros(num_envs, dtype=bool)
+    failures = staging_failed.copy()
+    base_failures = staging_failed.copy()
     physical_sanity_failures = np.zeros(num_envs, dtype=bool)
     failure_step = np.full(num_envs, -1, dtype=np.int64)
+    # Mark every active sample invalid for a failed initialization; its
+    # auto-reset continuation is never allowed to become a successful attempt.
+    failure_step[staging_failed] = 1
 
     current_chunk: torch.Tensor | None = None
     chunk_index = 0
@@ -1700,11 +1716,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 )
         route_values = route_metrics.to_dict() if route_metrics is not None else {}
         task_success_applicable = bool(
-            route_metrics is not None
+            (route_metrics is not None or staging_failed[i])
             and abs(target_arc - float(plan.cumulative_lengths[-1])) <= 1.0e-4
         )
         task_values: dict[str, float | bool] = {}
-        if task_success_applicable:
+        if task_success_applicable and route_metrics is not None:
             task_values = compute_first_task_success(
                 relative_positions + start_pos[i, :2],
                 plan.path_w[:, :2],
@@ -1783,9 +1799,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             "preview_height_changes": int(preview_change_steps.size),
             "reference_curvature_abs_mean": mean_abs_path_curvature(path_plans[i].path_w),
             "survived": survived,
+            "initialization_failure": bool(staging_failed[i]),
+            "staging_failure_step": int(staging_failure_step[i]),
             "base_failure": bool(base_failures[i]),
             "physical_sanity_failure": bool(physical_sanity_failures[i]),
-            "time_to_failure_s": float(failure_step[i] * dt) if failures[i] else args_cli.duration_s,
+            "time_to_failure_s": 0.0 if staging_failed[i] else float(failure_step[i] * dt) if failures[i] else args_cli.duration_s,
             "xy_rmse": xy_rmse,
             "height_rmse": h_rmse,
             "height_abs_error_mean": float(np.mean(np.abs(hgts - target_h))) if hgts.size else math.nan,
@@ -2294,6 +2312,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         "policy_backend": checkpoint.get("policy_backend", "diffusion"),
         "dppo_task_contract_version": dppo_task_contract_version,
         "pace_budget_mode": effective_pace_budget_mode,
+        "record_staging_failures": bool(args_cli.record_staging_failures),
+        "initialization_failures": int(staging_failed.sum()),
         "profile_height_mae_tolerance_m": (
             profile_height_mae_tolerance_m if profile_task_active else None
         ),
