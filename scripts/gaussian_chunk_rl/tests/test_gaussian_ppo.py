@@ -116,6 +116,9 @@ def test_kl_guard_stops_before_optimizer_step():
     before = actor.log_std.detach().clone()
     metrics = GaussianPPOUpdater(actor, critic, actor.ppo_cfg).update(data)
     assert metrics["Policy/early_stopped"] == 1 and metrics["Policy/actor_updates"] == 0
+    assert metrics["Policy/approximate_kl"] > actor.ppo_cfg.target_kl
+    assert metrics["Policy/accepted_minibatch_kl"] == 0
+    assert metrics["Policy/kl_observed_batches"] == 1
     torch.testing.assert_close(actor.log_std, before)
 
 
@@ -124,6 +127,60 @@ def test_kl_guard_stops_before_optimizer_step():
 def test_invalid_configuration_rejected(settings):
     with pytest.raises(ValueError):
         make_policy(**settings)
+
+
+@pytest.mark.parametrize("settings", [{"adaptive_actor_lr": 1}, {"min_actor_lr": 0},
+    {"adaptive_actor_lr": True, "min_actor_lr": .01}, {"kl_probe_size": 0}])
+def test_invalid_adaptive_configuration_rejected(settings):
+    with pytest.raises(ValueError):
+        make_policy(**settings)
+
+
+def test_adaptive_lr_bounds_and_no_increase_after_early_stop():
+    actor = make_policy(adaptive_actor_lr=True, actor_lr=1e-5, min_actor_lr=1e-7)
+    updater = GaussianPPOUpdater(actor, ValueCritic(8 * 58 + 14, hidden_dims=(16,)), actor.ppo_cfg)
+    assert updater._adapt_actor_lr(.1, early_stopped=True) == pytest.approx(1e-5 / 1.5)
+    lowered = updater.actor_optimizer.param_groups[0]["lr"]
+    assert updater._adapt_actor_lr(.001, early_stopped=True) == lowered
+    assert updater._adapt_actor_lr(.001, early_stopped=False) == pytest.approx(1e-5)
+    assert updater._adapt_actor_lr(.001, early_stopped=False) == pytest.approx(1e-5)
+    for _ in range(100):
+        updater._adapt_actor_lr(.1, early_stopped=True)
+    assert updater.actor_optimizer.param_groups[0]["lr"] == pytest.approx(1e-7)
+
+
+def test_adaptive_warmup_does_not_change_learning_rate():
+    actor = make_policy(adaptive_actor_lr=True, actor_lr=1e-5, update_epochs=1)
+    updater = GaussianPPOUpdater(actor, ValueCritic(8 * 58 + 14, hidden_dims=(16,)), actor.ppo_cfg)
+    metrics = updater.update(rollout(actor), update_actor=False)
+    assert metrics["Policy/actor_lr"] == metrics["Policy/actor_lr_next"] == 1e-5
+    assert "Policy/post_update_exact_kl" not in metrics
+
+
+def test_post_update_exact_kl_is_joint_48_coordinate_kl():
+    actor = make_policy(adaptive_actor_lr=True, actor_lr=1e-5, update_epochs=1, minibatch_size=4)
+    with torch.no_grad():
+        actor.policy.model.head.weight.zero_()
+        actor.policy.model.head.bias.zero_()
+    updater = GaussianPPOUpdater(actor, ValueCritic(8 * 58 + 14, hidden_dims=(16,)), actor.ppo_cfg)
+    def controlled_step():
+        with torch.no_grad():
+            actor.policy.model.head.bias.add_(.001)
+    updater.actor_optimizer.step = controlled_step
+    metrics = updater.update(rollout(actor))
+    assert metrics["Policy/post_update_exact_kl"] == pytest.approx(48 * .001**2 / (2 * .04**2), rel=1e-3)
+    assert metrics["Policy/actor_lr_next"] == 1e-5
+
+
+def test_adaptive_lr_reduces_on_rejected_minibatch_even_if_probe_unchanged():
+    actor = make_policy(adaptive_actor_lr=True, actor_lr=1e-5, update_epochs=1)
+    updater = GaussianPPOUpdater(actor, ValueCritic(8 * 58 + 14, hidden_dims=(16,)), actor.ppo_cfg)
+    data = rollout(actor)
+    data.old_logprobs -= 5
+    metrics = updater.update(data)
+    assert metrics["Policy/actor_updates"] == 0
+    assert metrics["Policy/post_update_exact_kl"] == pytest.approx(0, abs=1e-6)
+    assert metrics["Policy/actor_lr_next"] == pytest.approx(1e-5 / 1.5)
 
 
 def test_std_projection():

@@ -11,7 +11,7 @@
 
 set -Eeuo pipefail
 MODE="${1:-train}"
-[[ "${MODE}" == train || "${MODE}" == smoke ]] || { echo 'Use train or smoke' >&2; exit 2; }
+[[ "${MODE}" == train || "${MODE}" == smoke || "${MODE}" == tuned ]] || { echo 'Use train, smoke or tuned' >&2; exit 2; }
 export EGL_VISIBLE_DEVICES=0 PHYSX_GPU_DEVICE=0 OMNI_KIT_GPU_ID=0
 if [[ -f "${HOME}/miniconda3/etc/profile.d/conda.sh" ]]; then
   CONDA_SH="${HOME}/miniconda3/etc/profile.d/conda.sh"
@@ -41,9 +41,14 @@ ACTUAL_SHA="$(sha256sum "${CHECKPOINT}" | awk '{print $1}')"
 [[ "${ACTUAL_SHA}" == "${EXPECTED_SHA}" ]] || { echo "Wrong checkpoint SHA: ${ACTUAL_SHA}" >&2; exit 3; }
 [[ -z "$(git status --porcelain)" ]] || { echo 'Commit/pull changes first: worktree is dirty' >&2; git status --short >&2; exit 4; }
 RUN="scripts/gaussian_chunk_rl/runs/ppo_wc_supported_hybrid_v3_seed${SEED}"
+ACTOR_ARGS=(--actor_lr 0.0001)
+if [[ "${MODE}" == tuned ]]; then
+  RUN="scripts/gaussian_chunk_rl/runs/ppo_wc_supported_hybrid_v3_kl_adaptive_v2_seed${SEED}"
+  ACTOR_ARGS=(--actor_lr 0.00001 --adaptive_actor_lr --min_actor_lr 0.0000001)
+fi
 SMOKE="scripts/gaussian_chunk_rl/runs/smoke_seed${SEED}_job${SLURM_JOB_ID:-manual}"
 [[ ! -e "${SMOKE}" ]] || { echo "Smoke output exists: ${SMOKE}" >&2; exit 4; }
-if [[ "${MODE}" == train ]]; then
+if [[ "${MODE}" != smoke ]]; then
   [[ ! -e "${RUN}" ]] || { echo "Run output exists: ${RUN}" >&2; exit 4; }
 fi
 nvidia-smi
@@ -52,11 +57,12 @@ python -m scripts.gaussian_chunk_rl.preflight --checkpoint "${CHECKPOINT}" --dev
 ./isaaclab.sh -p scripts/gaussian_chunk_rl/train.py \
   --checkpoint "${CHECKPOINT}" --output_dir "${SMOKE}" \
   --num_envs 64 --iterations 2 --rollout_chunks 2 --seed "${SEED}" \
+  "${ACTOR_ARGS[@]}" \
   --smoke --headless --device cuda:0
-[[ "${MODE}" == train ]] || exit 0
+[[ "${MODE}" != smoke ]] || exit 0
 ./isaaclab.sh -p scripts/gaussian_chunk_rl/train.py \
   --checkpoint "${CHECKPOINT}" --output_dir "${RUN}" \
-  --run_name "ppo_wc_supported_hybrid_v3_seed${SEED}" \
+  --run_name "${RUN##*/}" \
   --num_envs 4096 --iterations 150 --rollout_chunks 32 --save_interval 10 \
-  --actor_lr 0.0001 --initial_std 0.04 --clip_ratio 0.2 --target_kl 0.02 \
+  "${ACTOR_ARGS[@]}" --initial_std 0.04 --clip_ratio 0.2 --target_kl 0.02 \
   --seed "${SEED}" --headless --device cuda:0 --wandb

@@ -92,6 +92,61 @@ ignored for deterministic/mean inference. Do not change its banks or metrics.
 Then compare with WC Phase A and WC DPPO v3 on those same banks, and report
 physical tracking/safety/timing, not training return alone.
 
+## KL-calibrated second pilot (2026-10-03)
+
+The first seed-42 run completed 150 iterations, but all 140 actor-enabled
+iterations stopped after exactly one minibatch. Observed stopping KL ranged
+from .626 to 30.133 (median 2.223), versus target .02. The old
+`Policy/approximate_kl` was zero because it only averaged accepted minibatches
+before their optimizer steps; the rejected minibatch was only visible in
+`Policy/max_observed_kl`. This was a misleading diagnostic, not zero policy
+change. See [the audit](OPTIMIZATION_AUDIT_2026-10-03.md).
+
+The original `train` mode and fixed-LR algorithm remain available. New `tuned`
+mode starts again from the pinned pure BC prior (NOT the failed PPO actor),
+uses actor LR 1e-5, and enables bounded KL-based LR adaptation. It saves to a
+different run directory and does not overwrite the original experiment.
+
+The scheduler divides LR by 1.5 if measured joint KL exceeds twice the target;
+it can increase LR by 1.5 below half the target only if no early stop occurred.
+Bounds are [1e-7, initial LR 1e-5]. Measurement is the maximum of the sampled
+minibatch KL and the post-update analytic KL(old Gaussian || new Gaussian)
+on a fixed, evenly spaced subset of at most 8192 rollout conditions. This
+retains the correct SUM over 48 executable coordinates. It adjusts the next
+rollout's LR, does not undo the previous update, and is NOT a hard trust-region
+guarantee. KL-driven adaptation is motivated by
+[RSL-RL PPO](https://github.com/leggedrobotics/rsl_rl/blob/main/rsl_rl/algorithms/ppo.py);
+the bound, probe and early-stop combination here are explicit implementation
+choices, not a verbatim reproduction of that algorithm or proven optima.
+
+Rewards, routes, prior, exploration initialization/bounds, clipping, critic,
+150 iterations, seed, and physical-interaction budget remain unchanged.
+New telemetry records LR used/next and final analytic KL. Sampled
+`Policy/approximate_kl` now includes rejected minibatches; the old accepted-only
+quantity is retained as `Policy/accepted_minibatch_kl`. Do not compare the old
+and new approximate-KL curves without this definition change.
+
+After deploying a clean committed revision to the cluster:
+
+```bash
+cd ~/i2r/isaaclab-solo-diffusion-policies
+git pull --ff-only
+TRAIN_JOB_ID=$(sbatch --parsable --job-name=ppo_wc_klv2 scripts/gaussian_chunk_rl/train_cluster.sbs tuned 42)
+echo "Train job: ${TRAIN_JOB_ID}"
+
+sbatch --dependency="afterok:${TRAIN_JOB_ID}" --export=ALL,RECORD_STAGING_FAILURES=1 \
+  scripts/dppo_diffusion_rl/experiments/wct_final_evaluation_v1/evaluate_cluster.sbs \
+  "$PWD/scripts/gaussian_chunk_rl/runs/ppo_wc_supported_hybrid_v3_kl_adaptive_v2_seed42/best.pt" \
+  "$PWD/scripts/dppo_diffusion_rl/evaluations/wc_wct_gaussian_ppo_kl_adaptive_v2_seed42"
+```
+
+The launcher tests and simulation smoke both precede the train, using the
+selected recipe. Before interpreting this pilot, inspect actor update counts,
+actual KL and LR, height/pace compliance and frozen task success. Early stops
+are normal; the goal is to avoid the original orders-of-magnitude overshoot,
+not to force every epoch to run. No automatic success/convergence claim or
+automatic seed replication is made.
+
 ## Local checks
 
 ```powershell

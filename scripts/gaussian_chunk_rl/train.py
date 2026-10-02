@@ -27,6 +27,9 @@ def parser_with_app_args():
     parser.add_argument("--save_interval", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--actor_lr", type=float, default=1e-4)
+    parser.add_argument("--adaptive_actor_lr", action="store_true",
+                        help="Adapt the next rollout's actor LR using measured joint KL.")
+    parser.add_argument("--min_actor_lr", type=float, default=1e-7)
     parser.add_argument("--initial_std", type=float, default=0.04)
     parser.add_argument("--clip_ratio", type=float, default=0.2)
     parser.add_argument("--target_kl", type=float, default=0.02)
@@ -127,6 +130,7 @@ if __name__ == "__main__":
         torch.cuda.manual_seed_all(args.seed)
     cfg = GaussianPPOConfig(actor_lr=args.actor_lr, initial_std=args.initial_std,
                            clip_ratio=args.clip_ratio, target_kl=args.target_kl,
+                           adaptive_actor_lr=args.adaptive_actor_lr, min_actor_lr=args.min_actor_lr,
                            critic_warmup_iterations=0 if args.smoke else 10)
     # Validate source and config before expensive simulation startup.
     source, policy = load_bc_policy(Path(args.checkpoint).resolve(), args.device, cfg)

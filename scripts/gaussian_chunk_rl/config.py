@@ -13,6 +13,9 @@ class GaussianPPOConfig:
     min_std: float = 0.01
     max_std: float = 0.2
     actor_lr: float = 1e-4
+    adaptive_actor_lr: bool = False
+    min_actor_lr: float = 1e-7
+    kl_probe_size: int = 8192
     critic_lr: float = 1e-3
     clip_ratio: float = 0.2
     target_kl: float = 0.02
@@ -37,7 +40,11 @@ class GaussianPPOConfig:
         for name in ("actor_lr", "critic_lr", "target_kl", "max_grad_norm", "value_coef"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive.")
-        for name in ("exec_horizon", "update_epochs", "minibatch_size", "critic_minibatch_size"):
+        if not isinstance(self.adaptive_actor_lr, bool):
+            raise ValueError("adaptive_actor_lr must be a boolean.")
+        if self.min_actor_lr <= 0 or (self.adaptive_actor_lr and self.min_actor_lr > self.actor_lr):
+            raise ValueError("Require a positive min_actor_lr no larger than the adaptive starting LR.")
+        for name in ("exec_horizon", "update_epochs", "minibatch_size", "critic_minibatch_size", "kl_probe_size"):
             value = getattr(self, name)
             if not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer.")

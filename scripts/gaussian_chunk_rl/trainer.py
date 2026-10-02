@@ -74,5 +74,6 @@ class GaussianPPOTrainer(DPPOTrainer):
                   f"fall={collected['Episode/base_contact_rate']:.3f} "
                   f"speed_err={collected['Episode/mean_speed_error_abs_mps']:.3f} "
                   f"actor_updates={update['Policy/actor_updates']:.0f} "
-                  f"std={update['Policy/std_mean']:.4f} kl={update['Policy/approximate_kl']:.5f}", flush=True)
+                  f"std={update['Policy/std_mean']:.4f} kl_max={update['Policy/max_observed_kl']:.5f} "
+                  f"lr={update['Policy/actor_lr']:.2e}->{update['Policy/actor_lr_next']:.2e}", flush=True)
         self._save("last.pt", iterations - 1, {**metrics, "checkpoint_phase": "post_update_unscored"})
