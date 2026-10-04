@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import math
 
 import torch
+import pytest
 
 from scripts.dppo_diffusion_rl.policy import DPPOSample
 from scripts.dppo_diffusion_rl.trainer import DPPOTrainer
@@ -281,3 +282,44 @@ def test_historical_best_score_is_only_reused_in_place(tmp_path) -> None:
         output_dir=old_dir, rollout_chunks=1, save_interval=1,
     )
     assert same_trainer.best_score == 3.0
+
+
+@pytest.mark.parametrize("select_rollout_actor", [False, True])
+def test_best_checkpoint_records_expected_actor_phase(tmp_path, monkeypatch, select_rollout_actor):
+    policy = _ChunkPolicy()
+    policy.dppo_cfg.select_rollout_actor = select_rollout_actor
+    policy.dppo_cfg.critic_warmup_iterations = 0
+    policy.version = 0
+
+    class Updater:
+        def update(self, rollout, **kwargs):
+            policy.version += 1
+            return {"Policy/approximate_kl": 0.0, "Policy/reference_kl": 0.0}
+
+    trainer = DPPOTrainer(
+        env=_ChunkEnv(), policy=policy, critic=_ZeroCritic(), updater=Updater(),
+        source_checkpoint={}, source_checkpoint_path="source.pt", output_dir=tmp_path,
+        rollout_chunks=1, save_interval=1,
+    )
+    metrics = {
+        "Episode/completed": 1.0, "Episode/success_rate": 1.0,
+        "Episode/base_contact_rate": 0.0, "Episode/corridor_failure_rate": 0.0,
+        "Episode/terminal_overshoot_rate": 0.0, "Episode/arrival_failure_rate": 0.0,
+        "Episode/progress_fraction": 1.0, "Episode/mean_speed_error_abs_mps": 0.0,
+        "Episode/terminal_distance_m": 0.0, "Episode/profile_height_mae_m": 0.0,
+        "Episode/position_arrival_rate": 1.0, "Rollout/reward_mean": 1.0,
+        "Rollout/action_saturation_fraction": 0.0,
+    }
+    monkeypatch.setattr(trainer.env, "reset", lambda: None, raising=False)
+    monkeypatch.setattr(trainer, "collect", lambda: (None, metrics))
+    saves = []
+    monkeypatch.setattr(trainer, "_save", lambda name, iteration, values: saves.append(
+        (name, policy.version, values.get("checkpoint_phase"))
+    ))
+    trainer.run(1)
+    assert saves == [
+        ("best.pt", 0 if select_rollout_actor else 1,
+         "pre_update" if select_rollout_actor else None),
+        ("model_0.pt", 1, "post_update_unscored" if select_rollout_actor else None),
+        ("last.pt", 1, "post_update_unscored" if select_rollout_actor else None),
+    ]

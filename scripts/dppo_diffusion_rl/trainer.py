@@ -387,9 +387,18 @@ class DPPOTrainer:
             raise ValueError("iterations must be positive.")
         self.env.reset()
         self._seed_history()
+        select_rollout_actor = getattr(self.policy.dppo_cfg, "select_rollout_actor", False)
         for iteration in range(self.start_iteration, self.start_iteration + iterations):
             started = time.perf_counter()
             rollout, rollout_metrics = self.collect()
+            if select_rollout_actor:
+                score = self._selection_score(rollout_metrics)
+                if score > self.best_score:
+                    self.best_score = score
+                    self._save(
+                        "best.pt", iteration,
+                        {**rollout_metrics, "checkpoint_phase": "pre_update"},
+                    )
             actor_enabled = iteration >= self.policy.dppo_cfg.critic_warmup_iterations
             update_metrics = self.updater.update(rollout, update_actor=actor_enabled)
             elapsed = time.perf_counter() - started
@@ -407,11 +416,15 @@ class DPPOTrainer:
             }
             self._write_metrics(iteration, metrics)
             score = self._selection_score(metrics)
-            if score > self.best_score:
+            if not select_rollout_actor and score > self.best_score:
                 self.best_score = score
                 self._save("best.pt", iteration, metrics)
             if iteration % self.save_interval == 0:
-                self._save(f"model_{iteration}.pt", iteration, metrics)
+                self._save(
+                    f"model_{iteration}.pt", iteration,
+                    {**metrics, "checkpoint_phase": "post_update_unscored"}
+                    if select_rollout_actor else metrics,
+                )
             print(
                 f"[DPPO {iteration:05d}] reward={metrics['Rollout/reward_mean']:+.3f} "
                 f"success={metrics['Episode/success_rate']:.3f} "
@@ -426,4 +439,8 @@ class DPPOTrainer:
                 f"sat={metrics['Rollout/action_saturation_fraction']:.3f}"
             )
         final_iteration = self.start_iteration + iterations - 1
-        self._save("last.pt", final_iteration, metrics)
+        self._save(
+            "last.pt", final_iteration,
+            {**metrics, "checkpoint_phase": "post_update_unscored"}
+            if select_rollout_actor else metrics,
+        )

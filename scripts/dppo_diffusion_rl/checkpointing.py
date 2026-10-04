@@ -96,8 +96,11 @@ def training_resume_state(
         )
     if restart_optimization:
         return 0, 0, False
+    # A pre-update best contains the optimizer BEFORE the numbered update.
+    # Recollect at that iteration on resume rather than skipping an update.
+    pre_update = checkpoint.get("metrics", {}).get("checkpoint_phase") == "pre_update"
     return (
-        int(checkpoint.get("iteration", -1)) + 1,
+        int(checkpoint.get("iteration", -1)) + (0 if pre_update else 1),
         int(checkpoint.get("total_physics_steps", 0)),
         True,
     )
@@ -293,6 +296,8 @@ def load_policy_checkpoint(
             "gamma",
             "gae_lambda",
             "gamma_denoising",
+            "symmetry_augmentation",
+            "select_rollout_actor",
         )
         mismatch = [
             name
@@ -309,7 +314,10 @@ def load_policy_checkpoint(
             stats,
             checkpoint.get("dppo_reference_model_state_dict"),
         )
-        start_iteration = int(checkpoint.get("iteration", -1)) + 1
+        # Loading weights must still allow a legacy actor to be migrated with
+        # restart_optimization. Task/optimizer resume validation happens later.
+        pre_update = checkpoint.get("metrics", {}).get("checkpoint_phase") == "pre_update"
+        start_iteration = int(checkpoint.get("iteration", -1)) + (0 if pre_update else 1)
     else:
         policy.load_pretrained(checkpoint["ema_model_state_dict"], stats)
     return checkpoint, policy, start_iteration

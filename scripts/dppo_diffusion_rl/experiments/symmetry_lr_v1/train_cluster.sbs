@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+#SBATCH --job-name=dppo_lr
+#SBATCH --output=/home/sflores/i2r/slurm_logs/slurm-%x-%A_%a.out
+#SBATCH --error=/home/sflores/i2r/slurm_logs/slurm-%x-%A_%a.err
+#SBATCH --array=0-1
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=50G
+#SBATCH --time=24:00:00
+#SBATCH --gres=gpu:lovelace:1
+
+set -Eeuo pipefail
+case "${SLURM_ARRAY_TASK_ID:?Submit this launcher with sbatch}" in
+  0) FAMILY=wc ;;
+  1) FAMILY=wct ;;
+  *) echo "Invalid array index; expected 0=WC or 1=WCT" >&2; exit 2 ;;
+esac
+PILOT_SEED="${PILOT_SEED:-42}"
+[[ "${PILOT_SEED}" =~ ^[0-9]+$ ]] || { echo "Invalid PILOT_SEED" >&2; exit 2; }
+export EGL_VISIBLE_DEVICES=0
+export PHYSX_GPU_DEVICE=0
+export OMNI_KIT_GPU_ID=0
+if [[ -f "${HOME}/miniconda3/etc/profile.d/conda.sh" ]]; then
+  CONDA_SH="${HOME}/miniconda3/etc/profile.d/conda.sh"
+elif [[ -f /etc/profile.d/conda.sh ]]; then
+  CONDA_SH=/etc/profile.d/conda.sh
+else
+  CONDA_SH="$(conda info --base)/etc/profile.d/conda.sh"
+fi
+set +eu
+source "${CONDA_SH}"
+conda activate env_isaaclab
+set -eu
+
+ISAACLAB_DIR="${HOME}/i2r/isaaclab-solo-diffusion-policies"
+cd "${ISAACLAB_DIR}"
+export PYTHONPATH="${ISAACLAB_DIR}:${PYTHONPATH:-}"
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
+export NCCL_P2P_DISABLE=1 PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:1024 MALLOC_ARENA_MAX=1
+export TMPDIR="${HOME}/i2r/tmp"
+mkdir -p "${TMPDIR}"
+
+# Do not run an uncommitted algorithm on the cluster. Unrelated documents or
+# generated local artifacts do not invalidate this bounded pilot.
+git diff --exit-code HEAD -- scripts/dppo_diffusion_rl scripts/diffusion_policy/model scripts/diffusion_policy/train
+RUN_NAME="dppo_${FAMILY}_supported_hybrid_v3_lr_seed${PILOT_SEED}"
+RUN_DIR="scripts/dppo_diffusion_rl/runs/${RUN_NAME}"
+if [[ -e "${RUN_DIR}" ]]; then
+  echo "Output already exists; will not overwrite ${RUN_DIR}" >&2
+  exit 3
+fi
+CHECKPOINT_PATH="$(python -m scripts.dppo_diffusion_rl.experiments.symmetry_lr_v1.prepare_source \
+  --family "${FAMILY}" --output_dir "${RUN_DIR}")"
+git rev-parse HEAD
+echo "Family=${FAMILY} seed=${PILOT_SEED} source=${CHECKPOINT_PATH} output=${RUN_DIR}"
+nvidia-smi
+
+./isaaclab.sh -p scripts/dppo_diffusion_rl/train.py \
+  --checkpoint "${CHECKPOINT_PATH}" \
+  --require_phase_a_source \
+  --output_dir "${RUN_DIR}" \
+  --run_name "${RUN_NAME}" \
+  --route_distribution supported_hybrid_v3 \
+  --route_speed_max_mps 1.0 \
+  --speed_budget_max_mps 1.5 \
+  --transition_boundary_min_m 0.8 \
+  --transition_boundary_max_m 3.2 \
+  --path_reward_weight 2.0 \
+  --route_cte_rmse_tolerance_m 0.10 \
+  --profile_height_reward_weight 0.75 \
+  --profile_height_mae_tolerance_m 0.04 \
+  --reference_kl_coef 0.0 \
+  --symmetry_augmentation mirror \
+  --select_rollout_actor \
+  --num_envs 4096 \
+  --iterations 150 \
+  --rollout_chunks 32 \
+  --save_interval 10 \
+  --seed "${PILOT_SEED}" \
+  --headless \
+  --device cuda:0 \
+  --wandb

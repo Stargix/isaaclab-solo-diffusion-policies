@@ -46,6 +46,10 @@ class DPPOConfig:
     # symmetric 1 % quantile clip can erase every success/fall when its event
     # rate is below 1 %.
     advantage_clip_quantile: float = 0.0
+    # Only left/right is a symmetry of the current directed route/yaw task.
+    symmetry_augmentation: str = "none"
+    # Opt-in for new experiments; preserve historical checkpoint selection.
+    select_rollout_actor: bool = False
 
     def validate(self, *, prediction_horizon: int, execution_offset: int) -> None:
         if self.inference_steps < 2:
@@ -91,6 +95,8 @@ class DPPOConfig:
             raise ValueError("critic_warmup_iterations must be non-negative.")
         if not 0.0 <= self.advantage_clip_quantile < 0.5:
             raise ValueError("advantage_clip_quantile must be in [0, 0.5).")
+        if self.symmetry_augmentation not in ("none", "mirror"):
+            raise ValueError("DPPO supports only 'none' or left/right 'mirror' augmentation.")
 
     def to_dict(self) -> dict:
         return asdict(self)

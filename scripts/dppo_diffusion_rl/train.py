@@ -178,6 +178,14 @@ parser.add_argument("--minibatch_size", type=int, default=8192)
 parser.add_argument("--critic_minibatch_size", type=int, default=4096)
 parser.add_argument("--critic_warmup_iterations", type=int, default=10)
 parser.add_argument(
+    "--symmetry_augmentation", choices=("none", "mirror"), default="none",
+    help="Left/right diffusion-MDP augmentation; full quadruped is not valid for the directed-yaw task.",
+)
+parser.add_argument(
+    "--select_rollout_actor", action="store_true",
+    help="Save best.pt before the update, using the actor that produced its selection score.",
+)
+parser.add_argument(
     "--value_clip",
     type=float,
     default=None,
@@ -241,6 +249,8 @@ def _dppo_config() -> DPPOConfig:
         critic_minibatch_size=args_cli.critic_minibatch_size,
         critic_warmup_iterations=args_cli.critic_warmup_iterations,
         value_clip=args_cli.value_clip,
+        symmetry_augmentation=args_cli.symmetry_augmentation,
+        select_rollout_actor=args_cli.select_rollout_actor,
     )
 
 
