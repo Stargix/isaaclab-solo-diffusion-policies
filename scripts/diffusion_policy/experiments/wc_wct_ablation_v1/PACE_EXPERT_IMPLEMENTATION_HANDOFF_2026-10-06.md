@@ -1,6 +1,6 @@
 # Handoff: experto pace de SOLO12, sin cambiar el controlador de tarea
 
-Fecha: 2026-10-06. Estado: **especificación para implementar; no código ejecutado**.
+Fecha: 2026-10-06. Estado: **implementado y validado localmente; ver sección 13**.
 Base revisada: `research/wct-dppo`, HEAD `e37979c`.
 
 ## 1. Qué implementar y por qué
@@ -14,6 +14,13 @@ Este experto será una fuente de demostraciones para una futura biblioteca
 walk+crouch+pace. **No** será una high-level policy ni un selector durante la
 ejecución de la difusión. El objetivo final sigue siendo conditioning de
 geometría, altura y velocidad media, sin gait ID.
+
+Reparto deseado confirmado por el usuario: pace aporta la habilidad lenta y
+se reaprovecha el walk existente para la rápida. Mantener el rango de train
+del experto pace en `vx=(-1.0,1.0)`; en la futura colección se recortan sus
+comandos al soporte lento que pase la evaluación. No reducir el rango de train
+a 0.6 m/s sólo por ese papel en la biblioteca. El recorte de datos queda
+pendiente de medir la calidad del gait y el tracking.
 
 La revisión de simetría LR no ha justificado sustituir los actores del paper.
 Conservarlos. El siguiente experimento añade una fuente de movimiento, no intenta

@@ -7,6 +7,12 @@ crouch, DPPO, or paper checkpoints. The actor uses the same 48-observation,
 normalizer are warm-started. The critic, PPO optimizer, and exploration noise
 are initialized fresh.
 
+The intended demonstration library uses pace for slow motion and reuses the
+existing walk for fast motion. Expert training keeps commands vx in [-1, 1]
+m/s; the pace demonstration speeds will be restricted later to the validated
+slow region. The training range is not the intended range of collected pace
+demonstrations.
+
 Pace is defined from ordered foot contacts FL, FR, RL, RR. The synchronized
 pairs are FL-RL and FR-RR; the opposite side must be out of phase. A bounded,
 clock-free timer reward adapted from Isaac Lab's Spot `GaitReward` is combined
