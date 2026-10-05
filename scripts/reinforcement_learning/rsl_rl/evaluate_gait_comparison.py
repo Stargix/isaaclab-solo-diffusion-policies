@@ -20,7 +20,7 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument(
     "--comparison",
-    choices=("walk_bound", "walk_flying_trot"),
+    choices=("walk_bound", "walk_flying_trot", "walk_pace"),
     default="walk_bound",
     help="comparison preset; flying-trot uses the compatible 48-D walk observation contract",
 )
@@ -32,7 +32,10 @@ parser.add_argument(
     "--flying_trot_checkpoint",
     default="checkpoints_iri/checkpoints_bound/flying_trot.pt",
 )
+parser.add_argument("--pace_checkpoint", default=None)
 parser.add_argument("--speed", type=float, default=0.8)
+parser.add_argument("--lateral_speed", type=float, default=0.0)
+parser.add_argument("--yaw_rate", type=float, default=0.0)
 parser.add_argument("--duration_s", type=float, default=8.0)
 parser.add_argument("--warmup_s", type=float, default=2.0)
 parser.add_argument("--num_envs", type=int, default=16)
@@ -40,7 +43,7 @@ parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--contact_threshold_n", type=float, default=1.0)
 parser.add_argument(
     "--output_dir",
-    default="scripts/reinforcement_learning/rsl_rl/evaluations/walk_vs_bound_v2",
+    default=None,
 )
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
@@ -49,6 +52,8 @@ app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app
 
 import gymnasium as gym
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import torch
 from torch import nn
@@ -57,12 +62,18 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
 
 
+
 FOOT_NAMES = ("FL_calf", "FR_calf", "RL_calf", "RR_calf")
 FOOT_LABELS = ("FL", "FR", "RL", "RR")
 
 
 def _comparison_spec() -> tuple[str, tuple[str, str], tuple[int, int]]:
     """Return task, policy labels and observation dimensions for the selected preset."""
+    if args.comparison == "walk_pace":
+        # The pace task supplies a generated flat mesh, so this preset does not
+        # depend on downloading Isaac Nucleus' ground-plane USD. Reward is not
+        # used during inference; both checkpoint groups still share the world.
+        return "solo12-pace-v0", ("walk_final", "pace"), (48, 48)
     if args.comparison == "walk_flying_trot":
         # Both checkpoints consume the base 48-D locomotion observation.  Run them
         # in the already validated base Solo12 environment so the comparison only
@@ -78,14 +89,19 @@ def _configure_env():
     cfg.sim.device = args.device or cfg.sim.device
     cfg.seed = args.seed
     cfg.episode_length_s = args.warmup_s + args.duration_s + 2.0
-    cfg.terrain.terrain_type = "plane"
-    cfg.terrain.terrain_generator = None
+    if args.comparison != "walk_pace":
+        cfg.terrain.terrain_type = "plane"
+        cfg.terrain.terrain_generator = None
     cfg.events = None
     cfg.enable_observation_corruption = False
     cfg.actuation_delay_range = (0, 0)
     cfg.command_resampling_time_s = cfg.episode_length_s + 10.0
     cfg.standing_env_prob = 0.0
     cfg.opposite_direction_cmd_prob = 0.0
+    cfg.max_velx_range_curriculum = ()
+    cfg.forces_applied_to_base_curriculum = (0.0,)
+    cfg.base_push_force_xy_range = (0.0, 0.0)
+    cfg.base_push_force_z_range = (0.0, 0.0)
     return cfg
 
 
@@ -134,6 +150,7 @@ def _empty_records() -> dict[str, list[np.ndarray]]:
         "base_height": [],
         "projected_gravity_b": [],
         "actions": [],
+        "commands": [],
     }
 
 
@@ -169,7 +186,7 @@ def _rollout(checkpoints: dict[str, Path]) -> dict[str, dict[str, np.ndarray]]:
         dt = float(raw_env.step_dt)
         warmup_steps = int(round(args.warmup_s / dt))
         rollout_steps = int(round(args.duration_s / dt))
-        command = torch.tensor((args.speed, 0.0, 0.0), device=device)
+        command = torch.tensor((args.speed, args.lateral_speed, args.yaw_rate), device=device)
         total_envs = 2 * args.num_envs
         group_slices = {
             labels[0]: slice(0, args.num_envs),
@@ -184,6 +201,10 @@ def _rollout(checkpoints: dict[str, Path]) -> dict[str, dict[str, np.ndarray]]:
         observations, _ = env.reset()
         raw_env._commands[:, :3] = command
         raw_env._command_steps_left.fill_(warmup_steps + rollout_steps + 10)
+        # Reset returns observations before this fixed command was written.
+        # Refresh once so the very first actor action receives the evaluated command.
+        observations = raw_env._get_observations()
+        survived_warmup = {label: torch.ones(args.num_envs, dtype=torch.bool, device=device) for label in labels}
 
         for step in range(warmup_steps + rollout_steps):
             raw_env._commands[:, :3] = command
@@ -200,10 +221,10 @@ def _rollout(checkpoints: dict[str, Path]) -> dict[str, dict[str, np.ndarray]]:
                 observations, _, terminated, truncated, _ = env.step(actions)
             dones = terminated | truncated
 
-            if step == warmup_steps:
-                for group_active in active.values():
-                    group_active.fill_(True)
             if step < warmup_steps:
+                for label, group_slice in group_slices.items():
+                    survived_warmup[label] &= ~dones[group_slice]
+                    active[label] &= ~dones[group_slice]
                 continue
 
             forces = raw_env._contact_sensor.data.net_forces_w[:, foot_ids, :]
@@ -216,6 +237,7 @@ def _rollout(checkpoints: dict[str, Path]) -> dict[str, dict[str, np.ndarray]]:
                 "base_height": base_height,
                 "projected_gravity_b": raw_env._robot.data.projected_gravity_b,
                 "actions": actions,
+                "commands": raw_env._commands[:, :3],
             }
             for label, group_slice in group_slices.items():
                 group_dones = dones[group_slice]
@@ -231,6 +253,11 @@ def _rollout(checkpoints: dict[str, Path]) -> dict[str, dict[str, np.ndarray]]:
         }
         for result in results.values():
             result["dt"] = np.asarray(dt)
+        for label in labels:
+            results[label]["warmup_survival_rate"] = np.asarray(
+                survived_warmup[label].float().mean().item()
+            )
+            results[label]["final_survival_rate"] = np.asarray(active[label].float().mean().item())
         return results
     finally:
         env.close()
@@ -250,11 +277,13 @@ def _contact_correlation(contacts: np.ndarray, valid: np.ndarray) -> np.ndarray:
     flattened = []
     for foot_idx in range(4):
         flattened.append(contacts[..., foot_idx][valid].astype(np.float64))
-    matrix = np.eye(4, dtype=np.float64)
+    matrix = np.full((4, 4), np.nan, dtype=np.float64)
     for row in range(4):
+        if flattened[row].std() >= 1.0e-8:
+            matrix[row, row] = 1.0
         for col in range(row + 1, 4):
             if flattened[row].std() < 1.0e-8 or flattened[col].std() < 1.0e-8:
-                value = 0.0
+                value = np.nan
             else:
                 value = float(np.corrcoef(flattened[row], flattened[col])[0, 1])
             matrix[row, col] = matrix[col, row] = value
@@ -266,6 +295,7 @@ def _summarize(data: dict[str, np.ndarray]) -> dict[str, object]:
     contacts = data["contacts"].astype(bool)
     lin_vel = data["lin_vel_b"]
     ang_vel = data["ang_vel_b"]
+    commands = data["commands"]
 
     front_same = contacts[..., 0] == contacts[..., 1]
     rear_same = contacts[..., 2] == contacts[..., 3]
@@ -278,20 +308,30 @@ def _summarize(data: dict[str, np.ndarray]) -> dict[str, object]:
     diagonal_a_state = contacts[..., 0] | contacts[..., 3]
     diagonal_b_state = contacts[..., 1] | contacts[..., 2]
     trot_pattern = diagonal_a_same & diagonal_b_same & (diagonal_a_state != diagonal_b_state)
+    ipsilateral_a_same = contacts[..., 0] == contacts[..., 2]
+    ipsilateral_b_same = contacts[..., 1] == contacts[..., 3]
+    ipsilateral_a_state = contacts[..., 0] | contacts[..., 2]
+    ipsilateral_b_state = contacts[..., 1] | contacts[..., 3]
+    pace_pattern = ipsilateral_a_same & ipsilateral_b_same & (ipsilateral_a_state != ipsilateral_b_state)
     flight = ~contacts.any(axis=-1)
 
     pitch_proxy = np.arcsin(np.clip(data["projected_gravity_b"][..., 0], -1.0, 1.0))
-    valid_count_per_env = valid.sum(axis=0)
-    representative_env = int(np.argmax(valid_count_per_env))
+    # Environment zero is fixed in advance; show its failure/truncation if it falls.
+    representative_env = 0
     valid_pairs = valid[1:] & valid[:-1]
     contact_transitions = contacts[1:] != contacts[:-1]
     # Per-foot binary contact-state changes per second.  This is a model-free
     # cadence fingerprint: a flying trot should exhibit a higher rate and a
     # lower stance duty factor than the regular walk at the same command.
     transition_mask = valid_pairs[..., None]
-    transition_rate_hz = float(
+    transition_rate_hz_per_foot = float(
         np.sum(contact_transitions & transition_mask)
-        / max(1, np.sum(transition_mask))
+        / max(1, 4 * np.sum(valid_pairs))
+        / float(data["dt"])
+    )
+    transition_rate_hz_all_feet = float(
+        np.sum(contact_transitions & transition_mask)
+        / max(1, np.sum(valid_pairs))
         / float(data["dt"])
     )
     duty_factors = {
@@ -299,16 +339,22 @@ def _summarize(data: dict[str, np.ndarray]) -> dict[str, object]:
         for idx in range(4)
     }
 
+    contact_correlation = _contact_correlation(contacts, valid)
     summary = {
         "valid_samples": int(valid.sum()),
-        "survival_rate": float(np.mean(valid[-1])) if len(valid) else 0.0,
+        "survival_rate": float(data["final_survival_rate"]),
+        "warmup_survival_rate": float(data["warmup_survival_rate"]),
         "representative_env": representative_env,
         "mean_forward_speed_mps": float(np.mean(_masked_flat(lin_vel[..., 0], valid))),
         "forward_speed_rmse_mps": float(
-            np.sqrt(np.mean(np.square(_masked_flat(lin_vel[..., 0] - args.speed, valid))))
+            np.sqrt(np.mean(np.square(_masked_flat(lin_vel[..., 0] - commands[..., 0], valid))))
         ),
-        "mean_abs_lateral_speed_mps": float(
-            np.mean(np.abs(_masked_flat(lin_vel[..., 1], valid)))
+        "lateral_speed_rmse_mps": float(
+            np.sqrt(np.mean(np.square(_masked_flat(lin_vel[..., 1] - commands[..., 1], valid))))
+        ),
+        "mean_abs_lateral_speed_mps": float(np.mean(np.abs(_masked_flat(lin_vel[..., 1], valid)))),
+        "yaw_rate_rmse_rps": float(
+            np.sqrt(np.mean(np.square(_masked_flat(ang_vel[..., 2] - commands[..., 2], valid))))
         ),
         "mean_abs_yaw_rate_rps": float(np.mean(np.abs(_masked_flat(ang_vel[..., 2], valid)))),
         "base_height_std_m": float(np.std(_masked_flat(data["base_height"], valid))),
@@ -316,18 +362,21 @@ def _summarize(data: dict[str, np.ndarray]) -> dict[str, object]:
         "flight_fraction": float(np.mean(_masked_flat(flight, valid))),
         "bound_pattern_fraction": float(np.mean(_masked_flat(bound_pattern, valid))),
         "trot_pattern_fraction": float(np.mean(_masked_flat(trot_pattern, valid))),
+        "pace_pattern_fraction": float(np.mean(_masked_flat(pace_pattern, valid))),
         "mean_foot_duty_factor": float(np.mean(list(duty_factors.values()))),
-        "contact_transition_rate_hz": transition_rate_hz,
-        "front_pair_stance_jaccard": _stance_jaccard(
-            contacts[..., 0], contacts[..., 1], valid
-        ),
-        "rear_pair_stance_jaccard": _stance_jaccard(
-            contacts[..., 2], contacts[..., 3], valid
-        ),
+        "contact_transition_rate_hz": transition_rate_hz_all_feet,
+        "contact_transition_rate_hz_per_foot": transition_rate_hz_per_foot,
+        "front_pair_stance_jaccard": _stance_jaccard(contacts[..., 0], contacts[..., 1], valid),
+        "rear_pair_stance_jaccard": _stance_jaccard(contacts[..., 2], contacts[..., 3], valid),
+        "fl_rl_stance_jaccard": _stance_jaccard(contacts[..., 0], contacts[..., 2], valid),
+        "fr_rr_stance_jaccard": _stance_jaccard(contacts[..., 1], contacts[..., 3], valid),
         "fl_rr_stance_jaccard": _stance_jaccard(contacts[..., 0], contacts[..., 3], valid),
         "fr_rl_stance_jaccard": _stance_jaccard(contacts[..., 1], contacts[..., 2], valid),
         "foot_duty_factors": duty_factors,
-        "contact_correlation": _contact_correlation(contacts, valid).tolist(),
+        "contact_correlation": [
+            [None if not np.isfinite(value) else float(value) for value in row]
+            for row in contact_correlation
+        ],
     }
     return summary
 
@@ -367,7 +416,13 @@ def _plot(
         axes[0, col].set_xlabel("time [s]")
         axes[0, col].set_title(f"{label}: foot contacts")
 
-        correlation = np.asarray(summaries[label]["contact_correlation"])
+        correlation = np.asarray(
+            [
+                [np.nan if value is None else value for value in row]
+                for row in summaries[label]["contact_correlation"]
+            ],
+            dtype=float,
+        )
         image = axes[1, col].imshow(correlation, cmap="coolwarm", vmin=-1.0, vmax=1.0)
         axes[1, col].set_xticks(range(4), FOOT_LABELS)
         axes[1, col].set_yticks(range(4), FOOT_LABELS)
@@ -377,7 +432,9 @@ def _plot(
                 axes[1, col].text(
                     column,
                     row,
-                    f"{correlation[row, column]:.2f}",
+                    f"{correlation[row, column]:.2f}"
+                    if np.isfinite(correlation[row, column])
+                    else "n/a",
                     ha="center",
                     va="center",
                     color="black" if abs(correlation[row, column]) < 0.55 else "white",
@@ -399,9 +456,15 @@ def _plot(
     speed_ax.grid(alpha=0.25)
 
     metric_ax = axes[1, 2]
-    if args.comparison == "walk_flying_trot":
-        metric_names = ("trot_pattern_fraction", "flight_fraction", "mean_foot_duty_factor")
-        metric_labels = ("trot pattern", "flight", "stance duty")
+    if args.comparison in {"walk_flying_trot", "walk_pace"}:
+        pattern_name = "pace_pattern_fraction" if args.comparison == "walk_pace" else "trot_pattern_fraction"
+        pattern_label = "ipsilateral pace" if args.comparison == "walk_pace" else "diagonal trot"
+        if args.comparison == "walk_pace":
+            metric_names = (pattern_name, "trot_pattern_fraction", "flight_fraction")
+            metric_labels = (pattern_label, "diagonal pattern", "flight")
+        else:
+            metric_names = ("trot_pattern_fraction", "flight_fraction", "mean_foot_duty_factor")
+            metric_labels = ("trot pattern", "flight", "stance duty")
     else:
         metric_names = ("bound_pattern_fraction", "trot_pattern_fraction", "flight_fraction")
         metric_labels = ("bound pattern", "trot pattern", "flight")
@@ -427,14 +490,32 @@ def _plot(
 
 
 def main() -> None:
-    output_dir = Path(args.output_dir).resolve()
+    command_values = (args.speed, args.lateral_speed, args.yaw_rate)
+    if not all(np.isfinite(value) for value in command_values):
+        raise ValueError("Command velocities must be finite numbers.")
+    if args.comparison == "walk_pace" and not (
+        -1.0 <= args.speed <= 1.0
+        and -0.15 <= args.lateral_speed <= 0.15
+        and -0.35 <= args.yaw_rate <= 0.35
+    ):
+        raise ValueError("Pace comparison command must lie within vx ±1.0, vy ±0.15, wz ±0.35.")
+    if args.duration_s <= 0.0 or args.warmup_s < 0.0:
+        raise ValueError("duration_s must be positive and warmup_s non-negative.")
+    default_dirs = {
+        "walk_bound": "scripts/reinforcement_learning/rsl_rl/evaluations/walk_vs_bound_v2",
+        "walk_flying_trot": "scripts/reinforcement_learning/rsl_rl/evaluations/walk_vs_flying_trot_v1",
+        "walk_pace": "scripts/reinforcement_learning/rsl_rl/evaluations/walk_vs_pace_v1",
+    }
+    output_dir = Path(args.output_dir or default_dirs[args.comparison]).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     _, labels, _ = _comparison_spec()
-    second_checkpoint = (
-        args.flying_trot_checkpoint
-        if args.comparison == "walk_flying_trot"
-        else args.bound_checkpoint
-    )
+    second_checkpoint = {
+        "walk_bound": args.bound_checkpoint,
+        "walk_flying_trot": args.flying_trot_checkpoint,
+        "walk_pace": args.pace_checkpoint,
+    }[args.comparison]
+    if second_checkpoint is None:
+        raise ValueError("--pace_checkpoint is required for --comparison walk_pace.")
     checkpoints = {
         labels[0]: Path(args.walk_checkpoint).resolve(),
         labels[1]: Path(second_checkpoint).resolve(),
@@ -442,7 +523,10 @@ def main() -> None:
     results = _rollout(checkpoints)
     summaries = {label: _summarize(results[label]) for label in results}
     report = {
+        "measurement_protocol": "gait_comparison_v1; persistent survival mask; command refreshed before first action",
         "speed_command_mps": args.speed,
+        "lateral_command_mps": args.lateral_speed,
+        "yaw_rate_command_rps": args.yaw_rate,
         "duration_s": args.duration_s,
         "warmup_s": args.warmup_s,
         "num_envs": args.num_envs,
@@ -452,8 +536,9 @@ def main() -> None:
         "policies": summaries,
     }
 
+    report_json = _json_safe(report)
     with (output_dir / "gait_comparison.json").open("w", encoding="utf-8") as file:
-        json.dump(report, file, indent=2)
+        json.dump(report_json, file, indent=2, allow_nan=False)
     np.savez_compressed(
         output_dir / "gait_timeseries.npz",
         **{
@@ -464,8 +549,23 @@ def main() -> None:
     )
     _plot(results, summaries, output_dir / "gait_comparison.png")
 
-    print(json.dumps(report, indent=2), flush=True)
+    print(json.dumps(report_json, indent=2, allow_nan=False), flush=True)
     print(f"[PASS] Plot: {output_dir / 'gait_comparison.png'}", flush=True)
+
+
+def _json_safe(value):
+    """Convert NumPy values and undefined statistics to strict JSON values."""
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return _json_safe(value.tolist())
+    if isinstance(value, np.generic):
+        return _json_safe(value.item())
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    return value
 
 
 if __name__ == "__main__":

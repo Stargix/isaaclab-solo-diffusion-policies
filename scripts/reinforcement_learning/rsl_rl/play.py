@@ -147,6 +147,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "solo12-bound-v2",
             "solo12-bound-v3",
             "solo12-flying-trot-v0",
+            "solo12-pace-v0",
         }:
             raise ValueError("--command_ui is currently supported for the Solo12 direct locomotion tasks only.")
         from live_command_ui import LiveSE2Command, build_live_command_window
@@ -161,6 +162,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             command_bounds = ((0.60, 1.50), (0.0, 0.0), (0.0, 0.0))
         elif args_cli.task == "solo12-flying-trot-v0":
             command_bounds = ((0.75, 1.50), (-0.15, 0.15), (-0.35, 0.35))
+        elif args_cli.task == "solo12-pace-v0":
+            command_bounds = ((-1.0, 1.0), (-0.15, 0.15), (-0.35, 0.35))
         else:
             command_bounds = ((0.60, 1.50), (-0.10, 0.10), (-0.25, 0.25))
         live_command = LiveSE2Command(tuple(args_cli.command), bounds=command_bounds)
@@ -233,6 +236,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         def refresh_live_command():
             command = torch.tensor(live_command.get(), device=raw_env.device, dtype=torch.float32)
             raw_env._commands[:, :3] = command.unsqueeze(0).expand(raw_env.num_envs, -1)
+            # Keep the UI-selected value from being replaced by the env's random
+            # command resampler while the user is controlling it live.
+            raw_env._command_steps_left.fill_(raw_env._command_resample_interval)
 
         refresh_live_command()
         obs = env.get_observations()

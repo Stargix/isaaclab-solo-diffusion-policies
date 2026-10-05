@@ -64,5 +64,15 @@ gym.register(
     },
 )
 
+gym.register(
+    id="solo12-pace-v0",
+    entry_point=f"{__name__}.solo12_pace_env:Solo12PaceEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.solo12_pace_env:Solo12PaceEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{__name__}.solo12_pace_env:Solo12PacePPORunnerCfg",
+    },
+)
+
 
 
