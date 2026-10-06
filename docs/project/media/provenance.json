@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "capture_date": "2026-10-06",
-  "source": "Isaac Lab RGB renderer during live closed-loop policy playback",
+  "source": "Live closed-loop Isaac Lab RGB capture with the existing PathDebugVisualizer",
   "scope": "Simulation illustration; not a benchmark, hardware recording or wall-clock real-time demonstration",
   "actor": {
     "name": "WC-DPPO supported_hybrid_v3, online seed 42",
@@ -30,8 +30,7 @@
     ],
     "target_average_speed_mps": 0.55
   },
-  "capture_instrumentation": "Fixed presentation camera; non-colliding reference/trace meshes; no policy, reward or physics changes",
-  "yellow_marker": "Display-only reference guide 0.55 m ahead; not the full policy preview",
+  "capture_instrumentation": "Camera, RGB capture, finite loop and enabling existing visualizer for offscreen rendering; no replacement route geometry or goal computation",
   "gif": {
     "file": "route_posture_demo.gif",
     "frames": 91,
@@ -53,37 +52,53 @@
       "step": 75,
       "required_height_m": 0.29319998621940613,
       "measured_height_m": 0.28571999073028564,
-      "progress_m": 0.8714383840560913
+      "progress_m": 0.8714383840560913,
+      "goal_index": 99,
+      "goal_position": [
+        -1.3125619888305664,
+        0.4884980320930481,
+        0.1704999953508377
+      ]
     },
     {
       "file": "crouching.jpg",
       "step": 210,
       "required_height_m": 0.1704999953508377,
       "measured_height_m": 0.1693832129240036,
-      "progress_m": 2.506258010864258
+      "progress_m": 2.506258010864258,
+      "goal_index": 182,
+      "goal_position": [
+        -2.8321847915649414,
+        0.6962056159973145,
+        0.29319998621940613
+      ]
     }
   ],
-  "photo_note": "Close-ups from a separate seeded playback of the same actor/reference; labels are measured heights, not invented postures",
+  "photo_note": "Close-ups captured in the same live seeded rollout without advancing physics during camera changes; the camera is restored before recording the next GIF frame.",
   "assets": [
     {
       "file": "route_posture_demo.gif",
-      "bytes": 3594233,
-      "sha256": "fdbae8445b9571c1acfb4fd9e23f556718b732093ef654bef3e01e14e290e1c1"
+      "bytes": 3600746,
+      "sha256": "506f7955f10efd28ba2ba07eb9c399009ce5dcf783528b130d4674821e229601"
     },
     {
       "file": "standing.jpg",
-      "bytes": 77027,
-      "sha256": "25168406a92cc747dbdb3735fead9cc5751863ac94d9a182fd338e704b591093"
+      "bytes": 93522,
+      "sha256": "1fd4d70d0cab7baf3300f0e70caa36d16d7c849f7e9e601fc58d0ffb557b8dc2"
     },
     {
       "file": "crouching.jpg",
-      "bytes": 71975,
-      "sha256": "fefe81b51c6aeb8cf268a9cda1835c8754b11c44c3565aa2fb166557378a246b"
+      "bytes": 92055,
+      "sha256": "25ab2a6f11cb70e1cdc9e97d0845e540b616fcf881eb055a405cfb1646edd32f"
     },
     {
       "file": "demo_route.npy",
       "bytes": 2540,
       "sha256": "a8539817d0a79beb6ffa6ce916ceb52b1781a8c98bc4f913358091987102ca5c"
     }
-  ]
+  ],
+  "visualizer_source_sha256": "884d620e27eaeec7d4df7cfaff24f32a1cd58996fbd6708eadce52d5b29d072e",
+  "overlays": "Native XYZ reference and measured base trace; native orange preview, native yellow target and yaw arrow",
+  "yellow_marker": "Exact debug_goal_idx computed by visualization_goal_index in play_policy.py; sphere center equals path XYZ at that index, yaw arrow uses the native reference yaw.",
+  "goal_validation": "All captured goal positions exactly match the native world-reference row at the native goal index; both required heights are retained."
 }

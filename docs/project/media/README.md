@@ -12,11 +12,15 @@ These assets are captured from live closed-loop WC-DPPO playback in Isaac Lab, n
 - Required base height: 0.2932 m, then 0.1705 m between route distances 1.6 and 2.8 m, then 0.2932 m again.
 - Requested route-average speed: 0.55 m/s; instantaneous speed is not commanded to stay constant.
 - Physics at 200 Hz, control at 50 Hz, four actions executed per diffusion plan.
-- Red: reference XY. Blue: measured base XY. Yellow: a display-only guide 0.55 m ahead along the reference, not the complete policy preview.
+- Red: the reference XYZ, including required height changes. Grey vertical guides connect it to the ground.
+- Orange: the upcoming reference segment. Blue: the measured base trajectory in 3D.
+- Yellow: the native future target, centred on its reference XYZ point; the short golden arrow shows its yaw.
 
 The GIF is a continuous fixed-camera traverse, resampled to 12.5 frames/s and compressed for GitHub. It ends near the final waypoint; later playback is retained locally. Its playback speed follows simulated time. Recording with rendering enabled is not evidence of wall-clock real-time inference.
 
-The two close-up photos come from a separate seeded playback of the same actor and reference. The on-image measured heights come from the simulator state. Presentation cameras and non-colliding visual overlays do not change policy inputs, rewards or physics.
+The two close-up photos come from the same seeded rollout. The on-image measured heights come from the simulator state. No physics steps are taken while capturing a close-up; the wide camera is restored before recording the next animation frame.
+
+The route, preview, measured trace, sphere and heading arrow are drawn by the existing `PathDebugVisualizer`, exactly as in interactive playback. The sphere marks a future waypoint, so its height can differ from the robot's current required height. It is not an auxiliary guide added for the screenshots. Only the presentation camera and capture mechanism differ; policy inputs, rewards and physics are unchanged.
 
 This is an illustrative episode, not a benchmark success rate, proof of optimal temporal allocation, or real-robot validation. Aggregate evidence and limits are in [results](../results.md).
 
@@ -33,4 +37,4 @@ The [route array](demo_route.npy) contains `[x, y, required_height]` points in t
   --visualize_actual_path --visualize_height --device cuda:0
 ```
 
-The interactive viewer uses its existing camera and debug overlays, which differ from the fixed presentation camera used here. [Provenance](provenance.json) records the actor SHA-256, reference, screenshot states, asset hashes and trim rule. Raw frames and capture tooling remain local.
+The interactive viewer uses its usual robot-following camera; the overlays are the same as those captured here. [Provenance](provenance.json) records the actor and visualizer SHA-256, reference, screenshot states, asset hashes and trim rule. Raw frames and capture tooling remain local.
