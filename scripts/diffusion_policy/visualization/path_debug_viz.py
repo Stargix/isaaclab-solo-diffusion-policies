@@ -22,6 +22,7 @@ class PathDebugVizCfg:
     show_actual_path: bool = False
     show_height: bool = False
     max_actual_points: int = 750
+    style: str = "classic"
 
     @property
     def enabled(self) -> bool:
@@ -39,7 +40,8 @@ class PathDebugVizCfg:
 class PathDebugVisualizer:
     """Draw a planned path, current target frame and measured robot trace.
 
-    Lines use Isaac Sim's transient debug-draw interface.  The target sphere
+    Classic lines use transient debug draw; the clean preset uses shaded,
+    non-colliding geometry. The target sphere
     is a USD marker instancer, which remains visible and selectable in the
     Stage tree under ``/World/Visuals/PathDebug``.  Heading is intentionally
     represented only by the planar arrow, avoiding redundant XYZ axes.
@@ -56,15 +58,26 @@ class PathDebugVisualizer:
             raise ValueError("PathDebugVisualizer requires at least one enabled overlay.")
         if cfg.max_actual_points < 2:
             raise ValueError("max_actual_points must be at least two.")
+        if cfg.style not in ("classic", "clean"):
+            raise ValueError("Path visualization style must be classic or clean.")
 
         # These imports must remain lazy: this module is importable in unit
         # tests and CLI parsing without starting an Isaac Sim application.
-        import isaacsim.util.debug_draw._debug_draw as omni_debug_draw
         import isaaclab.sim as sim_utils
         from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 
         self.cfg = cfg
-        self._draw = omni_debug_draw.acquire_debug_draw_interface()
+        if cfg.style == "clean":
+            from .shaded_lines import ShadedLineDraw
+
+            self._draw = ShadedLineDraw()
+            self._REFERENCE_COLOR = (0.85, 0.055, 0.04, 1.0)
+            self._ACTUAL_COLOR = (0.035, 0.30, 0.74, 1.0)
+            self._PREVIEW_COLOR = (0.95, 0.48, 0.06, 1.0)
+        else:
+            import isaacsim.util.debug_draw._debug_draw as omni_debug_draw
+
+            self._draw = omni_debug_draw.acquire_debug_draw_interface()
         self._actual_trace: list[np.ndarray] = []
         self._path_w = np.empty((0, 3), dtype=np.float32)
         self._yaws_w = np.empty((0,), dtype=np.float32)
@@ -115,13 +128,21 @@ class PathDebugVisualizer:
         )
 
     def _draw_height_guides(self) -> None:
-        floor_points = self._path_w.copy()
+        guide_points = self._path_w
+        if self.cfg.style == "clean":
+            changes = np.flatnonzero(np.abs(np.diff(guide_points[:, 2])) > 0.04)
+            indices = np.unique(np.concatenate((
+                np.linspace(0, len(guide_points) - 1, min(8, len(guide_points))).astype(int),
+                changes, changes + 1,
+            )))
+            guide_points = guide_points[indices]
+        floor_points = guide_points.copy()
         floor_points[:, 2] = 0.015
         self._draw.draw_lines(
             floor_points.astype(np.float32).tolist(),
-            self._path_w.astype(np.float32).tolist(),
-            [self._HEIGHT_COLOR] * len(self._path_w),
-            [1.0] * len(self._path_w),
+            guide_points.astype(np.float32).tolist(),
+            [self._HEIGHT_COLOR] * len(guide_points),
+            [1.0] * len(guide_points),
         )
 
     def _draw_heading_arrow(self, position: np.ndarray, yaw: float) -> None:
@@ -165,7 +186,12 @@ class PathDebugVisualizer:
 
         self._draw.clear_lines()
         if self.cfg.show_path:
-            self._draw_polyline(self._draw, self._path_w, self._REFERENCE_COLOR, width=3.0)
+            if self.cfg.style == "clean" and self.cfg.show_preview:
+                # Each segment is drawn once, avoiding red/orange depth fighting.
+                self._draw_polyline(self._draw, self._path_w[: progress + 1], self._REFERENCE_COLOR, width=3.0)
+                self._draw_polyline(self._draw, self._path_w[goal:], self._REFERENCE_COLOR, width=3.0)
+            else:
+                self._draw_polyline(self._draw, self._path_w, self._REFERENCE_COLOR, width=3.0)
         if self.cfg.show_height:
             self._draw_height_guides()
         if self.cfg.show_preview:

@@ -99,6 +99,11 @@ parser.add_argument(
     help="Refresh viewport overlays every N control steps (default: 2).",
 )
 
+parser.add_argument(
+    "--visualization_style", choices=("classic", "clean"), default="classic",
+    help="Presentation only: classic debug lines or clean shaded lines with no overlapping preview.",
+)
+
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 sys.argv = [sys.argv[0]] + hydra_args
@@ -766,6 +771,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         show_preview=args_cli.visualize_preview,
         show_actual_path=args_cli.visualize_actual_path,
         show_height=args_cli.visualize_height,
+        style=args_cli.visualization_style,
     )
     debug_viz: PathDebugVisualizer | None = None
     if debug_viz_cfg.enabled:

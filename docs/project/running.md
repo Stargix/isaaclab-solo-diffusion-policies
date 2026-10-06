@@ -16,16 +16,18 @@ A standing-to-crouching route with path, goal and actual-trajectory overlays:
   --default_path_mode walk_to_crouch --transition_fraction 0.5 \
   --desired_speed 0.45 --exec_horizon 4 \
   --visualize_path --visualize_preview --visualize_goal \
-  --visualize_actual_path --visualize_height --device cuda:0
+  --visualize_actual_path --visualization_style clean --device cuda:0
 ```
 
 PowerShell equivalent on one line:
 
 ```powershell
-.\isaaclab.bat -p scripts/diffusion_policy/play_policy.py --checkpoint checkpoints/policy.pt --num_envs 1 --default_path_mode walk_to_crouch --transition_fraction 0.5 --desired_speed 0.45 --exec_horizon 4 --visualize_path --visualize_preview --visualize_goal --visualize_actual_path --visualize_height --device cuda:0
+.\isaaclab.bat -p scripts/diffusion_policy/play_policy.py --checkpoint checkpoints/policy.pt --num_envs 1 --default_path_mode walk_to_crouch --transition_fraction 0.5 --desired_speed 0.45 --exec_horizon 4 --visualize_path --visualize_preview --visualize_goal --visualize_actual_path --visualization_style clean --device cuda:0
 ```
 
 Red is the reference, blue the measured trace, orange the policy preview. The small yellow goal and heading marker display the current preview target.
+
+The `clean` preset uses shaded lines and draws each reference segment once, avoiding red/orange overpainting. Heights and target coordinates are unchanged. Add `--visualize_height` for sparse vertical guides, or omit `--visualization_style clean` to retain the original debug-line appearance.
 
 For a custom route, use `--path_file path.npy --path_file_frame robot`. Arrays are `[N,3]` for XYZ or `[N,4]` for XYZ/yaw. Robot-frame routes are anchored to the reset pose; use `world` only for world-frame coordinates.
 

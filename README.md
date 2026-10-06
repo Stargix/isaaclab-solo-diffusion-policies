@@ -8,7 +8,7 @@ The controller receives a route, a body-height profile and a target average spee
 
 ![SOLO12 following a curved route and changing posture in Isaac Lab](docs/project/media/route_posture_demo.gif)
 
-*A live policy rollout in Isaac Lab: WC-DPPO follows a 4 m curved reference with walk→crouch→walk height requirements and a requested mean of 0.55 m/s. The usual viewer overlays are retained: red is the 3D reference at the required height, orange the upcoming segment, blue the measured base trace, and yellow the future target with its yaw arrow. The GIF shows the active traverse at simulated speed—not hardware or a wall-clock real-time demonstration. [Demo details and reference](docs/project/media/README.md).*
+*A live policy rollout in Isaac Lab: WC-DPPO follows a 4 m curved reference with walk→crouch→walk height requirements and a requested mean of 0.55 m/s. The clean viewer preset retains the native coordinates: red is the 3D reference at the required height, orange the upcoming segment, blue the measured base trace, and yellow the future target with its yaw arrow. The GIF shows the active traverse at simulated speed—not hardware or a wall-clock real-time demonstration. [Demo details and reference](docs/project/media/README.md).*
 
 ## From existing behaviours to path-conditioned control
 

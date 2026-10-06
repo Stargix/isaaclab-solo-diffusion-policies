@@ -7,7 +7,7 @@
     "name": "WC-DPPO supported_hybrid_v3, online seed 42",
     "checkpoint_sha256": "2e75422000cc22ab5023cfbc820eb8d391a69b4fc008a7e0a6bbb2c1e0b54868"
   },
-  "playback_source_sha256": "5361bc56c85a3b34e4b7a5635ed409c8774566027a5f7baa5ea6187ec9511d46",
+  "playback_source_sha256": "502902f78a354b6fbfbb189b412e5e8739db9025c49a32b5f1344523699b4370",
   "physics_hz": 200,
   "control_hz": 50,
   "execution_horizon": 4,
@@ -30,7 +30,7 @@
     ],
     "target_average_speed_mps": 0.55
   },
-  "capture_instrumentation": "Camera, RGB capture, finite loop and enabling existing visualizer for offscreen rendering; no replacement route geometry or goal computation",
+  "capture_instrumentation": "Camera, RGB capture, finite loop and clean style of PathDebugVisualizer; all XYZ reference/goal coordinates retained, no guides or overlapping red/orange segments",
   "gif": {
     "file": "route_posture_demo.gif",
     "frames": 91,
@@ -44,7 +44,7 @@
     "time_base": "simulated control time, not wall-clock capture time",
     "trim_rule": "Prefix through first recorded sample with reference progress >=3.90 m; later playback remains archived locally",
     "last_control_step": 361,
-    "compression": "128-colour palette, no dithering"
+    "compression": "256-colour palette, no dithering"
   },
   "photos": [
     {
@@ -78,18 +78,18 @@
   "assets": [
     {
       "file": "route_posture_demo.gif",
-      "bytes": 3600746,
-      "sha256": "506f7955f10efd28ba2ba07eb9c399009ce5dcf783528b130d4674821e229601"
+      "bytes": 6216507,
+      "sha256": "96f7aa3f72ff51d6830124cf10f52c7e238a81c66d42c81355229153c0a860b5"
     },
     {
       "file": "standing.jpg",
-      "bytes": 93522,
-      "sha256": "1fd4d70d0cab7baf3300f0e70caa36d16d7c849f7e9e601fc58d0ffb557b8dc2"
+      "bytes": 77099,
+      "sha256": "ce078186966dbc3ffb6f380d6df2db1b2a43f99f388f9400365bab59fa332cfa"
     },
     {
       "file": "crouching.jpg",
-      "bytes": 92055,
-      "sha256": "25ab2a6f11cb70e1cdc9e97d0845e540b616fcf881eb055a405cfb1646edd32f"
+      "bytes": 76692,
+      "sha256": "d30a07760f035e733bdb9dd66855ab592e0c4b46c049fa271df82605d06f5299"
     },
     {
       "file": "demo_route.npy",
@@ -97,8 +97,12 @@
       "sha256": "a8539817d0a79beb6ffa6ce916ceb52b1781a8c98bc4f913358091987102ca5c"
     }
   ],
-  "visualizer_source_sha256": "884d620e27eaeec7d4df7cfaff24f32a1cd58996fbd6708eadce52d5b29d072e",
-  "overlays": "Native XYZ reference and measured base trace; native orange preview, native yellow target and yaw arrow",
+  "visualizer_source_sha256": "afd85169d1d1c7e279d5022b4c88b877d0bc9e36fe13d80b37bc7e30d2b743ea",
+  "shaded_lines_source_sha256": "0daf325fb96a61b64e11dd6442b623af5ed5c0fcf7a589f0d3eda166614283d1",
+  "visualization_style": "clean",
+  "height_guides": false,
+  "preview_partition": "Reference and preview retain native XYZ; each reference segment is drawn once, red or orange.",
+  "overlays": "Clean preset: shaded XYZ reference and measured trace, disjoint orange preview; native yellow target and yaw arrow; no height guides",
   "yellow_marker": "Exact debug_goal_idx computed by visualization_goal_index in play_policy.py; sphere center equals path XYZ at that index, yaw arrow uses the native reference yaw.",
   "goal_validation": "All captured goal positions exactly match the native world-reference row at the native goal index; both required heights are retained."
 }
