@@ -1,3 +1,1 @@
 *.usd filter=lfs diff=lfs merge=lfs -text
-scripts/reinforcement_learning/rsl_rl/experiments/pace_v1/train_cluster.sbs text eol=lf
-

@@ -1,12 +1,9 @@
-# Research artifacts
+# Public result snapshot
 
-This directory contains compact, reviewable evidence selected from generated
-experiments. Full evaluation rollouts, raw time series, checkpoints, datasets,
-W&B caches, and simulator logs are intentionally excluded from Git.
+The public presentation uses a compact [paper snapshot](paper_snapshot/) and the [reviewed figures](../docs/project/figures/README.md).
 
-- `wct_v6_final/`: final WCT DPPO v6 benchmark summaries and representative
-  fast-transition figures.
+- [Result tables](paper_snapshot/results.json): metric definitions, method labels and seed summaries.
+- [Figure manifest](paper_snapshot/figure_manifest.json): checksums and selected provenance.
+- [Interpretation](../docs/project/results.md): how to read the evidence.
 
-The scripts and fixed route-bank protocol needed to regenerate these artifacts
-remain under `scripts/`. Every retained result records its checkpoint and Git
-commit identifiers.
+Raw traces, generated galleries, training logs and historical snapshot bundles are retained locally.

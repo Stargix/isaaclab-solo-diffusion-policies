@@ -1,0 +1,215 @@
+{
+  "schema_version": 1,
+  "snapshot_date": "2026-10-06",
+  "status": "simulation research snapshot",
+  "units": {
+    "rates": "percent",
+    "cte": "centimetres",
+    "speed_error": "centimetres per second"
+  },
+  "replication": {
+    "online_seeds": [
+      42,
+      43,
+      44
+    ],
+    "offline_priors_per_method": 1,
+    "uncertainty": "sample standard deviation across online seeds; not a confidence interval",
+    "checkpoint_selection": "best recorded training success in each run; evaluated on frozen banks"
+  },
+  "metric_contract": {
+    "task_success": {
+      "terminal_position_tolerance_m": 0.15,
+      "terminal_yaw_tolerance_rad": 0.4,
+      "terminal_height_tolerance_m": 0.05,
+      "first_arrival_speed_tolerance_mps": 0.08,
+      "profile_height_mae_tolerance_m": 0.04,
+      "height_transition_exclusion_halfwidth_m": 0.25
+    },
+    "adherence_success": "archived task_success AND active time-weighted CTE RMSE <= 0.10 m",
+    "first_arrival_mean_speed": "active reference-route distance / active first-arrival time",
+    "denominators": "all attempts for rates; successful arrivals for arrival-speed error",
+    "safety": "active until first arrival; full-horizon safety reported separately"
+  },
+  "offline_online_adherence": [
+    {
+      "suite": "id_constant",
+      "method": "deterministic_bc",
+      "seeds": 1,
+      "adherence_success_pct": 0,
+      "active_safety_pct": 79.2,
+      "active_cte_rmse_cm": 3.8
+    },
+    {
+      "suite": "id_constant",
+      "method": "diffusion_bc",
+      "seeds": 1,
+      "adherence_success_pct": 2.8,
+      "active_safety_pct": 85,
+      "active_cte_rmse_cm": 3.3
+    },
+    {
+      "suite": "id_constant",
+      "method": "diffusion_bc_dppo",
+      "seeds": 3,
+      "adherence_success": {
+        "mean_pct": 100,
+        "sample_sd_pct": 0
+      },
+      "active_safety": {
+        "mean_pct": 100,
+        "sample_sd_pct": 0
+      },
+      "active_cte_rmse_cm": {
+        "mean": 1.9,
+        "sample_sd": 0.5
+      }
+    },
+    {
+      "suite": "id_transition",
+      "method": "deterministic_bc",
+      "seeds": 1,
+      "adherence_success_pct": 0,
+      "active_safety_pct": 67.2,
+      "active_cte_rmse_cm": 5.4
+    },
+    {
+      "suite": "id_transition",
+      "method": "diffusion_bc",
+      "seeds": 1,
+      "adherence_success_pct": 0.6,
+      "active_safety_pct": 84.5,
+      "active_cte_rmse_cm": 3.5
+    },
+    {
+      "suite": "id_transition",
+      "method": "diffusion_bc_dppo",
+      "seeds": 3,
+      "adherence_success": {
+        "mean_pct": 99.9,
+        "sample_sd_pct": 0.1
+      },
+      "active_safety": {
+        "mean_pct": 100,
+        "sample_sd_pct": 0
+      },
+      "active_cte_rmse_cm": {
+        "mean": 2.1,
+        "sample_sd": 0.5
+      }
+    }
+  ],
+  "matched_online_task_success": [
+    {
+      "suite": "fast_id_crouch_to_walk",
+      "gaussian_ppo": {
+        "mean_pct": 96.6,
+        "sample_sd_pct": 1.6
+      },
+      "dppo": {
+        "mean_pct": 99.4,
+        "sample_sd_pct": 0.4
+      }
+    },
+    {
+      "suite": "fast_id_walk_to_crouch",
+      "gaussian_ppo": {
+        "mean_pct": 60.9,
+        "sample_sd_pct": 17.9
+      },
+      "dppo": {
+        "mean_pct": 99,
+        "sample_sd_pct": 0.4
+      }
+    },
+    {
+      "suite": "fast_stress_crouch_to_walk",
+      "gaussian_ppo": {
+        "mean_pct": 90.4,
+        "sample_sd_pct": 4.4
+      },
+      "dppo": {
+        "mean_pct": 99.1,
+        "sample_sd_pct": 1
+      }
+    },
+    {
+      "suite": "fast_stress_walk_to_crouch",
+      "gaussian_ppo": {
+        "mean_pct": 48.9,
+        "sample_sd_pct": 17.6
+      },
+      "dppo": {
+        "mean_pct": 98,
+        "sample_sd_pct": 0.7
+      }
+    },
+    {
+      "suite": "repeated_standing_start",
+      "gaussian_ppo": {
+        "mean_pct": 6.7,
+        "sample_sd_pct": 2.1
+      },
+      "dppo": {
+        "mean_pct": 98.5,
+        "sample_sd_pct": 2.6
+      }
+    },
+    {
+      "suite": "repeated_crouched_start",
+      "gaussian_ppo": {
+        "mean_pct": 11.9,
+        "sample_sd_pct": 3.6
+      },
+      "dppo": {
+        "mean_pct": 54.6,
+        "sample_sd_pct": 4.6
+      }
+    }
+  ],
+  "scalar_intervention": {
+    "actor_seed": 42,
+    "geometries": 24,
+    "attempts_per_mode": 144,
+    "change": "only final speed scalar, geometric preview unchanged",
+    "rows": [
+      {
+        "mode": "normal_feedback",
+        "arrival_pct": 95.8,
+        "adherence_success_pct": 91,
+        "speed_mae_cmps": 2.04
+      },
+      {
+        "mode": "fixed_target",
+        "arrival_pct": 93.1,
+        "adherence_success_pct": 81.2,
+        "speed_mae_cmps": 3.63
+      },
+      {
+        "mode": "permuted_target",
+        "arrival_pct": 94.4,
+        "adherence_success_pct": 29.2,
+        "speed_mae_cmps": 17.87
+      }
+    ]
+  },
+  "scope": [
+    "Four-metre open paths; evaluated native heights and finite speeds.",
+    "Unequal priors and optimizers: comparison does not isolate denoising as cause.",
+    "No verified flying-trot retention, real-robot validation or universal geometry claim."
+  ],
+  "local_source_tables": [
+    {
+      "id": "compact_baseline_rows.tex",
+      "sha256": "5f944a9155f05aa5252378d3d0e2cb73ad8a9463918aa2a1032575e9e56aa422"
+    },
+    {
+      "id": "gaussian_comparison_rows.tex",
+      "sha256": "4f1f81a53dff3afcf0b17522b417900f995ba62ba902787016c3c1669c8322e8"
+    },
+    {
+      "id": "scalar_intervention_results.csv",
+      "sha256": "73ab4e2eb13be3d0ff4aebcf2179ec08a020839c330af78027908b4a053d1186"
+    }
+  ]
+}

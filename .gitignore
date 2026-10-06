@@ -148,3 +148,25 @@ scripts/scripts
 /slurm-solo_dp-*
 /slurm_logs
 
+# Site-specific execution and private research notes.
+**/*.sbs
+**/*.sbatch
+/local_research/
+**/*HANDOFF*.md
+**/*IMPLEMENTATION_PLAN*.md
+**/NEXT_STEPS.md
+scripts/**/*_20??-??-??.md
+scripts/**/experiments/**/route_generation/
+scripts/diffusion_policy/data/plots/
+scripts/analysis/phase_a_goal_support/
+scripts/analysis/registry/
+research_artifacts/wct_v6_final/
+**/*.tar.gz
+**/*.tar.bz2
+**/*.tar.xz
+**/*.zip
+**/*.7z
+
+# Keep project regression tests visible.
+!scripts/reinforcement_learning/rsl_rl/tests/
+!scripts/reinforcement_learning/rsl_rl/tests/**

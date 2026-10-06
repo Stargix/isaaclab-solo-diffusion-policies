@@ -1,0 +1,478 @@
+{
+  "schema_version": 1,
+  "snapshot_date": "2026-10-06",
+  "reviewed_figure_set": "2026-10-04",
+  "status": "research manuscript snapshot; simulation only",
+  "implementation_revision": "fae74ff3f1b4796f07af5ce7b0ae2459edf65df2",
+  "illustration_actor": {
+    "recipe": "WC supported_hybrid_v3",
+    "seed": 42,
+    "checkpoint_sha256": "2e75422000cc22ab5023cfbc820eb8d391a69b4fc008a7e0a6bbb2c1e0b54868"
+  },
+  "images": [
+    {
+      "name": "compact_overview.png",
+      "sha256": "e1aba235325aa5c9ec90fd807c1548021293097920de1e8a74e41a85d4980213",
+      "path": "docs/project/figures/compact_overview.png"
+    },
+    {
+      "name": "compact_support_families.png",
+      "sha256": "ef443cbd86d16a981d22a6089d650b6fca1eba1ba4a38ee5118d19dd1d194d03",
+      "path": "docs/project/figures/compact_support_families.png"
+    },
+    {
+      "name": "fig_posture_transitions.png",
+      "sha256": "eef33431dde76a92d5b514b0da71a08a97aba73732900980ec7a074f76b2e4ef",
+      "path": "docs/project/figures/fig_posture_transitions.png"
+    },
+    {
+      "name": "geometry_pace_maps.png",
+      "sha256": "5020fae0ad1fb0b25bc0ba0a620affc615cdd74d998c5859d97558b5ac843dab",
+      "path": "docs/project/figures/geometry_pace_maps.png"
+    },
+    {
+      "name": "routes.png",
+      "sha256": "458eb7f58e885b70ec64ab5803e81c8f120795192066872285a51bed310260ed",
+      "path": "docs/project/figures/routes.png"
+    },
+    {
+      "name": "temporal_placement.png",
+      "sha256": "612fdc97a78a2724001f3a7e620adc0d9292dc83af06c19fe9ddfbe6d2cdc47c",
+      "path": "docs/project/figures/temporal_placement.png"
+    },
+    {
+      "name": "visible_stress_examples.png",
+      "sha256": "65bdc9d96201ec7e77d7039c28bcf2c86415e9049d132dcd307b978ea23fbd36",
+      "path": "docs/project/figures/visible_stress_examples.png"
+    }
+  ],
+  "selection_records": {
+    "geometry_pace_maps": {
+      "cases": [
+        {
+          "family": "coherent_smooth",
+          "repeat": 0,
+          "scenario": 17,
+          "target_m_s": 0.8,
+          "arrival": true,
+          "achieved_task_mean_m_s": 0.8035345950075817,
+          "active_cte_rmse_cm": 2.423246056295904,
+          "archived_task_success": true,
+          "prearrival_safety_failure": false,
+          "saturated_fraction": 0
+        },
+        {
+          "family": "rounded_waypoint",
+          "repeat": 0,
+          "scenario": 27,
+          "target_m_s": 0.8,
+          "arrival": true,
+          "achieved_task_mean_m_s": 0.8098770004225198,
+          "active_cte_rmse_cm": 6.011440166192764,
+          "archived_task_success": true,
+          "prearrival_safety_failure": false,
+          "saturated_fraction": 0
+        },
+        {
+          "family": "ood_s_curve",
+          "repeat": 8,
+          "scenario": 92,
+          "target_m_s": 0.8,
+          "arrival": true,
+          "achieved_task_mean_m_s": 0.8056039998326867,
+          "active_cte_rmse_cm": 6.414950553187805,
+          "archived_task_success": true,
+          "prearrival_safety_failure": false,
+          "saturated_fraction": 0
+        },
+        {
+          "family": "sweep_hard_turn",
+          "repeat": 0,
+          "scenario": 7,
+          "target_m_s": 0.8,
+          "arrival": true,
+          "achieved_task_mean_m_s": 0.8032128294150305,
+          "active_cte_rmse_cm": 7.001920336301266,
+          "archived_task_success": true,
+          "prearrival_safety_failure": false,
+          "saturated_fraction": 0
+        }
+      ],
+      "posture": "Walk",
+      "requested_mean_m_s": 0.8,
+      "quantity": "(smoothed route-tangent speed / requested mean) - 1",
+      "smooth_s": 0.1,
+      "colour_limits": [
+        -1,
+        1
+      ],
+      "selection_uses_outcomes": false,
+      "caveat": "Blue indicates less progress than mean request, not proof of actual braking."
+    },
+    "compact_support_families": {
+      "routes": "Existing fourth declared draw per class; no outcomes used; illustrative, not typicality estimates.",
+      "coverage": "Shared WC walk/crouch once; WCT fast-trot only; matched archived windows.",
+      "role": "Training inputs and empirical demonstration coverage, not performance or mechanical limits."
+    },
+    "routes_training_families": {
+      "selection": "Fourth independent draw per family in Fig. 3; no outcome filtering.",
+      "generator_seed": 20261001,
+      "generator_batch_size": 4096,
+      "cases": [
+        {
+          "family": "procedural",
+          "sample_index": 3,
+          "gallery_column": 4,
+          "arc_length_m": 3.999999523162842
+        },
+        {
+          "family": "coherent_smooth",
+          "sample_index": 7,
+          "gallery_column": 4,
+          "arc_length_m": 3.999999761581421
+        },
+        {
+          "family": "rounded_waypoint",
+          "sample_index": 11,
+          "gallery_column": 4,
+          "arc_length_m": 3.9999992847442627
+        },
+        {
+          "family": "hard_waypoint",
+          "sample_index": 15,
+          "gallery_column": 4,
+          "arc_length_m": 4
+        }
+      ],
+      "bank": {
+        "path": "scratch/paper_draft_20260930/family_illustrations.npz",
+        "sha256": "9213b4d7a287ad5a794dd03bd48261457d3c3708f44d910946d78351131dbb9a",
+        "schema_version": 1,
+        "routes": 4,
+        "families": {
+          "coherent_smooth": 1,
+          "hard_waypoint": 1,
+          "procedural": 1,
+          "rounded_waypoint": 1
+        },
+        "splits": [
+          "gallery_illustration"
+        ],
+        "length_m_min": 3.9999992847442627,
+        "length_m_max": 4
+      },
+      "speeds_m_s": [
+        0.25,
+        0.5,
+        0.75,
+        1
+      ],
+      "postures_m": [
+        0.2932,
+        0.1705
+      ],
+      "n_rollouts": 32,
+      "illustration_only": true,
+      "duration_s": 24
+    },
+    "temporal_placement_spatial": {
+      "cases": [
+        {
+          "scenario": 1246,
+          "repeat": 46,
+          "boundary_m": 0.8,
+          "realized_mean_m_s": 0.6055058159184081
+        },
+        {
+          "scenario": 1346,
+          "repeat": 46,
+          "boundary_m": 2,
+          "realized_mean_m_s": 0.6434411940844738
+        },
+        {
+          "scenario": 1446,
+          "repeat": 46,
+          "boundary_m": 3.2,
+          "realized_mean_m_s": 0.6883087215547876
+        }
+      ],
+      "same_as_previous_selection": true,
+      "map_ticks_m": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "arc_definition": "Nearest continuous position along reference, not actual travelled distance.",
+      "timing_panel": "Uniform-pace time minus elapsed time; positive ahead, negative behind.",
+      "speed_derivative_check": "placement_pace_audit.json; 0.4 s centred derivative vs averaged measured tangent speed."
+    },
+    "visible_stress_overlays_revision": {
+      "cases": [
+        {
+          "family": "ood_s_curve",
+          "repeat": 8,
+          "scenario": 20,
+          "height_m": 0.2932,
+          "target_m_s": 0.2,
+          "arrival": true
+        },
+        {
+          "family": "ood_s_curve",
+          "repeat": 8,
+          "scenario": 44,
+          "height_m": 0.2932,
+          "target_m_s": 0.4,
+          "arrival": true
+        },
+        {
+          "family": "ood_s_curve",
+          "repeat": 8,
+          "scenario": 68,
+          "height_m": 0.2932,
+          "target_m_s": 0.6,
+          "arrival": true
+        },
+        {
+          "family": "ood_s_curve",
+          "repeat": 8,
+          "scenario": 92,
+          "height_m": 0.2932,
+          "target_m_s": 0.8,
+          "arrival": true
+        },
+        {
+          "family": "ood_s_curve",
+          "repeat": 8,
+          "scenario": 116,
+          "height_m": 0.2932,
+          "target_m_s": 1,
+          "arrival": true
+        },
+        {
+          "family": "ood_s_curve",
+          "repeat": 8,
+          "scenario": 8,
+          "height_m": 0.1705,
+          "target_m_s": 0.2,
+          "arrival": true
+        },
+        {
+          "family": "ood_s_curve",
+          "repeat": 8,
+          "scenario": 32,
+          "height_m": 0.1705,
+          "target_m_s": 0.4,
+          "arrival": true
+        },
+        {
+          "family": "ood_s_curve",
+          "repeat": 8,
+          "scenario": 56,
+          "height_m": 0.1705,
+          "target_m_s": 0.6,
+          "arrival": true
+        },
+        {
+          "family": "ood_s_curve",
+          "repeat": 8,
+          "scenario": 80,
+          "height_m": 0.1705,
+          "target_m_s": 0.8,
+          "arrival": false
+        },
+        {
+          "family": "ood_s_curve",
+          "repeat": 8,
+          "scenario": 104,
+          "height_m": 0.1705,
+          "target_m_s": 1,
+          "arrival": false
+        },
+        {
+          "family": "ood_arc",
+          "repeat": 8,
+          "scenario": 140,
+          "height_m": 0.2932,
+          "target_m_s": 0.2,
+          "arrival": true
+        },
+        {
+          "family": "ood_arc",
+          "repeat": 8,
+          "scenario": 164,
+          "height_m": 0.2932,
+          "target_m_s": 0.4,
+          "arrival": true
+        },
+        {
+          "family": "ood_arc",
+          "repeat": 8,
+          "scenario": 188,
+          "height_m": 0.2932,
+          "target_m_s": 0.6,
+          "arrival": false
+        },
+        {
+          "family": "ood_arc",
+          "repeat": 8,
+          "scenario": 212,
+          "height_m": 0.2932,
+          "target_m_s": 0.8,
+          "arrival": false
+        },
+        {
+          "family": "ood_arc",
+          "repeat": 8,
+          "scenario": 236,
+          "height_m": 0.2932,
+          "target_m_s": 1,
+          "arrival": true
+        },
+        {
+          "family": "ood_arc",
+          "repeat": 8,
+          "scenario": 128,
+          "height_m": 0.1705,
+          "target_m_s": 0.2,
+          "arrival": true
+        },
+        {
+          "family": "ood_arc",
+          "repeat": 8,
+          "scenario": 152,
+          "height_m": 0.1705,
+          "target_m_s": 0.4,
+          "arrival": true
+        },
+        {
+          "family": "ood_arc",
+          "repeat": 8,
+          "scenario": 176,
+          "height_m": 0.1705,
+          "target_m_s": 0.6,
+          "arrival": true
+        },
+        {
+          "family": "ood_arc",
+          "repeat": 8,
+          "scenario": 200,
+          "height_m": 0.1705,
+          "target_m_s": 0.8,
+          "arrival": false
+        },
+        {
+          "family": "ood_arc",
+          "repeat": 8,
+          "scenario": 224,
+          "height_m": 0.1705,
+          "target_m_s": 1,
+          "arrival": false
+        },
+        {
+          "family": "sweep_hard_turn",
+          "repeat": 47,
+          "scenario": 497,
+          "height_m": 0.2932,
+          "target_m_s": 0.35,
+          "arrival": true
+        },
+        {
+          "family": "sweep_hard_turn",
+          "repeat": 47,
+          "scenario": 597,
+          "height_m": 0.2932,
+          "target_m_s": 0.65,
+          "arrival": true
+        },
+        {
+          "family": "sweep_hard_turn",
+          "repeat": 47,
+          "scenario": 697,
+          "height_m": 0.2932,
+          "target_m_s": 0.85,
+          "arrival": true
+        },
+        {
+          "family": "sweep_hard_turn",
+          "repeat": 47,
+          "scenario": 797,
+          "height_m": 0.2932,
+          "target_m_s": 1,
+          "arrival": true
+        },
+        {
+          "family": "sweep_hard_turn",
+          "repeat": 47,
+          "scenario": 447,
+          "height_m": 0.1705,
+          "target_m_s": 0.35,
+          "arrival": true
+        },
+        {
+          "family": "sweep_hard_turn",
+          "repeat": 47,
+          "scenario": 547,
+          "height_m": 0.1705,
+          "target_m_s": 0.65,
+          "arrival": true
+        },
+        {
+          "family": "sweep_hard_turn",
+          "repeat": 47,
+          "scenario": 647,
+          "height_m": 0.1705,
+          "target_m_s": 0.85,
+          "arrival": false
+        },
+        {
+          "family": "sweep_hard_turn",
+          "repeat": 47,
+          "scenario": 747,
+          "height_m": 0.1705,
+          "target_m_s": 1,
+          "arrival": true
+        }
+      ],
+      "selection": "Same three geometries as relative pace; no outcome filtering.",
+      "grids": "Curves 0.2/0.4/0.6/0.8/1.0; corner archived 0.35/0.65/0.85/1.0.",
+      "scope": "Illustration only. Corner is not added to the 24-geometry visible-bank aggregate."
+    }
+  },
+  "source_records": [
+    {
+      "path": "scripts/dppo_diffusion_rl/hybrid_routes.py",
+      "sha256": "a4dafc0b933e8736f058058bdc08ef7eb9d34c760e904d81bf061b1259a2eec6"
+    },
+    {
+      "path": "scripts/dppo_diffusion_rl/supported_hybrid_v3.py",
+      "sha256": "30bd4786ce812f031a4a157f0cdc608fef8f74a214669ec5a96ae1ac8008a592"
+    }
+  ],
+  "local_archive_records": [
+    {
+      "id": "compact_baseline_rows.tex",
+      "sha256": "5f944a9155f05aa5252378d3d0e2cb73ad8a9463918aa2a1032575e9e56aa422"
+    },
+    {
+      "id": "gaussian_comparison_rows.tex",
+      "sha256": "4f1f81a53dff3afcf0b17522b417900f995ba62ba902787016c3c1669c8322e8"
+    },
+    {
+      "id": "scalar_intervention_results.csv",
+      "sha256": "73ab4e2eb13be3d0ff4aebcf2179ec08a020839c330af78027908b4a053d1186"
+    },
+    {
+      "id": "figure_provenance.json",
+      "sha256": "e4b9dd3855c7908757fd6d4cb4e34d05f68a77767668cee7da762492cbd2f99b"
+    }
+  ],
+  "notes": [
+    "Images copied unchanged from reviewed manuscript assets.",
+    "Archive records identify files kept locally, not downloadable public weights or traces.",
+    "Examples are illustrative and selected without outcome filtering; they do not estimate population success.",
+    "Posture bands describe event variation, not confidence intervals.",
+    "Absolute machine paths and site-specific execution settings are omitted."
+  ]
+}

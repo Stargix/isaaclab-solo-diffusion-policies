@@ -1,194 +1,20 @@
-# Solo12 path-conditioned DPPO
+# Diffusion policy refinement
 
-This directory is an independent Phase-B implementation of Diffusion Policy
-Policy Optimization (DPPO).  The actor is the existing geometric-hindsight
-Diffusion Policy; it is not a residual policy and it does not contain a
-high-level velocity controller.
+[Method](../../docs/project/method.md) · [Commands](../../docs/project/running.md#online-diffusion-refinement) · [Results](../../docs/project/results.md)
 
-The environment selects its actor observation contract from checkpoint
-metadata. Both the original `hindsight_geom_avg12` checkpoints and the new
-`hindsight_geom_profile16` checkpoints are supported; mixing a policy kind,
-goal name and dimension is rejected before simulation starts. In schema 8,
-the four route samples are `[x,y,h_required]` tokens and `h_now` is appended
-before terminal yaw and average speed. Task contract v5 adds support-aware
-procedural routes and evaluates sustained posture on the plateaus surrounding
-a physical transition without changing DPPO's likelihood mathematics.
-Task contract v6 is additive: it makes path weight configurable, optionally
-adds a distance-weighted CTE success gate, and registers a private feasibility
-filter that is never exposed to the actor or critic.
-Task contract v7 adds an opt-in pace-consistent preview: the geometric
-look-ahead and final average-speed scalar are generated from the same
-closed-loop remaining pace. Historical checkpoints retain the v6 behavior.
-Task contract v8 adds the final coverage-corrected sampler while explicitly
-restoring the successful v3 preview semantics.
+DPPO refines the joint-action diffusion policy from offline imitation. The evaluated recipe uses `supported_hybrid_v3`, ten denoising steps with five trained reverse transitions, and four executed actions per plan.
 
-## Train
+The objective combines route adherence, native-height posture, average arrival speed, terminal pose and safety. Explicit remaining-speed feedback is supplied without a gait identifier, gait reward or required local speed profile.
 
-The audited smooth baseline is documented in
-[`experiments/supported_procedural_v1`](experiments/supported_procedural_v1/README.md).
-The controlled geometry expansion is
-[`experiments/supported_hybrid_v2`](experiments/supported_hybrid_v2/README.md).
-The strict path-tracking candidate is
-[`experiments/supported_hybrid_v3`](experiments/supported_hybrid_v3/README.md).
-The final fast-tracking candidate is
-[`experiments/supported_hybrid_v4`](experiments/supported_hybrid_v4/README.md).
-The final evidence-driven coverage correction is
-[`experiments/supported_hybrid_v5`](experiments/supported_hybrid_v5/README.md).
-The retention-aware final consolidation is
-[`experiments/supported_hybrid_v6`](experiments/supported_hybrid_v6/README.md).
-V1--v5 start directly from the same pure Phase-A WCT imitation checkpoint and
-command only supported walk/crouch height endpoints in balanced constant and
-bidirectional-transition profiles. V3 preserves v2 and adds transition-context
-coverage, a private feasibility filter, and an explicit route-precision
-contract without local speed targets or skill labels:
+| Module | Role |
+|---|---|
+| [policy.py](policy.py) | Reverse transitions and policy densities |
+| [ppo.py](ppo.py) | Policy and critic updates |
+| [rewards.py](rewards.py) | Task terms and outcomes |
+| [hybrid_routes.py](hybrid_routes.py), [supported_hybrid_v3.py](supported_hybrid_v3.py) | Route generation and task sampling |
+| [isaaclab_env.py](isaaclab_env.py) | Task state and conditioning |
+| [checkpointing.py](checkpointing.py) | Source validation and restoration |
+| [Evaluation v1](experiments/wct_final_evaluation_v1/) | Frozen benchmark banks |
+| [Evaluation v2](experiments/wct_final_evaluation_v2/) | Geometry-difficulty diagnostics |
 
-```bash
-sbatch scripts/dppo_diffusion_rl/experiments/supported_hybrid_v3/train_cluster.sbs
-```
-
-V4 preserves that task and fixes the contradictory preview/pace tuple while
-balancing supported fast targets:
-
-```bash
-sbatch scripts/dppo_diffusion_rl/experiments/supported_hybrid_v4/train_cluster.sbs
-```
-
-The paired v4 result rejected that combined intervention. V5 restores v3
-conditioning and changes only task coverage for feasible fast transitions and
-repeated binary posture profiles:
-
-```bash
-sbatch scripts/dppo_diffusion_rl/experiments/supported_hybrid_v5/train_cluster.sbs
-```
-
-The paired v3/v5 benchmark found useful fast adaptation but measurable core
-forgetting. V6 therefore consolidates from the exact evaluated v3 actor, with
-reference KL only on v3 replay samples and no constraint on new cases:
-
-```bash
-sbatch scripts/dppo_diffusion_rl/experiments/supported_hybrid_v6/train_cluster.sbs
-```
-
-It deliberately does not use `--restart_optimization`: Phase A has no PPO
-critic or optimizer state to restore. `--require_phase_a_source` prevents an
-accidental DPPO warm start. The commands below are retained only to reproduce
-historical task contracts and are not the current recommendation.
-
-Historical path-v4 continuation from `dppo_path_3`. Task-contract v3 kept the
-12-D geometric goal but replaces its final local `v_avg` scalar with the
-closed-loop remaining-route speed budget
-`(remaining distance) / (remaining target time)`.  Geometry is still previewed
-at the nominal requested speed.  The reward is unchanged: this only makes
-accumulated timing debt observable to the actor.
-
-```bash
-./isaaclab.sh -p scripts/dppo_diffusion_rl/train.py --checkpoint checkpoints_iri/checkpoints_dppo/dppo_path_3.pt --output_dir scripts/dppo_diffusion_rl/runs/dppo_path_4_speed_budget --run_name dppo_path_4_speed_budget --restart_optimization --reference_kl_coef 0.05 --num_envs 4096 --iterations 500 --rollout_chunks 32 --route_stage 2 --route_speed_max_mps 0.6 --speed_budget_max_mps 0.8 --save_interval 25 --headless --device cuda:0 --wandb
-```
-
-`--restart_optimization` is mandatory when loading path3: its critic and Adam
-states estimate task-contract v2.  The actor remains the path3 actor, and the
-immutable reference used by the KL is deliberately re-anchored to that loaded
-actor rather than to an older reference stored inside the checkpoint.
-
-Recommended v3 after the paired path_1/path_2 audit. It retains the stable
-`path_1` actor as an immutable transition-kernel reference while optimizing the
-first-arrival speed objective. The task reward weights are intentionally
-unchanged:
-
-```bash
-./isaaclab.sh -p scripts/dppo_diffusion_rl/train.py --checkpoint checkpoints_iri/checkpoints_dppo/dppo_path_1.pt --output_dir scripts/dppo_diffusion_rl/runs/dppo_path_pose_speed_reference_v3 --restart_optimization --reference_kl_coef 0.05 --num_envs 4096 --iterations 1000 --rollout_chunks 32 --route_stage 2 --route_speed_max_mps 0.6 --save_interval 25 --headless --device cuda:0 --wandb --run_name dppo_path_pose_speed_reference_v3
-```
-
-`Policy/reference_kl` measures cumulative drift from that frozen actor; it is
-different from `Policy/approximate_kl`, which only compares one PPO update to
-its rollout behavior. `0.05` is the preregistered initial coefficient, not a
-new reward term. Keep it fixed for the primary run and compare periodic
-checkpoints on the paired held-out benchmark.
-
-Warm-start task-contract v2 from the successful v1 DPPO actor (PowerShell,
-single line). The actor is retained; critic, Adam states, counters and critic
-warm-up restart because the terminal return changed:
-
-```powershell
-.\isaaclab.bat -p scripts/dppo_diffusion_rl/train.py --checkpoint checkpoints_iri/checkpoints_dppo/dppo_path_1.pt --output_dir scripts/dppo_diffusion_rl/runs/dppo_path_pose_speed_first_arrival_v2 --restart_optimization --num_envs 4096 --iterations 1000 --rollout_chunks 32 --route_stage 2 --route_speed_max_mps 0.6 --save_interval 25 --headless --device cuda:0 --wandb --run_name dppo_path_pose_speed_first_arrival_v2
-```
-
-Linux/cluster (single line):
-
-```bash
-./isaaclab.sh -p scripts/dppo_diffusion_rl/train.py --checkpoint checkpoints_iri/checkpoints_dppo/dppo_path_1.pt --output_dir scripts/dppo_diffusion_rl/runs/dppo_path_pose_speed_first_arrival_v2 --restart_optimization --num_envs 4096 --iterations 1000 --rollout_chunks 32 --route_stage 2 --route_speed_max_mps 0.6 --save_interval 25 --headless --device cuda:0 --wandb --run_name dppo_path_pose_speed_first_arrival_v2
-```
-
-Start at 4096 environments. Increase it only after checking GPU memory and
-throughput; the rollout stores `K' + 1` action trajectories per physical
-decision, so DPPO memory does not scale like ordinary PPO.
-
-Resume a v2 run with the same likelihood and task contract (without
-`--restart_optimization`):
-
-```powershell
-.\isaaclab.bat -p scripts/dppo_diffusion_rl/train.py --checkpoint scripts/dppo_diffusion_rl/runs/dppo_path_pose_speed_first_arrival_v2/last.pt --output_dir scripts/dppo_diffusion_rl/runs/dppo_path_pose_speed_first_arrival_v2 --num_envs 4096 --iterations 500 --rollout_chunks 32 --route_stage 2 --route_speed_max_mps 0.6 --headless --device cuda:0 --wandb --run_name dppo_path_pose_speed_first_arrival_v2
-```
-
-Changing `inference_steps`, `finetune_denoising_steps`, `exec_horizon`, or
-`min_denoising_std` while resuming is rejected because it changes the stored
-transition likelihood. Changing `gamma`, `gae_lambda`, or `gamma_denoising` is
-also rejected because it changes the objective attached to the stored rollout.
-Optimizer learning rates may be changed explicitly and are reapplied after
-loading AdamW state. Restoring critic/Adam while changing route stage, height
-curriculum, speed range, profile tolerance/weight or episode duration is also
-rejected; use `--restart_optimization` and a new output directory. Reusing a
-populated output directory is allowed only when the checkpoint belongs to that
-same run; this prevents accidental log mixing.
-
-## Evaluate
-
-The existing evaluator detects DPPO metadata and reconstructs the frozen-early
-/ fine-tuned-late sampler. Do not strip the DPPO keys from the checkpoint.
-
-```powershell
-.\isaaclab.bat -p scripts/diffusion_policy/evaluate_policy.py --checkpoint scripts/dppo_diffusion_rl/runs/dppo_wct_profile16_multilevel_c4_v1/best.pt --output_dir scripts/dppo_diffusion_rl/evaluations/dppo_wct_profile16_multilevel_c4_v1_finite4m --speeds 0.2 0.35 0.5 --path_shapes straight circle s_curve right_angle random_polyline --route_length_m 4.0 --height_profile random --height_cycle 0.2932 0.25 0.21 0.1705 --height_segment_m 0.8 --repeats 3 --duration_s 24 --seed 42 --save_timeseries --headless --require_empty_output_dir
-```
-
-For finite routes, use `route_arrival_speed_ratio` together with
-`route_arrived`; the old full-horizon speed is only a displacement diagnostic
-after the robot reaches the endpoint. `task_success` evaluates final yaw,
-height, route-average speed and (for profile16) distance-weighted full-route
-height MAE at the first valid entry into the goal region; waiting cannot repair
-an early arrival. `--route_length_m 4.0` matches DPPO's finite route length, so
-low-speed cases also reach an evaluable endpoint. CSV/JSON report the four gates
-separately. Height reports distinguish the physical requirement at current route
-progress from the future height preview supplied to the policy. The evaluator
-also rejects non-finite or clearly non-physical
-simulator states (base outside 0.08--0.50 m, planar speed above 5 m/s, or tilt
-above 60 degrees), so a PhysX escape cannot count as survival or dominate the
-height plots. These are evaluation sanity bounds, not rewards.
-
-Interactive right-angle transition:
-
-```powershell
-.\isaaclab.bat -p scripts/diffusion_policy/play_policy.py --checkpoint scripts/dppo_diffusion_rl/runs/dppo_path_pose_speed_first_arrival_v2/best.pt --default_path_mode right_angle_walk_to_crouch --desired_speed 0.4 --exec_horizon 4 --device cuda:0
-```
-
-`best.pt` is created only after at least one episode has completed. Selection
-prioritizes joint route/profile success and fall avoidance, penalizes timeout,
-failed arrival, corridor and overshoot, and then uses progress, mean-speed
-error, terminal distance and a bounded profile-height MAE tiebreaker. Its score
-is saved and restored on an in-place resume. `last.pt`, periodic `model_N.pt`,
-`metrics.jsonl`, and `run_config.json` are always produced.
-
-The first 10 iterations train only the critic. With 32 chunks per iteration,
-this covers approximately one full 24 s route before the transformer actor is
-allowed to move. Override `--critic_warmup_iterations` only as an explicit
-ablation.
-
-## Tests
-
-```powershell
-conda run --no-capture-output -n env_isaaclab python -m pytest scripts/dppo_diffusion_rl/tests scripts/diffusion_policy/evaluation/test_metrics.py -q -p no:cacheprovider
-```
-
-The suite checks the reverse DDPM transition against `diffusers`, exact
-behavior-logprob reproduction, the denoising clip schedule, base-network
-immutability, reset/chunk handling, checkpoint resume, a complete synthetic PPO
-update, reward invariants, and finite-route evaluation semantics.
+Historical task versions and opt-in symmetry/preview variants remain for existing checkpoints. Their presence does not make them validated improvements. Machine-specific scheduler launchers are local files.
