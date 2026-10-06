@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "capture_date": "2026-10-06",
+  "source": "Isaac Lab RGB renderer during live closed-loop policy playback",
+  "scope": "Simulation illustration; not a benchmark, hardware recording or wall-clock real-time demonstration",
+  "actor": {
+    "name": "WC-DPPO supported_hybrid_v3, online seed 42",
+    "checkpoint_sha256": "2e75422000cc22ab5023cfbc820eb8d391a69b4fc008a7e0a6bbb2c1e0b54868"
+  },
+  "playback_source_sha256": "5361bc56c85a3b34e4b7a5635ed409c8774566027a5f7baa5ea6187ec9511d46",
+  "physics_hz": 200,
+  "control_hz": 50,
+  "execution_horizon": 4,
+  "seed": 42,
+  "reference": {
+    "file": "demo_route.npy",
+    "frame": "robot",
+    "shape": [
+      201,
+      3
+    ],
+    "length_m": 4,
+    "height_switches_m": [
+      1.6,
+      2.8
+    ],
+    "heights_m": [
+      0.2932,
+      0.1705
+    ],
+    "target_average_speed_mps": 0.55
+  },
+  "capture_instrumentation": "Fixed presentation camera; non-colliding reference/trace meshes; no policy, reward or physics changes",
+  "yellow_marker": "Display-only reference guide 0.55 m ahead; not the full policy preview",
+  "gif": {
+    "file": "route_posture_demo.gif",
+    "frames": 91,
+    "source_frames": 121,
+    "size_px": [
+      800,
+      480
+    ],
+    "display_duration_s": 7.28,
+    "loop": true,
+    "time_base": "simulated control time, not wall-clock capture time",
+    "trim_rule": "Prefix through first recorded sample with reference progress >=3.90 m; later playback remains archived locally",
+    "last_control_step": 361,
+    "compression": "128-colour palette, no dithering"
+  },
+  "photos": [
+    {
+      "file": "standing.jpg",
+      "step": 75,
+      "required_height_m": 0.29319998621940613,
+      "measured_height_m": 0.28571999073028564,
+      "progress_m": 0.8714383840560913
+    },
+    {
+      "file": "crouching.jpg",
+      "step": 210,
+      "required_height_m": 0.1704999953508377,
+      "measured_height_m": 0.1693832129240036,
+      "progress_m": 2.506258010864258
+    }
+  ],
+  "photo_note": "Close-ups from a separate seeded playback of the same actor/reference; labels are measured heights, not invented postures",
+  "assets": [
+    {
+      "file": "route_posture_demo.gif",
+      "bytes": 3594233,
+      "sha256": "fdbae8445b9571c1acfb4fd9e23f556718b732093ef654bef3e01e14e290e1c1"
+    },
+    {
+      "file": "standing.jpg",
+      "bytes": 77027,
+      "sha256": "25168406a92cc747dbdb3735fead9cc5751863ac94d9a182fd338e704b591093"
+    },
+    {
+      "file": "crouching.jpg",
+      "bytes": 71975,
+      "sha256": "fefe81b51c6aeb8cf268a9cda1835c8754b11c44c3565aa2fb166557378a246b"
+    },
+    {
+      "file": "demo_route.npy",
+      "bytes": 2540,
+      "sha256": "a8539817d0a79beb6ffa6ce916ceb52b1781a8c98bc4f913358091987102ca5c"
+    }
+  ]
+}

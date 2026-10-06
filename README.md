@@ -6,9 +6,9 @@ The controller receives a route, a body-height profile and a target average spee
 
 [Method and design decisions](docs/project/method.md) · [Results and limitations](docs/project/results.md) · [Training, evaluation and demos](docs/project/running.md) · [Figure provenance](docs/project/figures/README.md)
 
-![Route tracking with local speed shown along each trajectory](docs/project/figures/geometry_pace_maps.png)
+![SOLO12 following a curved route and changing posture in Isaac Lab](docs/project/media/route_posture_demo.gif)
 
-*The same controller follows different geometries at a requested mean of 0.8 m/s. Colour shows route-tangent speed relative to that mean: blue indicates slower progress and orange faster progress. These are individual diagnostic rollouts; the annotated mean speeds and cross-track errors describe those rollouts, not a population success rate.*
+*A live policy rollout in Isaac Lab: WC-DPPO follows a 4 m curved reference with walk→crouch→walk height requirements and a requested mean of 0.55 m/s. Red is the reference and blue the measured trace; the yellow marker is a visual look-ahead guide. The GIF shows the active traverse at simulated speed—not hardware or a wall-clock real-time demonstration. [Demo details and reference](docs/project/media/README.md).*
 
 ## From existing behaviours to path-conditioned control
 
@@ -32,7 +32,17 @@ A target average speed defines how long the route should take. It does not requi
 
 Remaining distance and remaining target time are converted into an explicit speed-budget input. The controller learns how to respond to that feedback; this is not a claim that it discovers a clock or an optimal speed planner.
 
+![Route tracking with local speed shown along each trajectory](docs/project/figures/geometry_pace_maps.png)
+
+*The same controller follows different geometries at a requested mean of 0.8 m/s. Colour shows route-tangent speed relative to that mean: blue indicates slower progress and orange faster progress. These are individual diagnostic rollouts; the annotated mean speeds and cross-track errors describe those rollouts, not a population success rate.*
+
 ## Posture is specified along the route
+
+| Standing section | Crouching section |
+|:--:|:--:|
+| ![SOLO12 tracking the reference in a standing section](docs/project/media/standing.jpg) | ![SOLO12 tracking the reference in a crouching section](docs/project/media/crouching.jpg) |
+
+*Rendered close-ups of the same controller and reference. Required heights are 0.293 and 0.171 m; measured heights in these captures are 0.286 and 0.169 m. The policy receives height conditions, not a skill ID.*
 
 ![Height and path tracking around both posture transitions](docs/project/figures/fig_posture_transitions.png)
 
