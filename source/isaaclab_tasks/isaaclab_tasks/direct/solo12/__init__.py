@@ -53,6 +53,16 @@ gym.register(
 )
 
 gym.register(
+    id="solo12-pronk-v2-v0",
+    entry_point=f"{__name__}.solo12_pronk_env:Solo12PronkEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.solo12_pronk_v2:Solo12PronkV2EnvCfg",
+        "rsl_rl_cfg_entry_point": f"{__name__}.solo12_pronk_v2:Solo12PronkV2PPORunnerCfg",
+    },
+)
+
+gym.register(
     id="solo12-crouch-v0",
     entry_point=f"{__name__}.solo12_crouch_env:Solo12CrouchEnv",
     disable_env_checker=True,

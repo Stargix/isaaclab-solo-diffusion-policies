@@ -110,14 +110,17 @@ class Solo12PronkEnvCfg(Solo12EnvCfg):
         super().__post_init__()
         if self.policy_model != "simple_mlp" or self.observation_space != 48:
             raise ValueError("Pronk fine-tuning requires the compatible 48-D simple-MLP actor contract.")
-        if tuple(self.command_lin_vel_x_range) != (0.15, 1.0):
-            raise ValueError("Pronk command curriculum expects forward vx in [0.15, 1.0] m/s.")
-        if tuple(self.command_lin_vel_y_range) != (-0.15, 0.15):
-            raise ValueError("The configured left-right symmetry expects vy in [-0.15, 0.15] m/s.")
-        if tuple(self.command_ang_vel_z_range) != (-0.35, 0.35):
-            raise ValueError("The configured left-right symmetry expects yaw rate in [-0.35, 0.35] rad/s.")
-        if not math.isfinite(self.pronk_cycle_reward_scale) or self.pronk_cycle_reward_scale <= 0.0:
-            raise ValueError("pronk_cycle_reward_scale must be finite and positive.")
+        vx_range = tuple(self.command_lin_vel_x_range)
+        if len(vx_range) != 2 or not all(math.isfinite(v) for v in vx_range) or not 0.0 < vx_range[0] < vx_range[1]:
+            raise ValueError("Pronk forward command range must be finite, positive and ordered.")
+        for name, bounds in (("vy", self.command_lin_vel_y_range), ("yaw", self.command_ang_vel_z_range)):
+            bounds = tuple(bounds)
+            if len(bounds) != 2 or not all(math.isfinite(v) for v in bounds):
+                raise ValueError(f"Pronk {name} command bounds must be two finite values.")
+            if not math.isclose(bounds[0], -bounds[1], abs_tol=1e-8) or bounds[1] < 0.0:
+                raise ValueError(f"Pronk {name} bounds must be symmetric for left-right augmentation.")
+        if not math.isfinite(self.pronk_cycle_reward_scale) or self.pronk_cycle_reward_scale < 0.0:
+            raise ValueError("pronk_cycle_reward_scale must be finite and non-negative.")
         if self.tricky_terrain:
             raise ValueError("Pronk geometric flight checks require the configured flat terrain.")
         if not 0.0 < self.pronk_max_tilt_deg < 90.0:
