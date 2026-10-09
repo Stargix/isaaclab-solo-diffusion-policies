@@ -148,6 +148,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "solo12-bound-v3",
             "solo12-flying-trot-v0",
             "solo12-pace-v0",
+            "solo12-pronk-v0",
         }:
             raise ValueError("--command_ui is currently supported for the Solo12 direct locomotion tasks only.")
         from live_command_ui import LiveSE2Command, build_live_command_window
@@ -164,6 +165,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             command_bounds = ((0.75, 1.50), (-0.15, 0.15), (-0.35, 0.35))
         elif args_cli.task == "solo12-pace-v0":
             command_bounds = ((-1.0, 1.0), (-0.15, 0.15), (-0.35, 0.35))
+        elif args_cli.task == "solo12-pronk-v0":
+            command_bounds = ((0.0, 1.0), (-0.15, 0.15), (-0.35, 0.35))
         else:
             command_bounds = ((0.60, 1.50), (-0.10, 0.10), (-0.25, 0.25))
         live_command = LiveSE2Command(tuple(args_cli.command), bounds=command_bounds)

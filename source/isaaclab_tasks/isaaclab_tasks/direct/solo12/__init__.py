@@ -43,6 +43,16 @@ _register("Isaac-Solo12-BaseIMU-Teacher-Direct-v0", "Solo12BaseImuTeacherEnvCfg"
 _register("Isaac-Solo12-BaseIMU-StudentRL-Direct-v0", "Solo12BaseImuStudentRlEnvCfg", "Solo12BaseImuStudentRlPPORunnerCfg")
 
 gym.register(
+    id="solo12-pronk-v0",
+    entry_point=f"{__name__}.solo12_pronk_env:Solo12PronkEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.solo12_pronk_env:Solo12PronkEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{__name__}.solo12_pronk_env:Solo12PronkPPORunnerCfg",
+    },
+)
+
+gym.register(
     id="solo12-crouch-v0",
     entry_point=f"{__name__}.solo12_crouch_env:Solo12CrouchEnv",
     disable_env_checker=True,
