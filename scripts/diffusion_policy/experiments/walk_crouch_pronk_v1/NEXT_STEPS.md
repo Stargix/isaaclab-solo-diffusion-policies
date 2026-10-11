@@ -1,5 +1,10 @@
 # Estado y próximos pasos — 2026-10-11
 
+Actualización 2026-10-12: el siguiente train es la
+[selección temporal corregida](../walk_crouch_pronk_speed_partition_v1/README.md),
+no la mezcla solapada v1. Fuentes preservadas, walk ≥0,6 sin arranque/reposo
+en sus ventanas. Retención y transición siguen pendientes de evaluar.
+
 ## Base que se conserva
 
 - [x] WC/WCT anteriores y sus evaluaciones con seeds 42/43/44.

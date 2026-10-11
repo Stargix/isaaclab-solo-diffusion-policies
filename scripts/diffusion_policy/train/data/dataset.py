@@ -57,6 +57,7 @@ class DemoSequence:
     guidance_pos_w: np.ndarray | None = None
     guidance_cumulative_xy: np.ndarray | None = None
     terminal_step: int | None = None
+    training_anchor_steps: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -353,6 +354,8 @@ class SpatialHindsightDataset(Dataset):
                             cumulative_xy_lengths(guidance_pos_w) if guidance_pos_w is not None else None
                         ),
                         terminal_step=terminal_step,
+                        training_anchor_steps=(demo["training_anchor_steps"][:]
+                                               if "training_anchor_steps" in demo else None),
                     )
                 )
                 self._index_demo(demo_idx)
@@ -368,7 +371,19 @@ class SpatialHindsightDataset(Dataset):
         )
         last_for_actions_exclusive = length - self.future_horizon + 1
         last_anchor_exclusive = min(last_for_goal_exclusive, last_for_actions_exclusive)
-        for anchor in range(first_anchor, last_anchor_exclusive, self.step_stride):
+        allowed = self.demos[demo_idx].training_anchor_steps
+        if allowed is None:
+            anchors = range(first_anchor, last_anchor_exclusive, self.step_stride)
+        else:
+            if (allowed.ndim != 1 or not len(allowed) or not np.issubdtype(allowed.dtype, np.integer)
+                    or np.any(np.diff(allowed.astype(np.int64)) < 0)
+                    or np.any(allowed < first_anchor) or np.any(allowed >= last_anchor_exclusive)
+                    or np.any((allowed - first_anchor) % self.step_stride != 0)):
+                raise ValueError(f"{self.demos[demo_idx].demo_name}: invalid training_anchor_steps")
+            # Repeated anchors are deliberate balance weights, never duplicated
+            # episodes. Episode-level splitting still keeps repeats together.
+            anchors = allowed
+        for anchor in anchors:
             repeats = self.startup_sample_multiplier if anchor < self.history else 1
             self.samples.extend(HindsightSample(demo_idx, anchor) for _ in range(repeats))
 
@@ -499,13 +514,21 @@ class SpatialHindsightDataset(Dataset):
         action_min, action_max = self._exact_action_range(demos)
         return build_stats_with_action_range(proprio, goals, action_min, action_max)
 
-    @staticmethod
+    def _normalization_rows(self, demo: DemoSequence) -> np.ndarray:
+        if demo.training_anchor_steps is None:
+            return np.arange(len(demo.actions))
+        mask = np.zeros(len(demo.actions), dtype=bool)
+        for anchor in np.unique(demo.training_anchor_steps):
+            mask[max(0, int(anchor) - self.history - 1):int(anchor) + self.future_horizon] = True
+        return np.flatnonzero(mask)
+
     def _sample_state_action_rows(
-        demos: list[DemoSequence], max_samples: int, seed: int
+        self, demos: list[DemoSequence], max_samples: int, seed: int
     ) -> tuple[np.ndarray, np.ndarray]:
         if max_samples < 1:
             raise ValueError("max_stats_samples must be >= 1.")
-        lengths = np.asarray([len(demo.actions) for demo in demos], dtype=np.int64)
+        rows = [self._normalization_rows(demo) for demo in demos]
+        lengths = np.asarray([len(indices) for indices in rows], dtype=np.int64)
         boundaries = np.cumsum(lengths)
         count = min(int(max_samples), int(boundaries[-1]))
         chosen = np.sort(np.random.default_rng(seed).choice(boundaries[-1], count, replace=False))
@@ -513,7 +536,7 @@ class SpatialHindsightDataset(Dataset):
         starts = np.concatenate(([0], boundaries[:-1]))
         proprio, actions = [], []
         for demo_idx in np.unique(demo_ids):
-            local = chosen[demo_ids == demo_idx] - starts[demo_idx]
+            local = rows[int(demo_idx)][chosen[demo_ids == demo_idx] - starts[demo_idx]]
             demo = demos[int(demo_idx)]
             proprio.append(demo.proprio[local])
             actions.append(demo.actions[local])
@@ -523,7 +546,7 @@ class SpatialHindsightDataset(Dataset):
         action_min = np.full(12, np.inf, dtype=np.float32)
         action_max = np.full(12, -np.inf, dtype=np.float32)
         for demo in demos:
-            actions = torch.from_numpy(demo.actions)
+            actions = torch.from_numpy(demo.actions[self._normalization_rows(demo)])
             proprio = torch.zeros((len(actions), PROPRIO_DIM), dtype=actions.dtype)
             goals = torch.zeros((len(actions), self.goal_dim), dtype=actions.dtype)
             for index in range(self._symmetry_count):

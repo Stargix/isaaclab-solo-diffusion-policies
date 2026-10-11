@@ -1,5 +1,10 @@
 # Transferencia y próximo train — solo después del gate de datos
 
+**Actualización 2026-10-12:** conservar este bloque solo para transferir las
+fuentes. El train actual usa la
+[selección temporal corregida](../walk_crouch_pronk_speed_partition_v1/CLUSTER_COMMANDS.md).
+No lanzar el SBS solapado de este documento para la ablation lento/rápido.
+
 Durante esta preparación no se ha ejecutado Phase A ni reentrenado expertos. No
 hace falta Isaac Sim para entrenar esta Phase A: el trainer offline usa PyTorch.
 Tampoco necesita copiar los checkpoints RL ni sus referencias; sí todos los HDF5

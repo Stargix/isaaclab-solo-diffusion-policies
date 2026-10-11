@@ -1,0 +1,18 @@
+{
+  "experiment": "walk_crouch_pronk_speed_partition_v1",
+  "walk_min_achieved_speed_mps": 0.6,
+  "pronk_max_hindsight_speed_mps": 0.5,
+  "local_speed_window_ticks": 10,
+  "walk_settling_ticks_after_command_change": 25,
+  "walk_near_rest_exclusion_mps": 0.02,
+  "history_ticks": 8,
+  "hindsight_ticks": 100,
+  "future_action_ticks": 8,
+  "control_dt_s": 0.02,
+  "balance_seed": 50,
+  "demo_shuffle_seed": 42,
+  "balance": "repeat_eligible_anchors_to_largest_source_without_new_episodes",
+  "walk_padded_starts": false,
+  "check_delayed_action_history_extra_tick": true,
+  "pronk_crouch_padded_starts": true
+}

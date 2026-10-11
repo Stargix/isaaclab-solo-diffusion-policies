@@ -1,5 +1,10 @@
 # Phase A: crouch + pronk lento + walk de mayor alcance
 
+**2026-10-12: no lanzar esta mezcla solapada para estudiar selección por ritmo.**
+Se conserva como artefacto histórico/fuentes. El lanzamiento actual está en
+[walk_crouch_pronk_speed_partition_v1](../walk_crouch_pronk_speed_partition_v1/README.md):
+walk rápido con floor real de 0,6 y sin arranques walk desde cero.
+
 Decisión del 2026-10-11. Este experimento sustituye la propuesta pace y **no
 utiliza el experto fast-trot, sprint ni sus datasets**. Se conserva el experimento
 WC/WCT anterior; no se cambian sus actores, rewards, configuración ni datos.
