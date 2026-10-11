@@ -1,3 +1,5 @@
 *.usd filter=lfs diff=lfs merge=lfs -text
 scripts/reinforcement_learning/rsl_rl/experiments/pace_v1/train_cluster.sbs text eol=lf
+scripts/diffusion_policy/experiments/walk_crouch_pronk_v1/protocol.json text eol=lf
+scripts/diffusion_policy/train/configs/walk_crouch_hindsight_geom_profile16_a0_faithful_k10.json text eol=lf
 

@@ -1,0 +1,51 @@
+{
+  "name": "walk_crouch_pronk_phase_a_v1",
+  "schema": 1,
+  "control_rate_hz": 50,
+  "episode_s": 6,
+  "startup_hold_steps": 25,
+  "command_resample_s": 3,
+  "stop_probability": 0.10,
+  "stop_hold_s": 2,
+  "hindsight_steps": 100,
+  "waypoint_time_offsets_s": [0.5, 1.0, 1.5],
+  "target_frames_per_source": 1000000,
+  "train_config": "scripts/diffusion_policy/train/configs/walk_crouch_hindsight_geom_profile16_a0_faithful_k10.json",
+  "sources": {
+    "walk": {
+      "task": "solo12-v0",
+      "checkpoint": "checkpoints/walk_final.pt",
+      "checkpoint_sha256": "e42e1ddd6645ec0b1ddb622cc064e84a521f57fbb3c244259dbae1675db9111a",
+      "seed": 47,
+      "height_m": 0.2932,
+      "forward_min": 0.2,
+      "forward_max": 1.5,
+      "arc_max": 1.0,
+      "reverse_max": 0.7,
+      "lateral_max": 0.5,
+      "lateral_forward_min": 0.15,
+      "lateral_forward_max": 0.5,
+      "yaw_max": 0.45
+    },
+    "crouch": {
+      "reuse": "scripts/diffusion_policy/data/datasets/crouch_phase_a_waypoint_v3.hdf5",
+      "seed": 45,
+      "height_m": 0.1705
+    },
+    "pronk": {
+      "task": "solo12-pronk-v8-v0",
+      "checkpoint": "logs/rsl_rl/solo12_rsl_rl_pronk_runs/2026-10-11_16-18-25_pronk_v8_signed_bounded_exposure_seed42/model_2999.pt",
+      "checkpoint_sha256": "73c572ffa444576e6afad230dac1a6d0fd91db59050469af60737d845679807d",
+      "seed": 48,
+      "height_m": 0.2932,
+      "forward_min": 0.15,
+      "forward_max": 0.5,
+      "arc_max": 0.45,
+      "reverse_max": 0.35,
+      "lateral_max": 0.15,
+      "lateral_forward_min": 0.15,
+      "lateral_forward_max": 0.35,
+      "yaw_max": 0.2
+    }
+  }
+}
