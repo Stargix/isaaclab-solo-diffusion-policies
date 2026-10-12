@@ -1,5 +1,11 @@
 # Phase A: pronk lento, walk rápido, crouch — selección temporal explícita
 
+Siguiente fase: [piloto DPPO con postura nominal, opt-in y sin reward de gait](../../../dppo_diffusion_rl/experiments/wcp_nominal_posture_v1/README.md).
+
+Resultado recibido y probado localmente: [preview del 2026-10-13](PHASE_A_PREVIEW_2026-10-13.md).
+El archivo/contrato es correcto, pero upright lento y rápido no son estables;
+crouch sí. No confundir el gate de datos de abajo con éxito del controlador.
+
 Corrección del 2026-10-12. **Este es el train que debe lanzarse ahora**, no
 el launcher de `walk_crouch_pronk_v1` con soporte solapado. Se conserva ese
 experimento y sus fuentes: no se borran ni se sobrescriben datos anteriores.

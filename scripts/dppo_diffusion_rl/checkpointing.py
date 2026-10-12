@@ -22,11 +22,11 @@ from .ppo import DPPOUpdater
 
 
 DPPO_CHECKPOINT_VERSION = 1
-DPPO_TASK_CONTRACT_VERSION = 8
-# V6/V7/V8 are additive: their historical defaults preserve the earlier task.
+DPPO_TASK_CONTRACT_VERSION = 9
+# V6–V9 are additive: their historical defaults preserve the earlier task.
 # Exact optimizer resume is safe only after the full saved task-config
-# comparison (including pace-consistent preview) succeeds.
-DPPO_RESUME_COMPATIBLE_TASK_CONTRACT_VERSIONS = {5, 6, 7, 8}
+# comparison (including preview and nominal-posture semantics) succeeds.
+DPPO_RESUME_COMPATIBLE_TASK_CONTRACT_VERSIONS = {5, 6, 7, 8, 9}
 DPPO_GOAL_CONTRACTS = {
     "hindsight_geom_avg12": "spatial_hindsight_geometry_ddpm",
     "hindsight_geom_profile16": "spatial_hindsight_height_profile_ddpm",
@@ -130,6 +130,11 @@ def validate_resume_task_config(
     requested.setdefault("path_reward_weight", 1.25)
     requested.setdefault("route_cte_rmse_tolerance_m", None)
     requested.setdefault("pace_consistent_preview", False)
+    # V9 is opt-in: old checkpoints retain pointwise posture and vz cost.
+    for config in (saved, requested):
+        config.setdefault("posture_tracking_mode", "instantaneous")
+        config.setdefault("posture_window_s", 0.4)
+        config.setdefault("vertical_velocity_reward_weight", 0.025)
     mismatches: list[str] = []
     for key, requested_value in requested.items():
         if key not in saved:
@@ -177,6 +182,9 @@ def task_config_from_env_cfg(cfg: Any) -> dict[str, Any]:
         ),
         "profile_height_reward_weight": float(cfg.profile_height_reward_weight),
         "path_reward_weight": float(cfg.path_reward_weight),
+        "posture_tracking_mode": getattr(cfg, "posture_tracking_mode", "instantaneous"),
+        "posture_window_s": float(getattr(cfg, "posture_window_s", 0.4)),
+        "vertical_velocity_reward_weight": float(getattr(cfg, "vertical_velocity_reward_weight", 0.025)),
         "route_cte_rmse_tolerance_m": cfg.route_cte_rmse_tolerance_m,
         "procedural_curvature_knots": int(cfg.procedural_curvature_knots),
         "procedural_max_curvature_rad_m": float(

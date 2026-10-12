@@ -197,6 +197,18 @@ def test_full_quadruped_is_rejected_for_directed_yaw_task():
         DPPOConfig(symmetry_augmentation="quadruped").validate(prediction_horizon=16, execution_offset=8)
 
 
+def test_nominal_posture_critic_tail_is_mirror_invariant():
+    policy = _policy()
+    symmetry = LeftRightAugmentation(policy)
+    p, a, g = torch.randn(3, 2, 30), torch.randn(3, 2, 12), torch.randn(3, 2, 16)
+    tail = torch.randn(3, 17)
+    observation = policy.critic_condition(p, a, g, tail)
+    reflected = symmetry.reflect_critic(p, a, g, observation)
+    torch.testing.assert_close(reflected[:, -3:], tail[:, -3:])
+    torch.testing.assert_close(reflected[:, -17 + 6], -tail[:, 6])
+    torch.testing.assert_close(reflected[:, -17 + 10], -tail[:, 10])
+
+
 def test_pre_update_best_resume_does_not_skip_unapplied_update():
     state = {"algorithm": "dppo", "dppo_task_contract_version": 8,
              "iteration": 7, "total_physics_steps": 100,

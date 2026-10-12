@@ -1568,6 +1568,21 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     conditioning_speed_trace = np.stack(conditioning_speeds_trace, axis=0)
 
     if args_cli.save_timeseries:
+        posture_traces = {}
+        if dppo_task_config.get("posture_tracking_mode", "instantaneous") == "nominal_window":
+            from scripts.dppo_diffusion_rl.posture import causal_posture_trace
+            measured_posture = np.full_like(achieved_heights, np.nan)
+            required_posture = np.full_like(target_heights, np.nan)
+            for i in range(num_envs):
+                valid = trace_valid[:, i]
+                measured_posture[valid, i], required_posture[valid, i] = causal_posture_trace(
+                    achieved_heights[valid, i], target_heights[valid, i],
+                    mode="nominal_window", window_s=float(dppo_task_config["posture_window_s"]), dt=dt,
+                )
+            posture_traces = {
+                "achieved_posture_m": measured_posture,
+                "required_posture_m": required_posture,
+            }
         # Keep the trace opt-in: broad evaluations otherwise only need the
         # compact CSV/JSON summaries.  The path metadata makes this artifact
         # self-contained and avoids reconstructing random-polyline geometry.
@@ -1592,6 +1607,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             base_failure=base_failures,
             physical_sanity_failure=physical_sanity_failures,
             foot_contact=foot_contacts,
+            **posture_traces,
         )
         sensor_body_names = list(getattr(raw_env._contact_sensor, "body_names", ()))
         feet_indices = [int(index) for index in raw_env._feet_body_ids]
@@ -1602,6 +1618,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         )
         trace_metadata = {
             "dt_s": dt,
+            "posture_tracking_mode": dppo_task_config.get("posture_tracking_mode", "instantaneous"),
+            "posture_window_s": float(dppo_task_config.get("posture_window_s", 0.4)),
             "posture_settle_steps": int(args_cli.posture_settle_steps),
             "feet_body_names": feet_body_names,
             "scenarios": [
@@ -1730,6 +1748,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 target_progress_m=float(route_metrics.target_progress_m),
                 target_yaw_rad=float(plan.yaws_w[terminal_index]),
                 target_height_m=float(plan.path_w[terminal_index, 2]),
+                posture_tracking_mode=dppo_task_config.get("posture_tracking_mode", "instantaneous"),
+                posture_window_s=float(dppo_task_config.get("posture_window_s", 0.4)),
                 dt=dt,
                 start_position_xy=rollout_start_pos[i, :2],
                 target_heights_m=target_h if profile_task_active else None,
@@ -1861,11 +1881,18 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             "route_terminal_position_error_m": route_values.get("terminal_position_error_m", math.nan),
             "task_success_applicable": task_success_applicable,
             "task_arrived": task_values.get("arrived", False),
+            "posture_tracking_mode": dppo_task_config.get("posture_tracking_mode", "instantaneous"),
+            "posture_window_s": float(dppo_task_config.get("posture_window_s", 0.4)),
             "task_success": task_values.get("success", False),
             "task_success_time_s": task_values.get("time_s", math.nan),
             "task_success_position_error_m": task_values.get("position_error_m", math.nan),
             "task_success_yaw_error_rad": task_values.get("yaw_error_rad", math.nan),
             "task_success_height_error_m": task_values.get("height_error_m", math.nan),
+            "task_first_arrival_raw_height_error_m": (
+                float(abs(hgts[int(round(float(task_values["time_s"]) / dt)) - 1]
+                          - float(plan.path_w[terminal_index, 2])))
+                if task_values.get("arrived", False) else math.nan
+            ),
             "task_success_mean_speed_error_m_s": task_values.get(
                 "mean_speed_error_m_s", math.nan
             ),
