@@ -46,6 +46,7 @@ COLORS = {
     "walk": "#2878B5",
     "crouch": "#59A14F",
     "sprint": "#E15759",
+    "pronk": "#F28E2B",
 }
 
 
@@ -287,8 +288,7 @@ def audit(args: argparse.Namespace) -> tuple[dict[str, object], dict[str, dict[s
                 goals = []
                 for anchor in local_windows.astype(np.int64):
                     end = int(anchor + args.goal_horizon_steps)
-                    goals.append(
-                        build_goal_vector(
+                    goal = build_goal_vector(
                             root,
                             cumulative,
                             int(anchor),
@@ -297,9 +297,15 @@ def audit(args: argparse.Namespace) -> tuple[dict[str, object], dict[str, dict[s
                             quaternion[anchor],
                             quat_w=quaternion,
                             dt=dt,
-                            goal_representation="hindsight_geom_avg12",
+                            goal_representation=getattr(args, "goal_representation", "hindsight_geom_avg12"),
+                            height_profile_w=obs["desired_base_height"][:, 0],
                         )
-                    )
+                    if len(goal) == 16:
+                        # Project profile16 onto the existing plot layout:
+                        # four XY points, terminal sin/cos yaw, required height,
+                        # achieved average speed. No oscillatory height labels.
+                        goal = goal[[0, 1, 3, 4, 6, 7, 9, 10, 13, 14, 11, 15]]
+                    goals.append(goal)
                 _append(sampled[skill], "goals", np.asarray(goals, dtype=np.float32))
 
             frame_cursor[skill] = frame_stop
@@ -329,6 +335,12 @@ def audit(args: argparse.Namespace) -> tuple[dict[str, object], dict[str, dict[s
             if exact_terminal_xy[skill]
             else np.empty((0, 2), dtype=np.float32)
         )
+        xy_tokens = goals[:, :8].reshape(-1, 4, 2)
+        encoded_length = np.linalg.norm(np.diff(
+            np.concatenate((np.zeros((len(goals), 1, 2), dtype=np.float32), xy_tokens), axis=1),
+            axis=1), axis=-1).sum(axis=1)
+        raw_arc = goals[:, 11] * args.goal_horizon_steps / args.control_rate_hz
+        moving = raw_arc > 0.10  # do not divide tiny stationary sway by near-zero lengths
         skill_summaries[skill] = {
             "demos": int(demo_counts[skill]),
             "frames": int(frame_counts[skill]),
@@ -345,6 +357,9 @@ def audit(args: argparse.Namespace) -> tuple[dict[str, object], dict[str, dict[s
             "desired_height_m": _summary(item["desired_height"]),
             "action_delta_l2": _summary(item["action_delta"]),
             "hindsight_average_speed_mps": _summary(goals[:, 11]),
+            "hindsight_arc_not_resolved_by_four_points_fraction": _summary(
+                (raw_arc[moving] - encoded_length[moving]) / raw_arc[moving]),
+            "hindsight_arc_diagnostic_min_length_m": 0.10,
             "hindsight_terminal_height_m": _summary(goals[:, 10]),
             "hindsight_terminal_distance_m": _summary(np.linalg.norm(goals[:, 6:8], axis=1)),
             "exact_hindsight_terminal_x_m": _summary(terminal_xy[:, 0]),
@@ -373,6 +388,7 @@ def audit(args: argparse.Namespace) -> tuple[dict[str, object], dict[str, dict[s
         "control_rate_hz": args.control_rate_hz,
         "goal_horizon_steps": args.goal_horizon_steps,
         "goal_horizon_s": args.goal_horizon_steps / args.control_rate_hz,
+        "goal_representation": getattr(args, "goal_representation", "hindsight_geom_avg12"),
         "skills": skill_summaries,
     }
     return report, arrays
@@ -438,7 +454,7 @@ def make_plots(
     counts = [int(report["skills"][skill]["frames"]) for skill in skills]
     axes[1, 1].bar(skills, counts, color=[colors[skill] for skill in skills])
     axes[0, 0].set(title="Exact 2 s hindsight speed", xlabel="average achieved path speed [m/s]", ylabel="density")
-    axes[0, 1].set(title="Condition identifiability", xlabel="average achieved path speed [m/s]", ylabel="terminal height [m]")
+    axes[0, 1].set(title="Condition support", xlabel="average achieved path speed [m/s]", ylabel="terminal conditioning height [m]")
     axes[1, 0].set(title="Terminal XY support in current body frame", xlabel="terminal x [m]", ylabel="terminal y [m]")
     axes[1, 0].axis("equal")
     axes[1, 1].set(title="Frames per skill", ylabel="frames")
@@ -456,6 +472,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--expected_skills", nargs="+", default=None)
+    parser.add_argument("--goal_representation", choices=("hindsight_geom_avg12", "hindsight_geom_profile16"),
+                        default="hindsight_geom_avg12")
     parser.add_argument("--max_frames_per_skill", type=int, default=30_000)
     parser.add_argument("--max_windows_per_skill", type=int, default=20_000)
     parser.add_argument("--goal_horizon_steps", type=int, default=100)

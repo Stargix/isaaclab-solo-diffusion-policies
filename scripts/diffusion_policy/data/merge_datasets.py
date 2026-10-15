@@ -19,6 +19,8 @@ Example usage::
 """
 
 import argparse
+import hashlib
+import json
 import os
 from pathlib import Path
 
@@ -156,8 +158,11 @@ def merge_hdf5_files(
     *,
     shuffle_demos: bool = True,
     shuffle_seed: int = 42,
+    link_data: bool = False,
 ) -> None:
     out_path = Path(output_file)
+    if out_path.exists():
+        raise FileExistsError(f"Refusing to replace existing dataset: {out_path}")
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Pass 1: build the unified skill_names table in first-seen order.
@@ -189,7 +194,7 @@ def merge_hdf5_files(
 
     # Pass 2: copy demos, remapping skill_idx and writing unified metadata.
     demo_counter = 0
-    with h5py.File(out_path, "w") as out_f:
+    with h5py.File(out_path, "x") as out_f:
         out_data = out_f.create_group("data")
         out_data.attrs["skill_names"] = np.array(unified_skill_names, dtype="S32")
         # Preserve the alignment convention documented in collect_data.py.
@@ -199,6 +204,19 @@ def merge_hdf5_files(
         )
         out_data.attrs["control_rate_hz"] = 50.0
         out_data.attrs["condition_schema"] = "velocity_xyyaw_plus_desired_base_height_v1"
+        out_data.attrs["storage_mode"] = "relative_external_links" if link_data else "copied"
+        if link_data:
+            provenance = []
+            for path in input_files:
+                digest = hashlib.sha256()
+                with open(path, "rb") as stream:
+                    for block in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(block)
+                provenance.append({"path": Path(os.path.relpath(Path(path).resolve(), out_path.parent.resolve())).as_posix(),
+                                   "sha256": digest.hexdigest()})
+            # Checkpoint dataset hashes now also identify the sealed sources,
+            # not merely an external-link index with mutable targets.
+            out_data.attrs["linked_sources_json"] = json.dumps(provenance, sort_keys=True)
         out_data.attrs["merged_from"] = np.array(
             [str(Path(p).name) for p in input_files], dtype="S64",
         )
@@ -218,9 +236,14 @@ def merge_hdf5_files(
                 new_name = f"demo_{demo_counter}"
                 new_grp = out_data.create_group(new_name)
 
-                in_f.copy(f"data/{demo_name}/obs", new_grp, name="obs")
-                in_f.copy(f"data/{demo_name}/actions", new_grp, name="actions")
-                in_f.copy(f"data/{demo_name}/dones", new_grp, name="dones")
+                for key in ("obs", "actions", "dones", "diagnostics"):
+                    if key not in in_data[demo_name]:
+                        continue
+                    if link_data:
+                        relative = Path(os.path.relpath(Path(path).resolve(), out_path.parent.resolve())).as_posix()
+                        new_grp[key] = h5py.ExternalLink(relative, f"/data/{demo_name}/{key}")
+                    else:
+                        in_f.copy(f"data/{demo_name}/{key}", new_grp, name=key)
 
                 remapped = _remap_skill_idx(
                     in_data[demo_name], src_skills, name_to_unified,
@@ -234,7 +257,9 @@ def merge_hdf5_files(
                     if attr_name in in_data[demo_name].attrs:
                         new_grp.attrs[attr_name] = in_data[demo_name].attrs[attr_name]
                 if "obs" in new_grp:
-                    new_grp.attrs["num_samples"] = new_grp["obs"]["joint_pos"].shape[0]
+                    # Do not dereference external links while their targets are
+                    # already open with potentially different HDF5 access flags.
+                    new_grp.attrs["num_samples"] = in_data[demo_name]["obs"]["joint_pos"].shape[0]
 
                 demo_counter += 1
         finally:
@@ -258,6 +283,8 @@ def main() -> None:
     parser.add_argument("--inputs", nargs="+", required=True,
                         help="Paths to source HDF5 files.")
     parser.add_argument("--output", required=True, help="Path to the merged HDF5 file.")
+    parser.add_argument("--link_data", action="store_true",
+                        help="Use relative external links; transfer sources alongside the merged index.")
     parser.add_argument(
         "--no_shuffle_demos",
         action="store_true",
@@ -280,6 +307,7 @@ def main() -> None:
         args.output,
         shuffle_demos=not args.no_shuffle_demos,
         shuffle_seed=args.shuffle_seed,
+        link_data=args.link_data,
     )
 
 

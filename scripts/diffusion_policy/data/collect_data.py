@@ -64,6 +64,7 @@ from typing import Any, Dict, List, Sequence, Tuple
 import h5py
 import numpy as np
 import torch
+from rsl_rl.runners import OnPolicyRunner  # load native RSL dependencies before Kit
 
 from capability_routes import (
     CapabilityLimits,
@@ -242,6 +243,12 @@ parser.add_argument("--warmup_steps", type=int, default=25,
                     help="Steps to skip at the start of every episode (settling transient, ~0.5s at 50Hz).")
 parser.add_argument("--verbose_filters", action="store_true",
                     help="Print one line per discarded episode. By default only periodic summaries are printed.")
+parser.add_argument("--record_expert_diagnostics", action="store_true",
+                    help="Record optional foot spacing, joint limits/torques and verified flight; not policy inputs.")
+parser.add_argument("--check_self_collisions", action="store_true",
+                    help="Diagnostic collection only: enable actual articulation self collisions.")
+parser.add_argument("--max_sim_steps", type=int, default=0,
+                    help="Abort and close the output if this control-step budget is exhausted before the target (0: unlimited).")
 parser.add_argument("--physics_dr_mode", type=str, choices=["off", "light", "full"], default="light",
                     help=(
                         "Physics domain randomization profile. 'light' keeps DR useful for diffusion data "
@@ -275,7 +282,6 @@ simulation_app = app_launcher.app
 
 # Imports requiring an active simulation.
 import gymnasium as gym  # noqa: E402
-from rsl_rl.runners import OnPolicyRunner  # noqa: E402
 
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper  # noqa: E402
 from isaaclab_tasks.utils.hydra import hydra_task_config  # noqa: E402
@@ -288,13 +294,14 @@ from isaaclab_tasks.utils.hydra import hydra_task_config  # noqa: E402
 # --------------------------------------------------------------------------- #
 SKILL_COMMAND_RANGES: Dict[str, Dict[str, Tuple[float, float]]] = {
     "walk":   {"vx": (-1.5, 1.5), "vy": (-1, 1), "wz": (-1, 1)},
+    "pronk":  {"vx": (-0.65, 0.65), "vy": (-0.25, 0.25), "wz": (-0.25, 0.25)},
     # crouch policy's stable envelope (trained up to +-1.0 / +-0.5 / +-1.0).
     "crouch": {"vx": (-0.75, 0.75), "vy": (-0.5, 0.5), "wz": (-0.5, 0.5)},
     "jump":   {"vx": (-1.2, 1.2),  "vy": (-0.6, 0.6),  "wz": (-0.6, 0.6)},
     "bound":  {"vx": (1.0, 1.5), "vy": (0.0, 0.0), "wz": (0.0, 0.0)},
     "sprint": {"vx": (0.3, 2.0), "vy": (-0.2, 0.2), "wz": (-0.2, 0.2)},
 }
-PHASE_A_SINGLE_SKILLS = frozenset(("walk", "crouch", "sprint"))
+PHASE_A_SINGLE_SKILLS = frozenset(("walk", "crouch", "sprint", "pronk"))
 SHARED_HEIGHT_COMMAND_RANGE = {"vx": (-0.75, 0.75), "vy": (-0.5, 0.5), "wz": (-0.5, 0.5)}
 
 # HDF5 convention string stored as an attribute for downstream consumers.
@@ -342,6 +349,10 @@ def configure_env_for_collection(env_cfg: Any, args: argparse.Namespace) -> None
     recorded observations or perturb the robot with forces the policy cannot
     anticipate (pushes, actuation delays, observation noise, reset-velocity noise).
     """
+    # New expert tasks must activate startup physics DR, not leave their
+    # training-only cohort/curriculum dormant during inference collection.
+    if hasattr(env_cfg, "use_full_difficulty"):
+        env_cfg.use_full_difficulty()
     env_cfg.scene.num_envs = args.num_envs
     env_cfg.seed = args.seed
     env_cfg.sim.device = args.device if args.device is not None else env_cfg.sim.device
@@ -350,6 +361,8 @@ def configure_env_for_collection(env_cfg: Any, args: argparse.Namespace) -> None
     env_cfg.episode_length_s = 6.0
     env_cfg.command_resampling_time_s = 1.0e9
     env_cfg.standing_env_prob = 0.0
+    if getattr(args, "check_self_collisions", False):
+        env_cfg.robot.spawn.articulation_props.enabled_self_collisions = True
 
     # --- Domain Randomization: KEEP events (physics randomization) active. ---
     # EventCfg only randomizes physics (rigid-body material, base mass, joint
@@ -514,7 +527,7 @@ def resample_command(
 def infer_skill_name(checkpoint_path: str) -> str:
     """Map a checkpoint filename to one of the known skill names."""
     name = Path(checkpoint_path).stem.lower()
-    for skill in ("walk", "crouch", "jump", "crab", "bound", "sprint"):
+    for skill in ("walk", "crouch", "pronk", "jump", "crab", "bound", "sprint"):
         if skill in name:
             return skill
     return name
@@ -536,15 +549,30 @@ def query_raw_state(raw_env: Any, joint_ids: slice,
         sel = slice(None)
     else:
         sel = torch.as_tensor(env_mask, dtype=torch.long, device=robot.device)
-    return {
-        "joint_pos":         robot.data.joint_pos[sel, joint_ids].cpu().numpy(),
-        "joint_vel":         robot.data.joint_vel[sel, joint_ids].cpu().numpy(),
+    state = {
+        "joint_pos":         robot.data.joint_pos[sel][:, joint_ids].cpu().numpy(),
+        "joint_vel":         robot.data.joint_vel[sel][:, joint_ids].cpu().numpy(),
         "base_ang_vel":      robot.data.root_ang_vel_b[sel].cpu().numpy(),
         "projected_gravity": robot.data.projected_gravity_b[sel].cpu().numpy(),
         "root_pos_w":        robot.data.root_pos_w[sel].cpu().numpy(),
         "root_quat_w":       robot.data.root_quat_w[sel].cpu().numpy(),
         "command":           raw_env._commands[sel, :3].cpu().numpy(),
     }
+    if getattr(raw_env, "_collection_record_diagnostics", False):
+        from expert_diagnostics import capture_expert_diagnostics
+        state.update(capture_expert_diagnostics(raw_env, sel, joint_ids))
+    return state
+
+
+def refresh_expert_observations(vec_env: Any, raw_env: Any,
+                                state: Dict[str, np.ndarray]) -> Any:
+    """Synchronize teacher input and recorded command after resets/resampling.
+
+    A manually reset articulation invalidates the TensorDict returned by the
+    preceding step, even when its recorded raw state was correctly refreshed.
+    """
+    state["command"] = raw_env._commands[:, :3].detach().cpu().numpy().copy()
+    return vec_env.get_observations()
 
 
 def state_is_fall(state: Dict[str, np.ndarray], env_idx: int,
@@ -831,6 +859,12 @@ class HDF5Writer:
 
         grp.attrs["num_samples"] = len(frames)
         grp.attrs["skills_sequence"] = np.array(skills_sequence, dtype="S32")
+        diagnostic_keys = [key for key in frames[0] if key.startswith("diagnostics_")]
+        if diagnostic_keys:
+            diagnostics = grp.create_group("diagnostics")
+            for key in diagnostic_keys:
+                diagnostics.create_dataset(key.removeprefix("diagnostics_"),
+                                           data=np.stack([frame[key] for frame in frames]))
         if "route_family" in frames[0]:
             grp.attrs["route_family"] = str(frames[0]["route_family"])
 
@@ -1063,6 +1097,10 @@ class CollectionState:
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
 def main(env_cfg: Any, agent_cfg: Any) -> None:
     output_path = _THIS_DIR / "datasets" / args_cli.output_name
+    if output_path.exists():
+        raise FileExistsError(f"Refusing to overwrite existing demonstrations: {output_path}")
+    if args_cli.max_sim_steps < 0:
+        raise ValueError("--max_sim_steps must be nonnegative.")
 
     if args_cli.mode != "single":
         raise ValueError(
@@ -1086,6 +1124,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     env = gym.make(args_cli.task, cfg=env_cfg)
     vec_env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
     raw_env = env.unwrapped
+    raw_env._collection_record_diagnostics = args_cli.record_expert_diagnostics
     device = torch.device(vec_env.unwrapped.device)
     joint_ids = raw_env._joint_ids
 
@@ -1191,6 +1230,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         },
     )
     stats = CollectionStats()
+    writer._data.attrs["policy_input_timing"] = (
+        "synchronous_pre_action_v2"
+        if args_cli.route_profile in {"phase_a", *CLOSED_LOOP_ROUTE_PROFILES}
+        else "legacy_step_observation"
+    )
     print(f"[INFO] Starting collection ({args_cli.mode} mode). Output: {output_path}")
     dr_status = "off" if args_cli.disable_physics_dr else args_cli.physics_dr_mode
     print(f"[INFO] Skills: {skill_names} | DR={dr_status} | blend_steps={args_cli.transition_blend_steps} "
@@ -1225,6 +1269,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             obs = vec_env.get_observations()
         else:
             state_tracker.initialize_references(cached_state, args_cli.desired_base_height)
+            if args_cli.route_profile == "phase_a":
+                obs = refresh_expert_observations(vec_env, raw_env, cached_state)
         # --- 1. Compute actions a_t from the current (time-t) policy obs. --- #
         # Single mode passes the TensorDict (matches rsl_rl play.py); chained mode
         # passes the "policy" obs tensor so it can be masked per active skill.
@@ -1353,6 +1399,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
         cached_state = state_next
         steps_collected += 1
+        if args_cli.max_sim_steps and steps_collected >= args_cli.max_sim_steps and writer.total_steps < args_cli.num_steps:
+            writer.close(stats)
+            vec_env.close()
+            raise RuntimeError(f"Collection budget exhausted: saved {writer.total_steps}/{args_cli.num_steps} frames. "
+                               "Inspect rejection statistics; this output is not a completed dataset.")
         if steps_collected % 500 == 0:
             print(f"[STATUS] sim_steps={steps_collected}, target_steps={args_cli.num_steps}, {stats.summary()}")
 
@@ -1377,7 +1428,7 @@ def _make_frame(
     guidance_pos_w: np.ndarray | None = None,
 ) -> Dict[str, np.ndarray]:
     """Build an aligned recorded frame from the raw state of one env."""
-    return {
+    frame = {
         "joint_pos":         state["joint_pos"][env_idx],
         "joint_vel":         state["joint_vel"][env_idx],
         "base_ang_vel":      state["base_ang_vel"][env_idx],
@@ -1410,6 +1461,9 @@ def _make_frame(
         "actions":           action,
         "skill_idx":         np.int8(skill_idx),
     }
+    frame.update({key: value[env_idx] for key, value in state.items()
+                  if key.startswith("diagnostics_")})
+    return frame
 
 
 def _finalize_episode(env_idx: int, buffers: List[List[Dict[str, np.ndarray]]],
