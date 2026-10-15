@@ -22,6 +22,12 @@ import torch
 import h5py
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_PROJECT_ROOT))
+import scripts as _project_scripts
+
+_project_scripts.__path__ = [str(_PROJECT_ROOT / "scripts")]
+if _project_scripts.__spec__ is not None:
+    _project_scripts.__spec__.submodule_search_locations = _project_scripts.__path__
 _RSL_RL_DIR = _PROJECT_ROOT / "scripts" / "reinforcement_learning" / "rsl_rl"
 if str(_RSL_RL_DIR) not in sys.path:
     sys.path.insert(0, str(_RSL_RL_DIR))
@@ -143,6 +149,10 @@ parser.add_argument(
     help="Executed actions per sample; defaults to the saved RL training value or 8 for Phase A.",
 )
 parser.add_argument("--guidance_scale", type=float, default=1.0)
+parser.add_argument(
+    "--latent_reference_mode", choices=("checkpoint", "gaussian", "initial"), default=None,
+    help="Latent-noise checkpoint only: its actor, raw Gaussian noise, or bounded initial actor.",
+)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument(
     "--deterministic_resets", action="store_true",
@@ -915,6 +925,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             "spatial_hindsight_height_profile_deterministic_chunk_bc",
         ),
         allow_dppo=True,
+        allow_latent_noise_ppo=True,
     )
     config = checkpoint["config"]
     dppo_task_contract_version = int(checkpoint.get("dppo_task_contract_version", 0))
@@ -928,6 +939,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             if checkpoint.get("algorithm") == "dppo"
             else int(checkpoint["gaussian_ppo_config"]["exec_horizon"])
             if checkpoint.get("algorithm") == "gaussian_chunk_ppo"
+            else int(checkpoint["latent_ppo_config"]["exec_horizon"])
+            if checkpoint.get("algorithm") == "latent_noise_ppo"
             else 8
         )
     if args_cli.path_height is not None and args_cli.path_heights is not None:
@@ -1021,10 +1034,34 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         raise ValueError("The randomized ood_* and sweep_* families require --route_bank.")
     num_envs = len(scenarios)
     print(f"[INFO] Evaluating {num_envs} vectorized scenarios in parallel.")
+    is_latent_backend = checkpoint.get("algorithm") == "latent_noise_ppo"
+    latent_generator = None
     deterministic_backend = checkpoint.get("policy_backend") == "deterministic_chunk" or (
         checkpoint.get("policy_kind") == "spatial_hindsight_height_profile_deterministic_chunk_bc"
     )
-    if deterministic_backend:
+    if is_latent_backend:
+        expected_steps = int(checkpoint["latent_policy_config"]["inference_steps"])
+        if args_cli.num_inference_steps not in (None, expected_steps):
+            raise ValueError(f"Latent DDIM is pinned to {expected_steps} steps.")
+        if args_cli.guidance_scale != 1.0 or args_cli.deployment_sampler == "graph":
+            raise ValueError("Latent DDIM requires guidance 1 and the eager sampler.")
+        if args_cli.latent_reference_mode is not None and args_cli.latent_reference_mode not in {
+            "checkpoint", "gaussian", "initial"
+        }:
+            raise ValueError("Unknown latent reference mode.")
+        if str(_PROJECT_ROOT) not in sys.path:
+            sys.path.insert(0, str(_PROJECT_ROOT))
+        from scripts.latent_noise_rl.checkpointing import build_inference_policy
+        policy = build_inference_policy(checkpoint, device)
+        args_cli.latent_reference_mode = args_cli.latent_reference_mode or "checkpoint"
+        policy.set_reference_mode(args_cli.latent_reference_mode)
+        latent_generator = torch.Generator(device=device).manual_seed(int(args_cli.seed) + 99173)
+        inference_steps = expected_steps
+        policy_cfg = _model_cfg_from_checkpoint(config)
+        print(f"[INFO] Frozen DDIM latent actor, mode={args_cli.latent_reference_mode}, K={inference_steps}.")
+    elif args_cli.latent_reference_mode is not None:
+        raise ValueError("--latent_reference_mode is valid only for latent_noise_ppo checkpoints.")
+    elif deterministic_backend:
         if args_cli.num_inference_steps is not None:
             print("[WARN] --num_inference_steps is ignored for deterministic_chunk checkpoints.")
         inference_steps = None
@@ -1034,7 +1071,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         policy_cfg = _model_cfg_from_checkpoint(config)
         policy_cfg.num_inference_steps = inference_steps
 
-    if deterministic_backend:
+    if is_latent_backend:
+        pass  # Explicit latent policy construction is complete.
+    elif deterministic_backend:
         if checkpoint.get("algorithm") not in {"deterministic_chunk_bc", "gaussian_chunk_ppo"}:
             raise ValueError("deterministic_chunk requires a BC or Gaussian PPO checkpoint.")
         policy = Solo12DeterministicChunkPolicy(policy_cfg)
@@ -1061,8 +1100,16 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         policy.to(device).eval()
 
     env_cfg.scene.num_envs = num_envs
+    if is_latent_backend:
+        for key, value in dppo_task_config.items():
+            if key == "episode_length_s":
+                continue  # Evaluator keeps its long episode horizon.
+            if hasattr(env_cfg, key):
+                setattr(env_cfg, key, value)
     inference_sampler = policy
     if args_cli.deployment_sampler == "graph":
+        if is_latent_backend:
+            raise ValueError("The pinned CUDA graph sampler supports only the WC-v3 DPPO checkpoint.")
         if args_cli.exec_horizon != 4 or args_cli.guidance_scale != 1.0:
             raise ValueError("Pinned graph deployment requires four actions and guidance 1")
         from scripts.diffusion_policy.runtime.contract import validate_checkpoint_contract, WC_V3_SHA256
@@ -1315,11 +1362,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         for settle_step in range(args_cli.posture_settle_steps):
             with torch.inference_mode():
                 if settle_chunk is None or settle_chunk_index == 0:
+                    predict_kwargs = {"guidance_scale": args_cli.guidance_scale}
+                    if is_latent_backend:
+                        predict_kwargs["generator"] = latent_generator
                     full_trajectory = inference_sampler.predict_action_denormalized(
-                        proprio_buffer,
-                        action_buffer,
-                        goal_buffer,
-                        guidance_scale=args_cli.guidance_scale,
+                        proprio_buffer, action_buffer, goal_buffer, **predict_kwargs
                     )
                     settle_chunk = inference_sampler.executable_chunk(
                         full_trajectory, args_cli.exec_horizon
@@ -1371,7 +1418,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     # as free route progress.
     rollout_start_pos = raw_env._robot.data.root_pos_w.cpu().numpy().copy()
     dynamic_speed_budget = bool(
-        checkpoint.get("algorithm") in {"dppo", "gaussian_chunk_ppo"}
+        checkpoint.get("algorithm") in {"dppo", "gaussian_chunk_ppo", "latent_noise_ppo"}
         and int(checkpoint.get("dppo_task_contract_version", 1)) >= 3
     )
     if args_cli.pace_budget_mode != "checkpoint" and not dynamic_speed_budget:
@@ -1636,11 +1683,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             )
         with torch.inference_mode():
             if current_chunk is None or chunk_index == 0:
+                predict_kwargs = {"guidance_scale": args_cli.guidance_scale}
+                if is_latent_backend:
+                    predict_kwargs["generator"] = latent_generator
                 full_trajectory = inference_sampler.predict_action_denormalized(
-                    proprio_buffer,
-                    action_buffer,
-                    goal_buffer,
-                    guidance_scale=args_cli.guidance_scale,
+                    proprio_buffer, action_buffer, goal_buffer, **predict_kwargs
                 )
                 current_chunk = inference_sampler.executable_chunk(full_trajectory, args_cli.exec_horizon)
 
@@ -2597,6 +2644,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         "dataset_sha256": dataset_hashes(config),
         "policy_kind": checkpoint.get("policy_kind", "unknown"),
         "policy_backend": checkpoint.get("policy_backend", "diffusion"),
+        "latent_reference_mode": args_cli.latent_reference_mode,
+        "diffusion_sampler": "ddim_eta_0" if is_latent_backend else None,
         "dppo_task_contract_version": dppo_task_contract_version,
         "pace_budget_mode": effective_pace_budget_mode,
         "scalar_only_intervention": scalar_only_intervention,

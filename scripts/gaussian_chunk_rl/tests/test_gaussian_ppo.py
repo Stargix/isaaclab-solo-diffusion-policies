@@ -251,5 +251,5 @@ def test_evaluator_uses_gaussian_horizon_and_dynamic_budget():
     source = Path("scripts/diffusion_policy/evaluate_policy.py").read_text(encoding="utf-8")
     ast.parse(source)
     assert 'checkpoint["gaussian_ppo_config"]["exec_horizon"]' in source
-    assert 'checkpoint.get("algorithm") in {"dppo", "gaussian_chunk_ppo"}' in source
+    assert 'checkpoint.get("algorithm") in {"dppo", "gaussian_chunk_ppo", "latent_noise_ppo"}' in source
     assert 'not in {"deterministic_chunk_bc", "gaussian_chunk_ppo"}' in source

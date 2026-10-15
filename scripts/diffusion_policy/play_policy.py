@@ -24,6 +24,12 @@ import numpy as np
 import torch
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_PROJECT_ROOT))
+import scripts as _project_scripts
+
+_project_scripts.__path__ = [str(_PROJECT_ROOT / "scripts")]
+if _project_scripts.__spec__ is not None:
+    _project_scripts.__spec__.submodule_search_locations = _project_scripts.__path__
 _UPSTREAM_RSL_SCRIPT_DIR = _PROJECT_ROOT / "scripts" / "reinforcement_learning" / "rsl_rl"
 if str(_UPSTREAM_RSL_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_UPSTREAM_RSL_SCRIPT_DIR))
@@ -34,6 +40,11 @@ parser = argparse.ArgumentParser(description="Run closed-loop Diffusion Policy e
 parser.add_argument("--task", type=str, default="solo12-v0")
 parser.add_argument("--checkpoint", type=str, required=True)
 parser.add_argument("--guidance_scale", type=float, default=1.0, help="CFG scale (1.0 = faster, no double forward).")
+parser.add_argument("--seed", type=int, default=42, help="Seed for reproducible latent draws and environment reset.")
+parser.add_argument(
+    "--latent_reference_mode", choices=("checkpoint", "gaussian", "initial"), default=None,
+    help="Latent-noise checkpoint only: its actor, raw Gaussian noise, or bounded initial actor.",
+)
 parser.add_argument("--num_envs", type=int, default=1)
 parser.add_argument("--num_inference_steps", type=int, default=None, help="Denoising steps; default from checkpoint.")
 parser.add_argument(
@@ -657,12 +668,15 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         device,
         expected_policy_kind=("spatial_time_preview_ddpm", "spatial_reference_path_ddpm", "holonomic_reference_path_ddpm", "path_guidance_terminal_ddpm", "spatial_hindsight_geometry_ddpm", "spatial_hindsight_height_profile_ddpm"),
         allow_dppo=True,
+        allow_latent_noise_ppo=True,
     )
     config_dict = checkpoint["config"]
     if args_cli.exec_horizon is None:
         args_cli.exec_horizon = (
             int(checkpoint["dppo_config"]["exec_horizon"])
             if checkpoint.get("algorithm") == "dppo"
+            else int(checkpoint["latent_ppo_config"]["exec_horizon"])
+            if checkpoint.get("algorithm") == "latent_noise_ppo"
             else 8
         )
     print(
@@ -670,14 +684,35 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         f"goal_source={config_dict['dataset'].get('goal_source', 'achieved')}"
     )
     normalizer_stats = NormalizerStats.from_dict(checkpoint["normalizer_stats"])
-    infer_steps = resolve_inference_steps(args_cli.num_inference_steps, config_dict["diffusion"])
-    policy_cfg = _model_cfg_from_checkpoint(config_dict)
+    is_latent_backend = checkpoint.get("algorithm") == "latent_noise_ppo"
+    latent_generator = None
+    if is_latent_backend:
+        infer_steps = int(checkpoint["latent_policy_config"]["inference_steps"])
+        if args_cli.num_inference_steps not in (None, infer_steps):
+            raise ValueError(f"Latent DDIM is pinned to {infer_steps} inference steps.")
+        if args_cli.guidance_scale != 1.0 or args_cli.compile_policy or args_cli.torchscript_denoiser:
+            raise ValueError("Latent DDIM requires guidance 1 without compile or TorchScript overrides.")
+        if str(_PROJECT_ROOT) not in sys.path:
+            sys.path.insert(0, str(_PROJECT_ROOT))
+        from scripts.latent_noise_rl.checkpointing import build_inference_policy
+        policy = build_inference_policy(checkpoint, device)
+        args_cli.latent_reference_mode = args_cli.latent_reference_mode or "checkpoint"
+        policy.set_reference_mode(args_cli.latent_reference_mode)
+        latent_generator = torch.Generator(device=device).manual_seed(args_cli.seed + 99173)
+        policy_cfg = _model_cfg_from_checkpoint(config_dict)
+    else:
+        if args_cli.latent_reference_mode is not None:
+            raise ValueError("--latent_reference_mode is valid only for latent_noise_ppo checkpoints.")
+        infer_steps = resolve_inference_steps(args_cli.num_inference_steps, config_dict["diffusion"])
+        policy_cfg = _model_cfg_from_checkpoint(config_dict)
     policy_cfg.num_inference_steps = infer_steps
     goal_horizon_steps = args_cli.goal_horizon_steps or config_dict["dataset"]["goal_horizon_steps"]
     waypoint_time_offsets_s = tuple(config_dict["dataset"]["waypoint_time_offsets_s"])
     goal_representation = config_dict["dataset"].get("goal_representation", "path11")
 
-    if checkpoint.get("algorithm") == "dppo":
+    if is_latent_backend:
+        pass  # Built above from the explicit latent checkpoint backend.
+    elif checkpoint.get("algorithm") == "dppo":
         repository_root = Path(__file__).resolve().parents[2]
         if str(repository_root) not in sys.path:
             sys.path.insert(0, str(repository_root))
@@ -723,6 +758,14 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         raise ValueError(f"exec_horizon must be in [1, {future_horizon}].")
 
     env_cfg.scene.num_envs = args_cli.num_envs
+    if is_latent_backend:
+        for key, value in checkpoint.get("dppo_task_config", {}).items():
+            if key == "episode_length_s":
+                continue  # Playback uses its existing long episode horizon.
+            if hasattr(env_cfg, key):
+                setattr(env_cfg, key, value)
+    if hasattr(env_cfg, "seed"):
+        env_cfg.seed = args_cli.seed
     env_cfg.sim.device = str(device)
     env_cfg.episode_length_s = 1.0e9
     if getattr(env_cfg, "events", None):
@@ -804,7 +847,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         device=device,
     )
     dynamic_speed_budget = bool(
-        checkpoint.get("algorithm") == "dppo"
+        checkpoint.get("algorithm") in {"dppo", "latent_noise_ppo"}
         and int(checkpoint.get("dppo_task_contract_version", 1)) >= 3
     )
     speed_budget_max_mps = float(
@@ -834,11 +877,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             if device.type == "cuda":
                 torch.cuda.synchronize()
             t0 = time.perf_counter()
+            predict_kwargs = {"guidance_scale": args_cli.guidance_scale}
+            if is_latent_backend:
+                predict_kwargs["generator"] = latent_generator
             _ = policy.predict_action_denormalized(
-                proprio_buffer,
-                action_buffer,
-                goal_buffer,
-                guidance_scale=args_cli.guidance_scale,
+                proprio_buffer, action_buffer, goal_buffer, **predict_kwargs
             )
             if device.type == "cuda":
                 torch.cuda.synchronize()
@@ -899,11 +942,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 if device.type == "cuda":
                     torch.cuda.synchronize()
                 t0 = time.perf_counter()
+                predict_kwargs = {"guidance_scale": args_cli.guidance_scale}
+                if is_latent_backend:
+                    predict_kwargs["generator"] = latent_generator
                 full_trajectory = policy.predict_action_denormalized(
-                    proprio_buffer,
-                    action_buffer,
-                    goal_buffer,
-                    guidance_scale=args_cli.guidance_scale,
+                    proprio_buffer, action_buffer, goal_buffer, **predict_kwargs
                 )
                 actions_chunk = policy.executable_chunk(full_trajectory, args_cli.exec_horizon)
                 if device.type == "cuda":

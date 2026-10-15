@@ -121,6 +121,8 @@ tests/
 !scripts/dppo_diffusion_rl/tests/**
 !scripts/gaussian_chunk_rl/tests/
 !scripts/gaussian_chunk_rl/tests/**
+!scripts/latent_noise_rl/tests/
+!scripts/latent_noise_rl/tests/**
 **/__pycache__/
 
 # Docker history
@@ -136,6 +138,7 @@ scripts/diffusion_policy/data/datasets/
 # Generated closed-loop evaluation and dataset-coverage artifacts.
 # Compact, publication-facing summaries belong under research_artifacts/.
 scripts/**/evaluations/
+scripts/latent_noise_rl/analysis/
 scripts/diffusion_policy/data/coverage/
 scripts/diffusion_policy/data/audits/
 
