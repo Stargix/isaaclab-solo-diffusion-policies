@@ -30,6 +30,9 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="Evaluate the path-following Diffusion Policy.")
 parser.add_argument("--task", type=str, default="solo12-v0")
+parser.add_argument("--deployment_sampler", choices=("native", "graph"), default="native",
+                    help="Opt-in pinned WC-v3 FP32/K10 graph; historical default unchanged.")
+parser.add_argument("--deployment_perturbation", choices=("nominal", "mass_friction", "lateral_impulse"), default="nominal")
 parser.add_argument("--checkpoint", type=str, required=True)
 parser.add_argument("--output_dir", type=str, default=None)
 parser.add_argument("--speeds", type=float, nargs="+", default=(0.2, 0.4, 0.6, 0.8, 1.0))
@@ -160,13 +163,28 @@ parser.add_argument(
     help="Save per-step route progress, tangent speed, height and validity for temporal-allocation analysis.",
 )
 parser.add_argument(
+    "--runtime_fixture_output_dir", type=str, default=None,
+    help="Opt-in WC-v3 batch=1 oracle snapshots for same-backend runtime parity.",
+)
+parser.add_argument(
+    "--runtime_fixture_max_samples", type=int, default=12,
+    help="Maximum evenly spaced policy replans saved when --runtime_fixture_output_dir is set.",
+)
+parser.add_argument(
+    "--runtime_fixture_sequential_steps", type=int, default=0,
+    help=("Also capture every step from reset for a contiguous controller replay. "
+          "Use 40 or more; this replaces the distributed snapshot schedule."),
+)
+parser.add_argument(
     "--pace_budget_mode",
-    choices=("checkpoint", "dynamic", "frozen", "shuffled"),
+    choices=("checkpoint", "dynamic", "frozen", "shuffled", "scalar_frozen", "scalar_shuffled"),
     default="checkpoint",
     help=(
         "Evaluation-only intervention for DPPO contracts with a remaining-route pace budget. "
         "checkpoint preserves embedded behavior; dynamic is an explicit alias; frozen holds "
-        "the initial requested pace; shuffled permutes initial pace across vectorized scenarios."
+        "the initial requested pace; shuffled permutes initial pace across vectorized scenarios. "
+        "scalar_frozen/scalar_shuffled replace only the last profile16 goal value, "
+        "leaving geometry, yaw and height at their normal same-state values."
     ),
 )
 parser.add_argument(
@@ -566,6 +584,7 @@ def compute_vectorized_goals(
     speed_budget_max_mps: float | None = None,
     pace_consistent_preview: bool = False,
     conditioning_speed_override: np.ndarray | None = None,
+    scalar_speed_override: np.ndarray | None = None,
 ) -> torch.Tensor:
     robot = raw_env._robot
     pos_w = robot.data.root_pos_w.cpu().numpy()
@@ -750,6 +769,9 @@ def compute_vectorized_goals(
                 conditioning_speed_override, dtype=goals_tensor.dtype, device=device
             )
         goals_tensor[:, -1] = final_speed_budget
+    if scalar_speed_override is not None:
+        from evaluation.pace_intervention import replace_pace_scalar
+        goals_tensor = replace_pace_scalar(goals_tensor, scalar_speed_override)
     return goals_tensor
 
 
@@ -1039,6 +1061,16 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         policy.to(device).eval()
 
     env_cfg.scene.num_envs = num_envs
+    inference_sampler = policy
+    if args_cli.deployment_sampler == "graph":
+        if args_cli.exec_horizon != 4 or args_cli.guidance_scale != 1.0:
+            raise ValueError("Pinned graph deployment requires four actions and guidance 1")
+        from scripts.diffusion_policy.runtime.contract import validate_checkpoint_contract, WC_V3_SHA256
+        from scripts.diffusion_policy.runtime.cuda_graph import CudaGraphDPPOSampler
+        validate_checkpoint_contract(checkpoint)
+        if hashlib.sha256(Path(args_cli.checkpoint).read_bytes()).hexdigest() != WC_V3_SHA256:
+            raise ValueError("Graph deployment gate requires the pinned WC-v3 actor")
+        inference_sampler = CudaGraphDPPOSampler(policy, batch_size=num_envs)
     env_cfg.sim.device = str(device)
     env_cfg.episode_length_s = 1.0e9
     if hasattr(env_cfg, "seed"):
@@ -1100,6 +1132,12 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
     # Initialize environment and get spawn points
     vec_env.reset()
+    from scripts.diffusion_policy.sim2sim.perturbations import configure_isaac, impulse_isaac
+    physical_perturbation = {"protocol": "nominal", "unchanged": True}
+    if args_cli.deployment_perturbation != "nominal" or args_cli.deployment_sampler == "graph":
+        physical_perturbation = configure_isaac(raw_env, args_cli.deployment_perturbation)
+    with open(output_dir / "deployment_protocol.json", "w", encoding="utf-8") as f:
+        json.dump({"sampler": args_cli.deployment_sampler, "physical": physical_perturbation}, f, indent=2)
     start_pos = raw_env._robot.data.root_pos_w.cpu().numpy()
     start_quat = raw_env._robot.data.root_quat_w.cpu().numpy()
 
@@ -1277,13 +1315,13 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         for settle_step in range(args_cli.posture_settle_steps):
             with torch.inference_mode():
                 if settle_chunk is None or settle_chunk_index == 0:
-                    full_trajectory = policy.predict_action_denormalized(
+                    full_trajectory = inference_sampler.predict_action_denormalized(
                         proprio_buffer,
                         action_buffer,
                         goal_buffer,
                         guidance_scale=args_cli.guidance_scale,
                     )
-                    settle_chunk = policy.executable_chunk(
+                    settle_chunk = inference_sampler.executable_chunk(
                         full_trajectory, args_cli.exec_horizon
                     )
                 action = settle_chunk[:, settle_chunk_index]
@@ -1377,19 +1415,162 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         "dynamic" if args_cli.pace_budget_mode == "checkpoint" and dynamic_speed_budget
         else args_cli.pace_budget_mode
     )
-    if effective_pace_budget_mode == "shuffled":
+
+    runtime_fixture_writer = None
+    if args_cli.runtime_fixture_output_dir is not None:
+        if checkpoint.get("algorithm") != "dppo" or goal_representation != "hindsight_geom_profile16":
+            raise ValueError("Runtime oracle capture is currently pinned to the WC-v3 DPPO profile16 actor.")
+        if num_envs != 1:
+            raise ValueError("Runtime oracle capture requires exactly one scenario per evaluator process.")
+        if args_cli.runtime_fixture_max_samples < 10 and not args_cli.runtime_fixture_sequential_steps:
+            raise ValueError("Runtime oracle capture needs at least 10 distributed snapshots for the parity gate.")
+        if args_cli.runtime_fixture_sequential_steps < 0:
+            raise ValueError("--runtime_fixture_sequential_steps must be non-negative.")
+        if args_cli.exec_horizon != 4 or int(checkpoint["dppo_config"]["inference_steps"]) != 10:
+            raise ValueError("Runtime oracle capture requires the pinned DPPO K=10 / exec4 contract.")
+        if pace_consistent_preview:
+            raise ValueError("WC-v3 oracle capture requires the checkpoint's pace_consistent_preview=False.")
+        if args_cli.pace_budget_mode != "checkpoint":
+            raise ValueError("Oracle fixtures must preserve the checkpoint's native pace-budget behavior.")
+        from scripts.diffusion_policy.runtime.fixtures import RuntimeFixtureWriter
+
+        joint_ids_value = raw_env._joint_ids
+        route_joint_ids = (
+            joint_ids_value.detach().cpu().numpy().astype(int).reshape(-1).tolist()
+            if isinstance(joint_ids_value, torch.Tensor)
+            else np.asarray(joint_ids_value, dtype=int).reshape(-1).tolist()
+        )
+        configured_joint_names = list(getattr(raw_env.cfg, "joint_names", []))
+        robot_joint_names = list(getattr(raw_env._robot, "joint_names", configured_joint_names))
+        if configured_joint_names and len(configured_joint_names) == len(route_joint_ids):
+            ordered_joint_names = configured_joint_names
+        elif robot_joint_names and len(robot_joint_names) > max(route_joint_ids):
+            ordered_joint_names = [robot_joint_names[index] for index in route_joint_ids]
+        else:
+            raise ValueError("Could not record an unambiguous joint-name mapping for the runtime fixture.")
+        from scripts.diffusion_policy.runtime.controller import validate_joint_mapping
+
+        ordered_joint_names = list(validate_joint_mapping(ordered_joint_names))
+        q_offset = raw_env._q_offset_action_and_obs[0].detach().cpu().numpy().astype(np.float32)
+        actuator_parameters = {}
+        for actuator_name, actuator_cfg in raw_env.cfg.robot.actuators.items():
+            actuator_parameters[str(actuator_name)] = {
+                field: getattr(actuator_cfg, field, None)
+                for field in (
+                    "joint_names_expr", "effort_limit_sim", "velocity_limit_sim",
+                    "stiffness", "damping", "friction", "armature",
+                )
+            }
+        articulation_props = raw_env.cfg.robot.spawn.articulation_props
+        rigid_props = raw_env.cfg.robot.spawn.rigid_props
+        terrain_material = raw_env.cfg.terrain.physics_material
+        joint_pos_limits = getattr(raw_env._robot.data, "soft_joint_pos_limits", None)
+        joint_pos_limits_action_order = (
+            joint_pos_limits[0, joint_ids].detach().cpu().numpy().tolist()
+            if isinstance(joint_pos_limits, torch.Tensor) and joint_pos_limits.ndim == 3
+            else None
+        )
+        joint_vel_limits = getattr(raw_env._robot.data, "soft_joint_vel_limits", None)
+        joint_vel_limits_action_order = (
+            joint_vel_limits[0, joint_ids].detach().cpu().numpy().tolist()
+            if isinstance(joint_vel_limits, torch.Tensor) and joint_vel_limits.ndim == 2
+            else None
+        )
+        env_config = {
+            "task": args_cli.task,
+            "env_config_class": type(raw_env.cfg).__name__,
+            "policy_dt_s": dt,
+            "physics_dt_s": float(raw_env.cfg.sim.dt),
+            "decimation": int(raw_env.cfg.decimation),
+            "action_scale": float(raw_env.cfg.action_scale),
+            "kp": float(raw_env.cfg.kp),
+            "kd": float(raw_env.cfg.kd),
+            "joint_names_in_action_order": ordered_joint_names,
+            "joint_ids_in_asset": route_joint_ids,
+            "q_offset_rad": q_offset.tolist(),
+            "wrapper_clip_actions": agent_cfg.clip_actions,
+            "actuation_delay_range_after_eval_override": list(getattr(raw_env.cfg, "actuation_delay_range", ())),
+            "action_noise_model_enabled": bool(getattr(raw_env.cfg, "action_noise_model", None)),
+            "initial_position": getattr(raw_env.cfg, "initial_position", None),
+            "terrain_type_after_eval_override": str(getattr(raw_env.cfg.terrain, "terrain_type", "unknown")),
+            "events_disabled_by_evaluator": getattr(raw_env.cfg, "events", None) is None,
+            "actuators": actuator_parameters,
+            "articulation_properties": {
+                field: getattr(articulation_props, field, None)
+                for field in ("enabled_self_collisions", "solver_position_iteration_count",
+                              "solver_velocity_iteration_count")
+            },
+            "rigid_body_properties": {
+                field: getattr(rigid_props, field, None)
+                for field in ("disable_gravity", "linear_damping", "angular_damping",
+                              "max_depenetration_velocity")
+            },
+            "terrain_contact_material": {
+                field: getattr(terrain_material, field, None)
+                for field in ("static_friction", "dynamic_friction", "restitution",
+                              "friction_combine_mode", "restitution_combine_mode",
+                              "compliant_contact_stiffness", "compliant_contact_damping")
+            },
+            "joint_position_limits_rad_action_order": joint_pos_limits_action_order,
+            "joint_velocity_limits_rad_s_action_order": joint_vel_limits_action_order,
+            "warmup_steps": max(args_cli.warmup_steps, policy_cfg.history + 1),
+            "posture_settle_steps": args_cli.posture_settle_steps,
+            "deterministic_resets": bool(args_cli.deterministic_resets),
+        }
+        runtime_fixture_writer = RuntimeFixtureWriter(
+            args_cli.runtime_fixture_output_dir,
+            metadata={
+                "checkpoint": str(checkpoint_path),
+                "checkpoint_sha256": sha256_file(checkpoint_path),
+                "git_commit": current_git_commit(),
+                "device": str(device),
+                "dtype": str(next(policy.parameters()).dtype),
+                "task": args_cli.task,
+                "goal_representation": goal_representation,
+                "goal_horizon_steps": int(goal_horizon_steps),
+                "exec_horizon": int(args_cli.exec_horizon),
+                "inference_steps": int(checkpoint["dppo_config"]["inference_steps"]),
+                "finetune_denoising_steps": int(checkpoint["dppo_config"]["finetune_denoising_steps"]),
+                "training_exploration": False,
+                "guidance_scale": float(args_cli.guidance_scale),
+                "dynamic_speed_budget": dynamic_speed_budget,
+                "speed_budget_max_mps": speed_budget_max_mps,
+                "pace_consistent_preview": pace_consistent_preview,
+                "speed_budget_start_arc_m": speed_budget_start_arc.tolist(),
+                "speed_budget_target_arc_m": speed_budget_target_arc.tolist(),
+                "desired_mean_speed_mps": speeds.tolist(),
+                "scenario": vars(scenarios[0]),
+                "environment": env_config,
+            },
+            duration_steps=duration_steps,
+            exec_horizon=int(args_cli.exec_horizon),
+            max_samples=args_cli.runtime_fixture_max_samples,
+            num_envs=num_envs,
+            sequential_steps=args_cli.runtime_fixture_sequential_steps,
+        )
+        print(
+            f"[INFO] Runtime oracle capture enabled: {args_cli.runtime_fixture_output_dir} "
+            f"({len(runtime_fixture_writer.steps)} snapshots)."
+        )
+    scalar_only_intervention = effective_pace_budget_mode in {"scalar_frozen", "scalar_shuffled"}
+    if scalar_only_intervention and (not dynamic_speed_budget or goal_representation != "hindsight_geom_profile16"):
+        raise ValueError("Scalar-only pace diagnostics require the frozen profile16 budget actor")
+    if effective_pace_budget_mode in {"shuffled", "scalar_shuffled"}:
         # Preserve the exact marginal pace distribution while breaking its
         # pairing to route/height conditions.  A cyclic shift would be nearly
         # inert because vectorized scenarios are often ordered by speed.
         conditioning_speed_override = np.random.default_rng(args_cli.seed + 91_027).permutation(
             speeds.astype(np.float32)
         )
-    elif effective_pace_budget_mode == "frozen":
+    elif effective_pace_budget_mode in {"frozen", "scalar_frozen"}:
         # The remaining-speed budget equals requested pace at reset.
         conditioning_speed_override = speeds.astype(np.float32).copy()
     else:
         conditioning_speed_override = None
-    if effective_pace_budget_mode in {"frozen", "shuffled"}:
+    scalar_speed_override = conditioning_speed_override if scalar_only_intervention else None
+    if scalar_only_intervention:
+        conditioning_speed_override = None
+    if effective_pace_budget_mode in {"frozen", "shuffled", "scalar_frozen", "scalar_shuffled"}:
         print(f"[INFO] Evaluation-only pace intervention: {effective_pace_budget_mode}.")
 
     # Track metrics
@@ -1424,17 +1605,48 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
     print("[INFO] Starting closed-loop evaluation...")
     for step in range(duration_steps):
+        if args_cli.deployment_sampler == "graph" and step % 20 == 0:
+            with open(output_dir / "deployment_heartbeat.json", "w", encoding="utf-8") as f:
+                json.dump({"active": True, "step": step, "wall_time_s": time.time(), "num_envs": num_envs}, f)
+        fixture_record = None
+        if runtime_fixture_writer is not None and runtime_fixture_writer.should_capture(step):
+            from scripts.diffusion_policy.runtime.fixtures import capture_rng_state
+
+            fixture_record = runtime_fixture_writer.begin(
+                step=np.asarray(step, dtype=np.int64),
+                **capture_rng_state(device),
+                proprio_history=proprio_buffer[0],
+                action_history=action_buffer[0],
+                goal_history=goal_buffer[0],
+                previous_action=previous_action[0],
+                root_pos_pre=raw_env._robot.data.root_pos_w[0],
+                root_quat_pre=raw_env._robot.data.root_quat_w[0],
+                root_lin_vel_b_pre=raw_env._robot.data.root_lin_vel_b[0],
+                root_ang_vel_b_pre=raw_env._robot.data.root_ang_vel_b[0],
+                joint_pos_pre=raw_env._robot.data.joint_pos[0, joint_ids],
+                joint_vel_pre=raw_env._robot.data.joint_vel[0, joint_ids],
+                path_w=path_plans[0].path_w,
+                path_yaw_w=path_plans[0].yaws_w,
+                path_cumulative_xy=path_plans[0].cumulative_lengths,
+                path_progress_idx=np.asarray(path_progress[0], dtype=np.int64),
+                speed_budget_start_arc_m=np.asarray(speed_budget_start_arc[0], dtype=np.float32),
+                speed_budget_target_arc_m=np.asarray(speed_budget_target_arc[0], dtype=np.float32),
+                requested_mean_speed_mps=np.asarray(speeds[0], dtype=np.float32),
+                rollout_start_pos_w=rollout_start_pos[0],
+            )
         with torch.inference_mode():
             if current_chunk is None or chunk_index == 0:
-                full_trajectory = policy.predict_action_denormalized(
+                full_trajectory = inference_sampler.predict_action_denormalized(
                     proprio_buffer,
                     action_buffer,
                     goal_buffer,
                     guidance_scale=args_cli.guidance_scale,
                 )
-                current_chunk = policy.executable_chunk(full_trajectory, args_cli.exec_horizon)
+                current_chunk = inference_sampler.executable_chunk(full_trajectory, args_cli.exec_horizon)
 
+            action_from_chunk = current_chunk[:, chunk_index].clone()
             action = current_chunk[:, chunk_index]
+            selected_chunk_slot = chunk_index
             chunk_index = (chunk_index + 1) % args_cli.exec_horizon
             if agent_cfg.clip_actions is not None:
                 action = torch.clamp(action, -agent_cfg.clip_actions, agent_cfg.clip_actions)
@@ -1449,7 +1661,22 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 speed_budget_max_mps=speed_budget_max_mps if dynamic_speed_budget else None,
                 pace_consistent_preview=pace_consistent_preview,
                 conditioning_speed_override=conditioning_speed_override,
+                scalar_speed_override=scalar_speed_override,
             )
+            if fixture_record is not None:
+                fixture_record.update({
+                    "full_trajectory": full_trajectory[0].detach().cpu().numpy().copy(),
+                    "executable_chunk": current_chunk[0].detach().cpu().numpy().copy(),
+                    "action_from_chunk": action_from_chunk[0].detach().cpu().numpy().copy(),
+                    "env_action": action[0].detach().cpu().numpy().copy(),
+                    "current_goal_pre_step": goals[0].detach().cpu().numpy().copy(),
+                    "proprio_pre_step": proprio[0].detach().cpu().numpy().copy(),
+                    "path_progress_before_goal": fixture_record["path_progress_idx"].copy(),
+                    "path_progress_after_goal": np.asarray(path_progress[0], dtype=np.int64),
+                    "conditioning_speed_mps": goals[0, -1].detach().cpu().numpy().copy(),
+                    "selected_chunk_slot": np.asarray(selected_chunk_slot, dtype=np.int64),
+                    "chunk_slot": np.asarray(selected_chunk_slot, dtype=np.int64),
+                })
             conditioning_speeds_trace.append(goals[:, -1].detach().cpu().numpy())
             if goal_representation == "hindsight_geom_avg12":
                 commanded_heights.append(goals[:, 10].detach().cpu().numpy())
@@ -1460,8 +1687,26 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 )
             elif goal_representation == "path11":
                 commanded_heights.append(goals[:, 8].detach().cpu().numpy())
+            impulse_isaac(raw_env, args_cli.deployment_perturbation, step)
             _, _, dones, _ = vec_env.step(action)
             done_np = dones.cpu().numpy().astype(bool)
+            if fixture_record is not None:
+                processed_target = getattr(raw_env, "_delayed_processed_actions", None)
+                if processed_target is None:
+                    raise RuntimeError("Isaac env does not expose the processed target needed for oracle capture.")
+                runtime_fixture_writer.finish(
+                    fixture_record,
+                    # ``_delayed_processed_actions`` is already in policy/action
+                    # order (the same order used by ``_joint_ids`` at the env API).
+                    joint_target_post_step=processed_target[0].detach().cpu().numpy().copy(),
+                    dones=dones[0].detach().cpu().numpy().copy(),
+                    root_pos_post=raw_env._robot.data.root_pos_w[0],
+                    root_quat_post=raw_env._robot.data.root_quat_w[0],
+                    root_lin_vel_b_post=raw_env._robot.data.root_lin_vel_b[0],
+                    root_ang_vel_b_post=raw_env._robot.data.root_ang_vel_b[0],
+                    joint_pos_post=raw_env._robot.data.joint_pos[0, joint_ids],
+                    joint_vel_post=raw_env._robot.data.joint_vel[0, joint_ids],
+                )
             update_history(proprio_buffer, action_buffer, goal_buffer, proprio, previous_action, goals)
             previous_action = action.clone()
 
@@ -1538,6 +1783,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         failures |= physical_invalid
 
     # Process metrics
+    if args_cli.deployment_sampler == "graph":
+        with open(output_dir / "deployment_heartbeat.json", "w", encoding="utf-8") as f:
+            json.dump({"active": False, "step": duration_steps, "wall_time_s": time.time(), "num_envs": num_envs}, f)
     tracking_errors = np.stack(tracking_errors, axis=0)  # [steps, num_envs]
     achieved_speeds = np.stack(achieved_speeds, axis=0)  # [steps, num_envs]
     achieved_planar_speeds = np.stack(achieved_planar_speeds, axis=0)
@@ -1567,7 +1815,26 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     )
     conditioning_speed_trace = np.stack(conditioning_speeds_trace, axis=0)
 
+    if runtime_fixture_writer is not None:
+        fixture_npz, fixture_json = runtime_fixture_writer.close()
+        print(f"[INFO] Saved runtime oracle: {fixture_npz} and {fixture_json}")
+
     if args_cli.save_timeseries:
+        posture_traces = {}
+        if dppo_task_config.get("posture_tracking_mode", "instantaneous") == "nominal_window":
+            from scripts.dppo_diffusion_rl.posture import causal_posture_trace
+            measured_posture = np.full_like(achieved_heights, np.nan)
+            required_posture = np.full_like(target_heights, np.nan)
+            for i in range(num_envs):
+                valid = trace_valid[:, i]
+                measured_posture[valid, i], required_posture[valid, i] = causal_posture_trace(
+                    achieved_heights[valid, i], target_heights[valid, i],
+                    mode="nominal_window", window_s=float(dppo_task_config["posture_window_s"]), dt=dt,
+                )
+            posture_traces = {
+                "achieved_posture_m": measured_posture,
+                "required_posture_m": required_posture,
+            }
         # Keep the trace opt-in: broad evaluations otherwise only need the
         # compact CSV/JSON summaries.  The path metadata makes this artifact
         # self-contained and avoids reconstructing random-polyline geometry.
@@ -1592,6 +1859,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             base_failure=base_failures,
             physical_sanity_failure=physical_sanity_failures,
             foot_contact=foot_contacts,
+            **posture_traces,
         )
         sensor_body_names = list(getattr(raw_env._contact_sensor, "body_names", ()))
         feet_indices = [int(index) for index in raw_env._feet_body_ids]
@@ -1602,6 +1870,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         )
         trace_metadata = {
             "dt_s": dt,
+            "posture_tracking_mode": dppo_task_config.get("posture_tracking_mode", "instantaneous"),
+            "posture_window_s": float(dppo_task_config.get("posture_window_s", 0.4)),
             "posture_settle_steps": int(args_cli.posture_settle_steps),
             "feet_body_names": feet_body_names,
             "scenarios": [
@@ -1627,9 +1897,11 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             ],
             "pace_budget_mode": effective_pace_budget_mode,
             "pace_budget_override_m_s": (
-                conditioning_speed_override.tolist()
-                if conditioning_speed_override is not None else None
+                (scalar_speed_override if scalar_only_intervention else conditioning_speed_override).tolist()
+                if scalar_speed_override is not None or conditioning_speed_override is not None else None
             ),
+            "scalar_only_intervention": scalar_only_intervention,
+            "preview_intervention": False if scalar_only_intervention else bool(conditioning_speed_override is not None),
         }
         with open(output_dir / "timeseries_metadata.json", "w", encoding="utf-8") as trace_file:
             json.dump(trace_metadata, trace_file, indent=2)
@@ -1730,6 +2002,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 target_progress_m=float(route_metrics.target_progress_m),
                 target_yaw_rad=float(plan.yaws_w[terminal_index]),
                 target_height_m=float(plan.path_w[terminal_index, 2]),
+                posture_tracking_mode=dppo_task_config.get("posture_tracking_mode", "instantaneous"),
+                posture_window_s=float(dppo_task_config.get("posture_window_s", 0.4)),
                 dt=dt,
                 start_position_xy=rollout_start_pos[i, :2],
                 target_heights_m=target_h if profile_task_active else None,
@@ -1861,11 +2135,18 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             "route_terminal_position_error_m": route_values.get("terminal_position_error_m", math.nan),
             "task_success_applicable": task_success_applicable,
             "task_arrived": task_values.get("arrived", False),
+            "posture_tracking_mode": dppo_task_config.get("posture_tracking_mode", "instantaneous"),
+            "posture_window_s": float(dppo_task_config.get("posture_window_s", 0.4)),
             "task_success": task_values.get("success", False),
             "task_success_time_s": task_values.get("time_s", math.nan),
             "task_success_position_error_m": task_values.get("position_error_m", math.nan),
             "task_success_yaw_error_rad": task_values.get("yaw_error_rad", math.nan),
             "task_success_height_error_m": task_values.get("height_error_m", math.nan),
+            "task_first_arrival_raw_height_error_m": (
+                float(abs(hgts[int(round(float(task_values["time_s"]) / dt)) - 1]
+                          - float(plan.path_w[terminal_index, 2])))
+                if task_values.get("arrived", False) else math.nan
+            ),
             "task_success_mean_speed_error_m_s": task_values.get(
                 "mean_speed_error_m_s", math.nan
             ),
@@ -1909,6 +2190,12 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         writer = csv.DictWriter(f, fieldnames=csv_cols)
         writer.writeheader()
         writer.writerows(summary_rows)
+
+    # Machine-readable mirror of the unchanged per-attempt metrics. Missing
+    # measurements are null, never non-standard JSON NaN or a fabricated zero.
+    with open(output_dir / "episode_metrics.json", "w", encoding="utf-8") as f:
+        json.dump([{key: None if isinstance(value, float) and not math.isfinite(value) else value
+                    for key, value in row.items()} for row in summary_rows], f, indent=2, allow_nan=False)
 
     # Plot results
     import matplotlib
@@ -2312,6 +2599,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         "policy_backend": checkpoint.get("policy_backend", "diffusion"),
         "dppo_task_contract_version": dppo_task_contract_version,
         "pace_budget_mode": effective_pace_budget_mode,
+        "scalar_only_intervention": scalar_only_intervention,
         "record_staging_failures": bool(args_cli.record_staging_failures),
         "initialization_failures": int(staging_failed.sum()),
         "profile_height_mae_tolerance_m": (

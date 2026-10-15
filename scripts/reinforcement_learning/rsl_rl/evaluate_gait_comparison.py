@@ -20,7 +20,7 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument(
     "--comparison",
-    choices=("walk_bound", "walk_flying_trot", "walk_pace"),
+    choices=("walk_bound", "walk_flying_trot", "walk_pace", "walk_jump"),
     default="walk_bound",
     help="comparison preset; flying-trot uses the compatible 48-D walk observation contract",
 )
@@ -33,6 +33,10 @@ parser.add_argument(
     default="checkpoints_iri/checkpoints_bound/flying_trot.pt",
 )
 parser.add_argument("--pace_checkpoint", default=None)
+parser.add_argument("--jump_checkpoint", default="checkpoints/jumpy_safe.pt")
+parser.add_argument("--jump_posture", choices=("safe", "crab"), default="safe")
+parser.add_argument("--terrain_stiffness", type=float, default=None)
+parser.add_argument("--terrain_damping", type=float, default=None)
 parser.add_argument("--speed", type=float, default=0.8)
 parser.add_argument("--lateral_speed", type=float, default=0.0)
 parser.add_argument("--yaw_rate", type=float, default=0.0)
@@ -41,6 +45,11 @@ parser.add_argument("--warmup_s", type=float, default=2.0)
 parser.add_argument("--num_envs", type=int, default=16)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--contact_threshold_n", type=float, default=1.0)
+parser.add_argument(
+    "--record_kinematics",
+    action="store_true",
+    help="also save measured joint states and distal-foot collider-centre motion",
+)
 parser.add_argument(
     "--output_dir",
     default=None,
@@ -57,6 +66,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import torch
 from torch import nn
+import isaaclab.utils.math as math_utils
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
@@ -65,15 +75,32 @@ from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
 
 FOOT_NAMES = ("FL_calf", "FR_calf", "RL_calf", "RR_calf")
 FOOT_LABELS = ("FL", "FR", "RL", "RR")
+JOINT_NAMES = (
+    "FL_hip_joint", "FL_thigh_joint", "FL_calf_joint",
+    "FR_hip_joint", "FR_thigh_joint", "FR_calf_joint",
+    "RL_hip_joint", "RL_thigh_joint", "RL_calf_joint",
+    "RR_hip_joint", "RR_thigh_joint", "RR_calf_joint",
+)
+
+# Local transforms from each calf link origin to the matching foot collider
+# centre, read from SoloFlat.usd. These are collider-centre positions, not the
+# ground-contact point on the foot's surface.
+FOOT_COLLIDER_POS_IN_CALF = (
+    (0.0006549001, 0.0076652328, -0.1606478301),
+    (0.0009402592, -0.0080470450, -0.1610490046),
+    (0.0006715380, 0.0076652328, -0.1603854133),
+    (0.0006519122, -0.0077323753, -0.1594781134),
+)
 
 
 def _comparison_spec() -> tuple[str, tuple[str, str], tuple[int, int]]:
     """Return task, policy labels and observation dimensions for the selected preset."""
-    if args.comparison == "walk_pace":
+    if args.comparison in {"walk_pace", "walk_jump"}:
         # The pace task supplies a generated flat mesh, so this preset does not
         # depend on downloading Isaac Nucleus' ground-plane USD. Reward is not
         # used during inference; both checkpoint groups still share the world.
-        return "solo12-pace-v0", ("walk_final", "pace"), (48, 48)
+        label = "pace" if args.comparison == "walk_pace" else Path(args.jump_checkpoint).stem
+        return "solo12-pace-v0", ("walk_final", label), (48, 48)
     if args.comparison == "walk_flying_trot":
         # Both checkpoints consume the base 48-D locomotion observation.  Run them
         # in the already validated base Solo12 environment so the comparison only
@@ -89,7 +116,7 @@ def _configure_env():
     cfg.sim.device = args.device or cfg.sim.device
     cfg.seed = args.seed
     cfg.episode_length_s = args.warmup_s + args.duration_s + 2.0
-    if args.comparison != "walk_pace":
+    if args.comparison not in {"walk_pace", "walk_jump"}:
         cfg.terrain.terrain_type = "plane"
         cfg.terrain.terrain_generator = None
     cfg.events = None
@@ -102,6 +129,12 @@ def _configure_env():
     cfg.forces_applied_to_base_curriculum = (0.0,)
     cfg.base_push_force_xy_range = (0.0, 0.0)
     cfg.base_push_force_z_range = (0.0, 0.0)
+    if args.terrain_stiffness is not None:
+        cfg.compliant_contact_stiffness = args.terrain_stiffness
+        cfg.terrain.physics_material.compliant_contact_stiffness = args.terrain_stiffness
+    if args.terrain_damping is not None:
+        cfg.compliant_contact_damping = args.terrain_damping
+        cfg.terrain.physics_material.compliant_contact_damping = args.terrain_damping
     return cfg
 
 
@@ -142,7 +175,7 @@ class _CheckpointActor(nn.Module):
 
 
 def _empty_records() -> dict[str, list[np.ndarray]]:
-    return {
+    records = {
         "valid": [],
         "contacts": [],
         "lin_vel_b": [],
@@ -152,6 +185,18 @@ def _empty_records() -> dict[str, list[np.ndarray]]:
         "actions": [],
         "commands": [],
     }
+    if args.record_kinematics:
+        records.update(
+            joint_pos_rad=[],
+            joint_vel_rad_s=[],
+            joint_target_rad=[],
+            foot_pos_base_m=[],
+            foot_pos_world_m=[],
+            base_pos_world_m=[],
+            base_quat_wxyz=[],
+            foot_force_world_n=[],
+        )
+    return records
 
 
 def _rollout(checkpoints: dict[str, Path]) -> dict[str, dict[str, np.ndarray]]:
@@ -182,6 +227,11 @@ def _rollout(checkpoints: dict[str, Path]) -> dict[str, dict[str, np.ndarray]]:
         )
         if resolved_names != list(FOOT_NAMES):
             raise RuntimeError(f"Unexpected foot order: {resolved_names}")
+        foot_robot_ids, resolved_robot_names = raw_env._robot.find_bodies(
+            list(FOOT_NAMES), preserve_order=True
+        )
+        if resolved_robot_names != list(FOOT_NAMES):
+            raise RuntimeError(f"Unexpected robot foot-link order: {resolved_robot_names}")
 
         dt = float(raw_env.step_dt)
         warmup_steps = int(round(args.warmup_s / dt))
@@ -197,6 +247,18 @@ def _rollout(checkpoints: dict[str, Path]) -> dict[str, dict[str, np.ndarray]]:
             for label in group_slices
         }
         records = {label: _empty_records() for label in group_slices}
+
+        if args.comparison == "walk_jump" and args.jump_posture != "safe":
+            # Each actor keeps its own nominal joint frame. Changing only the
+            # reset pose would feed wrong q offsets and send wrong PD targets.
+            posture = cfg.initial_joint_pos_by_name[args.jump_posture]
+            candidate_offset = torch.tensor(
+                [posture[name] for name in cfg.joint_names], dtype=raw_env._reset_joint_pos.dtype,
+                device=device,
+            )
+            candidate_slice = group_slices[labels[1]]
+            raw_env._reset_joint_pos[candidate_slice] = candidate_offset
+            raw_env._q_offset_action_and_obs[candidate_slice] = candidate_offset
 
         observations, _ = env.reset()
         raw_env._commands[:, :3] = command
@@ -239,6 +301,32 @@ def _rollout(checkpoints: dict[str, Path]) -> dict[str, dict[str, np.ndarray]]:
                 "actions": actions,
                 "commands": raw_env._commands[:, :3],
             }
+            if args.record_kinematics:
+                robot_data = raw_env._robot.data
+                foot_offsets_local = torch.as_tensor(
+                    FOOT_COLLIDER_POS_IN_CALF, dtype=robot_data.body_pos_w.dtype, device=device
+                )
+                calf_pos_w = robot_data.body_pos_w[:, foot_robot_ids, :]
+                calf_quat_w = robot_data.body_quat_w[:, foot_robot_ids, :]
+                foot_pos_w = calf_pos_w + math_utils.quat_apply(
+                    calf_quat_w,
+                    foot_offsets_local.unsqueeze(0).expand(total_envs, -1, -1),
+                )
+                root_pos_w = robot_data.root_pos_w.unsqueeze(1)
+                root_quat_w = robot_data.root_quat_w.unsqueeze(1).expand(-1, 4, -1)
+                foot_pos_base = math_utils.quat_apply_inverse(
+                    root_quat_w, foot_pos_w - root_pos_w
+                )
+                tensors.update(
+                    joint_pos_rad=robot_data.joint_pos[:, raw_env._joint_ids],
+                    joint_vel_rad_s=robot_data.joint_vel[:, raw_env._joint_ids],
+                    joint_target_rad=raw_env._delayed_processed_actions,
+                    foot_pos_base_m=foot_pos_base,
+                    foot_pos_world_m=foot_pos_w,
+                    base_pos_world_m=robot_data.root_pos_w,
+                    base_quat_wxyz=robot_data.root_quat_w,
+                    foot_force_world_n=forces,
+                )
             for label, group_slice in group_slices.items():
                 group_dones = dones[group_slice]
                 valid = active[label] & ~group_dones
@@ -360,6 +448,7 @@ def _summarize(data: dict[str, np.ndarray]) -> dict[str, object]:
         "base_height_std_m": float(np.std(_masked_flat(data["base_height"], valid))),
         "pitch_rms_rad": float(np.sqrt(np.mean(np.square(_masked_flat(pitch_proxy, valid))))),
         "flight_fraction": float(np.mean(_masked_flat(flight, valid))),
+        "all_foot_contact_fraction": float(np.mean(_masked_flat(contacts.all(axis=-1), valid))),
         "bound_pattern_fraction": float(np.mean(_masked_flat(bound_pattern, valid))),
         "trot_pattern_fraction": float(np.mean(_masked_flat(trot_pattern, valid))),
         "pace_pattern_fraction": float(np.mean(_masked_flat(pace_pattern, valid))),
@@ -378,6 +467,29 @@ def _summarize(data: dict[str, np.ndarray]) -> dict[str, object]:
             for row in contact_correlation
         ],
     }
+    if "foot_pos_base_m" in data:
+        foot_excursions = {name: [] for name in FOOT_LABELS}
+        for env_idx in range(valid.shape[1]):
+            env_valid = valid[:, env_idx]
+            if env_valid.sum() < 10:
+                continue
+            env_feet_x = data["foot_pos_base_m"][env_valid, env_idx, :, 0]
+            for foot_idx, foot_name in enumerate(FOOT_LABELS):
+                values = env_feet_x[:, foot_idx]
+                foot_excursions[foot_name].append(
+                    float(np.percentile(values, 95) - np.percentile(values, 5))
+                )
+        summary["foot_x_excursion_p95_p5_m"] = {
+            name: (float(np.median(values)) if values else None)
+            for name, values in foot_excursions.items()
+        }
+        summary["foot_x_excursion_valid_envs"] = {
+            name: len(values) for name, values in foot_excursions.items()
+        }
+        joint_error = data["joint_pos_rad"] - data["joint_target_rad"]
+        summary["joint_target_tracking_rmse_rad"] = float(
+            np.sqrt(np.mean(np.square(joint_error[valid])))
+        ) if valid.any() else None
     return summary
 
 
@@ -456,7 +568,10 @@ def _plot(
     speed_ax.grid(alpha=0.25)
 
     metric_ax = axes[1, 2]
-    if args.comparison in {"walk_flying_trot", "walk_pace"}:
+    if args.comparison == "walk_jump":
+        metric_names = ("all_foot_contact_fraction", "flight_fraction", "trot_pattern_fraction")
+        metric_labels = ("four-foot contact", "no contact detected", "diagonal pattern")
+    elif args.comparison in {"walk_flying_trot", "walk_pace"}:
         pattern_name = "pace_pattern_fraction" if args.comparison == "walk_pace" else "trot_pattern_fraction"
         pattern_label = "ipsilateral pace" if args.comparison == "walk_pace" else "diagonal trot"
         if args.comparison == "walk_pace":
@@ -489,6 +604,66 @@ def _plot(
     plt.close(fig)
 
 
+def _plot_kinematics(
+    results: dict[str, dict[str, np.ndarray]], output_path: Path
+) -> None:
+    """Plot measured distal-foot and leg-joint motion for the fixed env-0 pair."""
+    _, labels, _ = _comparison_spec()
+    colors = {"FL": "#2878B5", "FR": "#D95319", "RL": "#2E8B57", "RR": "#9467BD"}
+    fig, axes = plt.subplots(2, 3, figsize=(16, 8), sharex="col", constrained_layout=True)
+
+    for row, label in enumerate(labels):
+        data = results[label]
+        valid = data["valid"][:, 0].astype(bool)
+        time_s = np.arange(len(valid)) * float(data["dt"])
+        feet = data["foot_pos_base_m"][:, 0]
+        joints = data["joint_pos_rad"][:, 0]
+        targets = data["joint_target_rad"][:, 0]
+
+        for foot_idx, foot_label in enumerate(FOOT_LABELS):
+            x_values = np.where(valid, feet[:, foot_idx, 0], np.nan)
+            z_values = np.where(valid, feet[:, foot_idx, 2], np.nan)
+            axes[row, 0].plot(time_s, x_values, color=colors[foot_label], lw=1.5, label=foot_label)
+            axes[row, 1].plot(time_s, z_values, color=colors[foot_label], lw=1.5, label=foot_label)
+
+        # Ipsilateral front/rear pair: actual thigh/calf angles are solid;
+        # position targets sent to the actuator are dashed in matching colours.
+        for leg_idx, leg in ((0, "FL"), (2, "RL")):
+            for joint_offset, joint_name in ((1, "thigh"), (2, "calf")):
+                joint_idx = 3 * leg_idx + joint_offset
+                color = colors[leg]
+                axes[row, 2].plot(
+                    time_s, np.where(valid, joints[:, joint_idx], np.nan),
+                    color=color, lw=1.5, label=f"{leg} {joint_name} measured",
+                )
+                axes[row, 2].plot(
+                    time_s, np.where(valid, targets[:, joint_idx], np.nan),
+                    color=color, lw=1.0, ls="--", alpha=0.7,
+                    label=f"{leg} {joint_name} target",
+                )
+
+        axes[row, 0].set_ylabel(f"{label}\nfoot x relative to base [m]")
+        axes[row, 1].set_ylabel("foot z relative to base [m]")
+        axes[row, 2].set_ylabel("joint angle [rad]")
+        axes[row, 2].set_title("Ipsilateral front/rear leg joints")
+        for col in range(3):
+            axes[row, col].grid(alpha=0.25)
+            axes[row, col].set_xlim(0.0, time_s[-1] if len(time_s) else 0.0)
+
+    axes[0, 0].set_title("Distal-foot fore/aft sweep")
+    axes[0, 1].set_title("Distal-foot vertical motion")
+    for ax in axes[-1, :]:
+        ax.set_xlabel("time [s]")
+    axes[0, 0].legend(ncol=2, fontsize=8)
+    axes[0, 2].legend(ncol=2, fontsize=7)
+    fig.suptitle(
+        f"Measured gait kinematics ({args.comparison}) at {args.speed:.2f} m/s (environment 0)",
+        fontsize=14,
+    )
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+
+
 def main() -> None:
     command_values = (args.speed, args.lateral_speed, args.yaw_rate)
     if not all(np.isfinite(value) for value in command_values):
@@ -501,10 +676,15 @@ def main() -> None:
         raise ValueError("Pace comparison command must lie within vx ±1.0, vy ±0.15, wz ±0.35.")
     if args.duration_s <= 0.0 or args.warmup_s < 0.0:
         raise ValueError("duration_s must be positive and warmup_s non-negative.")
+    for name in ("terrain_stiffness", "terrain_damping"):
+        value = getattr(args, name)
+        if value is not None and (not np.isfinite(value) or value < 0.0):
+            raise ValueError(f"{name} must be finite and non-negative.")
     default_dirs = {
         "walk_bound": "scripts/reinforcement_learning/rsl_rl/evaluations/walk_vs_bound_v2",
         "walk_flying_trot": "scripts/reinforcement_learning/rsl_rl/evaluations/walk_vs_flying_trot_v1",
         "walk_pace": "scripts/reinforcement_learning/rsl_rl/evaluations/walk_vs_pace_v1",
+        "walk_jump": "scripts/reinforcement_learning/rsl_rl/evaluations/walk_vs_jumpy_safe",
     }
     output_dir = Path(args.output_dir or default_dirs[args.comparison]).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -513,6 +693,7 @@ def main() -> None:
         "walk_bound": args.bound_checkpoint,
         "walk_flying_trot": args.flying_trot_checkpoint,
         "walk_pace": args.pace_checkpoint,
+        "walk_jump": args.jump_checkpoint,
     }[args.comparison]
     if second_checkpoint is None:
         raise ValueError("--pace_checkpoint is required for --comparison walk_pace.")
@@ -531,6 +712,18 @@ def main() -> None:
         "warmup_s": args.warmup_s,
         "num_envs": args.num_envs,
         "contact_threshold_n": args.contact_threshold_n,
+        "kinematics_recorded": args.record_kinematics,
+        "terrain_stiffness_override": args.terrain_stiffness,
+        "terrain_damping_override": args.terrain_damping,
+        "candidate_initial_position": args.jump_posture if args.comparison == "walk_jump" else None,
+        "kinematics_notes": (
+            "joint_pos_rad is measured articulation state; joint_target_rad is the delayed position target; "
+            "foot_pos_base_m is the SoloFlat.usd foot-collider centre transformed into the base frame. "
+            "It is not the contact-surface point or proof of a complete stride."
+            if args.record_kinematics else None
+        ),
+        "joint_order": list(JOINT_NAMES) if args.record_kinematics else None,
+        "foot_labels_order": list(FOOT_LABELS) if args.record_kinematics else None,
         "comparison": args.comparison,
         "checkpoints": {label: str(path) for label, path in checkpoints.items()},
         "policies": summaries,
@@ -548,9 +741,13 @@ def main() -> None:
         },
     )
     _plot(results, summaries, output_dir / "gait_comparison.png")
+    if args.record_kinematics:
+        _plot_kinematics(results, output_dir / "gait_kinematics.png")
 
     print(json.dumps(report_json, indent=2, allow_nan=False), flush=True)
     print(f"[PASS] Plot: {output_dir / 'gait_comparison.png'}", flush=True)
+    if args.record_kinematics:
+        print(f"[PASS] Kinematics plot: {output_dir / 'gait_kinematics.png'}", flush=True)
 
 
 def _json_safe(value):
