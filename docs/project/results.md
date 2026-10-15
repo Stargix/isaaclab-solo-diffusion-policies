@@ -90,6 +90,16 @@ WC seed 42, 24 paired geometries, 144 attempts per mode. Only the final scalar c
 - Faster motion does not establish flying-trot reproduction or three-gait retention.
 - WC/WCT compares unequal dataset recipes, not an equal-data causal gait intervention.
 - Sampling envelopes, mixture weights and transition contexts are engineering assumptions.
-- A sealed holdout, runtime measurements, sim2sim and robot tests remain before stronger deployment claims.
+- The [post-selection evaluation and sim2sim checks](validation.md) are complete. Sustained receiver deadlines and physical robot operation remain unvalidated.
+
+## Exploratory gait experiments
+
+Pace and pronk were explored as additional demonstration sources. They did not
+establish reliable three-gait retention after task refinement and are not part
+of the main result. The pronk expert iterations and data-preparation scripts
+are preserved in the local `backup/public-main-20261015` branch at `43e1abd`,
+alongside the research worktree, rather than mixed into the main workflow.
+Historical pace and bound tasks remain available for existing checkpoints;
+their registration does not imply that they are recommended demonstrations.
 
 The [machine-readable snapshot](../../research_artifacts/paper_snapshot/results.json) and [figure provenance](figures/README.md) retain the metric definitions and source checksums.

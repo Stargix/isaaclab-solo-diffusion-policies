@@ -84,7 +84,9 @@ Start with the [running guide](docs/project/running.md). It explains the install
 
 ## Scope and foundations
 
-The current evidence is in Isaac Lab, on open 4 m routes and the evaluated geometry, speed and posture ranges. High-speed corners, intermediate heights, and reliable three-gait retention remain open. Sim2sim and robot deployment are ongoing work rather than completed results.
+The main learning evidence is in Isaac Lab, on open 4 m routes and the evaluated geometry, speed and posture ranges. Physical transfer to an audited MuJoCo model has also been tested on nominal and bounded perturbed development banks. High-speed corners, intermediate heights, and reliable three-gait retention remain open. Real-robot deployment has not been validated.
+
+The [final validation](docs/project/validation.md) includes a new post-selection route bank, immutable model/source hashes and runnable evaluation commands. The selected actor reaches 98.4% adherence on new ID tasks at 0.25--0.50 m/s; faster posture conditions remain less reliable. [Runtime code](scripts/diffusion_policy/runtime/) separates the inference worker from a simulator command receiver. GPU timings describe the external development laptop. Sustained deadlines on the intended robot control computer and transport have not been validated.
 
 The approach builds on [DiffuseLoco](https://arxiv.org/abs/2404.19264), [Diffusion Policy](https://arxiv.org/abs/2303.04137), [DPPO](https://arxiv.org/abs/2409.00588) and the broader diffusion-locomotion literature, including [LocoDiff](https://arxiv.org/abs/2411.08832). Their roles in the design are explained in the [method](docs/project/method.md#foundations).
 

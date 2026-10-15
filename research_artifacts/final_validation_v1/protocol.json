@@ -1,0 +1,29 @@
+{
+  "actor_sha256": "2e75422000cc22ab5023cfbc820eb8d391a69b4fc008a7e0a6bbb2c1e0b54868",
+  "independent_routes": 56,
+  "attempts": 672,
+  "route_bank_sha256": "1b136130139dcb849fa7828c7cb3e59eac37a47f8ee021de748a2c085cf24217",
+  "base_seed": 1510202601,
+  "inference_seed": 20261015,
+  "original_source_zip_sha256": "0231d69a59d736c2e62dd1587f165709d36def6def1c94f50cf319bbd248c5f1",
+  "original_protocol_sha256": "9d23f172e4913eac394692ab1062dd24a0b656d6c7bffe06b79ff333559c8039",
+  "csv_sha256": {
+    "id_constant": "1a1983303ea3d8361d8084778f6a3cb12ea06f00d001f6cfd9bfa4125a082d89",
+    "id_transition": "c7eedc3043fa90ded2b233b0958d17d82764b48d91703c647aff3fd15b297717",
+    "stress_constant": "acf1273e969512ee5d76cb88df4240c5ba5eb96ecc9ba91f1b5824beb72238e6",
+    "stress_transition": "f0f490d6d5bbc95b9b66c86a998717d489cb52d00ee31302ba013a0013a53565"
+  },
+  "primary": "ID at .25/.5, all profiles; 256 attempts over 32 independent routes",
+  "secondary": "ID .85 walk and transitions; .85 constant crouch is separately labeled stress",
+  "scoring": "Transition height exemption .25m on each side; all failures remain in success denominators",
+  "stop_rule": "Execute once, retain failures, no model/reward/route edits after inspection",
+  "packages": {
+    "torch": "2.7.0+cu128",
+    "numpy": "1.26.0",
+    "scipy": "1.15.3",
+    "isaacsim": "5.1.0.0",
+    "rsl-rl-lib": "3.1.2",
+    "diffusers": "0.39.0"
+  },
+  "scope": "Post-selection evaluation of one frozen actor on new draws; no subsequent tuning, no hardware inference claim."
+}

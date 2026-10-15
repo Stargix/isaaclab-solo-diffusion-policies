@@ -1,11 +1,21 @@
-# Exploratory pace expert
+# Pace expert pilot
 
-[Main project](../../../../../README.md) · [Scope](../../../../../docs/project/method.md#why-these-choices)
+The optional `solo12-pace-v0` task explores ipsilateral contact coordination
+as a possible source of slow demonstrations. It is not part of the reported
+WC/WCT training recipe, and reliable acquisition was not established. A high
+requested speed alone is not evidence of a pace gait.
 
-The `solo12-pace-v0` task attempts ipsilateral coordination (FL–RL and FR–RR) from the 48D walk actor. Critic and optimizer initialize fresh; the expert uses existing quadruped augmentation.
+The task warm-starts the walk actor while initializing the critic and optimizer
+fresh. Its training command range is broader than any subsequently selected
+demonstration range. Contact patterns, realized velocity and survival must be
+checked together before using this expert to generate data.
 
-Pace is intended as a slow demonstration source, reusing walk for fast motion. Expert training keeps vx in [-1,1] m/s; the eventual data range must come from measured slow-speed performance.
+With an independently supplied pilot checkpoint, inspect the contact and
+velocity traces using:
 
-The first seed completed training but did not pass the local acquisition gate for stability and coordination. Pace is exploratory and is not a validated component of the reported path controller.
+```bash
+./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/evaluate_gait_comparison.py --comparison walk_pace --walk_checkpoint checkpoints/walk.pt --pace_checkpoint checkpoints/pace.pt --speed 0.4 --num_envs 16 --duration_s 8 --output_dir output/pace_check --headless
+```
 
-The task and [comparison evaluator](../../evaluate_gait_comparison.py) remain available. Scheduler scripts, working notes and raw diagnostics are local. Pace demonstrations have not been added to the evaluated imitation prior.
+Keep the outputs outside versioned source. The main project does not require
+this pilot; start with the [running guide](../../../../../docs/project/running.md).

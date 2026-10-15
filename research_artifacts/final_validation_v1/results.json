@@ -1,0 +1,362 @@
+{
+  "all": {
+    "n": 672,
+    "routes": 56,
+    "arrived": 644,
+    "task": 591,
+    "adherence": 588,
+    "survival": 644,
+    "mean_active_cte_cm": 3.3834394324643657,
+    "mean_active_height_mae_cm": 1.3033103375331851,
+    "arrival_speed_mae_cm_s": 2.3891495242119833
+  },
+  "groups": {
+    "id_0.25": {
+      "n": 128,
+      "routes": 32,
+      "arrived": 125,
+      "task": 125,
+      "adherence": 125,
+      "survival": 125,
+      "mean_active_cte_cm": 1.7497751001598725,
+      "mean_active_height_mae_cm": 0.8760023289493426,
+      "arrival_speed_mae_cm_s": 0.24278134556384237
+    },
+    "id_0.25_walk": {
+      "n": 32,
+      "routes": 32,
+      "arrived": 32,
+      "task": 32,
+      "adherence": 32,
+      "survival": 32,
+      "mean_active_cte_cm": 1.418591647463936,
+      "mean_active_height_mae_cm": 0.632006520621856,
+      "arrival_speed_mae_cm_s": 0.05081455492374756
+    },
+    "id_0.25_crouch": {
+      "n": 32,
+      "routes": 32,
+      "arrived": 31,
+      "task": 31,
+      "adherence": 31,
+      "survival": 31,
+      "mean_active_cte_cm": 1.9606064484676629,
+      "mean_active_height_mae_cm": 1.012136635908077,
+      "arrival_speed_mae_cm_s": 0.4430399866836471
+    },
+    "id_0.25_walk_to_crouch": {
+      "n": 32,
+      "routes": 32,
+      "arrived": 31,
+      "task": 31,
+      "adherence": 31,
+      "survival": 31,
+      "mean_active_cte_cm": 1.784573271190259,
+      "mean_active_height_mae_cm": 0.8272727969006096,
+      "arrival_speed_mae_cm_s": 0.4019422162029155
+    },
+    "id_0.25_crouch_to_walk": {
+      "n": 32,
+      "routes": 32,
+      "arrived": 31,
+      "task": 31,
+      "adherence": 31,
+      "survival": 31,
+      "mean_active_cte_cm": 1.8353290335176315,
+      "mean_active_height_mae_cm": 1.032593362366827,
+      "arrival_speed_mae_cm_s": 0.08152110156248173
+    },
+    "id_0.5": {
+      "n": 128,
+      "routes": 32,
+      "arrived": 127,
+      "task": 127,
+      "adherence": 127,
+      "survival": 125,
+      "mean_active_cte_cm": 2.1959627805320334,
+      "mean_active_height_mae_cm": 1.0603301869279855,
+      "arrival_speed_mae_cm_s": 0.6367805483428983
+    },
+    "id_0.5_walk": {
+      "n": 32,
+      "routes": 32,
+      "arrived": 32,
+      "task": 32,
+      "adherence": 32,
+      "survival": 31,
+      "mean_active_cte_cm": 1.962293030907038,
+      "mean_active_height_mae_cm": 0.7772814828290093,
+      "arrival_speed_mae_cm_s": 0.23347000912998309
+    },
+    "id_0.5_crouch": {
+      "n": 32,
+      "routes": 32,
+      "arrived": 32,
+      "task": 32,
+      "adherence": 32,
+      "survival": 32,
+      "mean_active_cte_cm": 2.302946070280695,
+      "mean_active_height_mae_cm": 0.988279754392296,
+      "arrival_speed_mae_cm_s": 1.0565100789312454
+    },
+    "id_0.5_walk_to_crouch": {
+      "n": 32,
+      "routes": 32,
+      "arrived": 31,
+      "task": 31,
+      "adherence": 31,
+      "survival": 31,
+      "mean_active_cte_cm": 2.325839035614365,
+      "mean_active_height_mae_cm": 1.1955983038844908,
+      "arrival_speed_mae_cm_s": 0.9968144822462782
+    },
+    "id_0.5_crouch_to_walk": {
+      "n": 32,
+      "routes": 32,
+      "arrived": 32,
+      "task": 32,
+      "adherence": 32,
+      "survival": 31,
+      "mean_active_cte_cm": 2.192772985326036,
+      "mean_active_height_mae_cm": 1.2801612066061465,
+      "arrival_speed_mae_cm_s": 0.27157868349856773
+    },
+    "id_0.85": {
+      "n": 128,
+      "routes": 32,
+      "arrived": 120,
+      "task": 87,
+      "adherence": 86,
+      "survival": 120,
+      "mean_active_cte_cm": 5.320982067142336,
+      "mean_active_height_mae_cm": 1.8951124881049006,
+      "arrival_speed_mae_cm_s": 6.398599301936709
+    },
+    "id_0.85_walk": {
+      "n": 32,
+      "routes": 32,
+      "arrived": 31,
+      "task": 31,
+      "adherence": 31,
+      "survival": 31,
+      "mean_active_cte_cm": 4.720066788554598,
+      "mean_active_height_mae_cm": 1.016936097177728,
+      "arrival_speed_mae_cm_s": 0.7849568650153615
+    },
+    "id_0.85_crouch": {
+      "n": 32,
+      "routes": 32,
+      "arrived": 30,
+      "task": 2,
+      "adherence": 2,
+      "survival": 30,
+      "mean_active_cte_cm": 7.134009713175553,
+      "mean_active_height_mae_cm": 2.1722466867127324,
+      "arrival_speed_mae_cm_s": 19.33374568970539
+    },
+    "id_0.85_walk_to_crouch": {
+      "n": 32,
+      "routes": 32,
+      "arrived": 30,
+      "task": 25,
+      "adherence": 24,
+      "survival": 30,
+      "mean_active_cte_cm": 5.253539653128147,
+      "mean_active_height_mae_cm": 1.8977761466088996,
+      "arrival_speed_mae_cm_s": 4.492366906632671
+    },
+    "id_0.85_crouch_to_walk": {
+      "n": 32,
+      "routes": 32,
+      "arrived": 29,
+      "task": 29,
+      "adherence": 29,
+      "survival": 29,
+      "mean_active_cte_cm": 4.176312113711047,
+      "mean_active_height_mae_cm": 2.493491021920243,
+      "arrival_speed_mae_cm_s": 0.9901681216133528
+    },
+    "stress_0.25": {
+      "n": 96,
+      "routes": 24,
+      "arrived": 95,
+      "task": 95,
+      "adherence": 95,
+      "survival": 95,
+      "mean_active_cte_cm": 1.8433883101140889,
+      "mean_active_height_mae_cm": 0.8854264049176607,
+      "arrival_speed_mae_cm_s": 0.2620947232932512
+    },
+    "stress_0.25_walk": {
+      "n": 24,
+      "routes": 24,
+      "arrived": 24,
+      "task": 24,
+      "adherence": 24,
+      "survival": 24,
+      "mean_active_cte_cm": 1.6571481067185523,
+      "mean_active_height_mae_cm": 0.6724193295870883,
+      "arrival_speed_mae_cm_s": 0.05152405851124378
+    },
+    "stress_0.25_crouch": {
+      "n": 24,
+      "routes": 24,
+      "arrived": 24,
+      "task": 24,
+      "adherence": 24,
+      "survival": 24,
+      "mean_active_cte_cm": 1.8414787171837768,
+      "mean_active_height_mae_cm": 1.0012531985470303,
+      "arrival_speed_mae_cm_s": 0.4143640796208909
+    },
+    "stress_0.25_walk_to_crouch": {
+      "n": 24,
+      "routes": 24,
+      "arrived": 24,
+      "task": 24,
+      "adherence": 24,
+      "survival": 24,
+      "mean_active_cte_cm": 2.1256573485635397,
+      "mean_active_height_mae_cm": 0.8525576712292041,
+      "arrival_speed_mae_cm_s": 0.4684416440306027
+    },
+    "stress_0.25_crouch_to_walk": {
+      "n": 24,
+      "routes": 24,
+      "arrived": 23,
+      "task": 23,
+      "adherence": 23,
+      "survival": 23,
+      "mean_active_cte_cm": 1.7492690679904868,
+      "mean_active_height_mae_cm": 1.01547542030732,
+      "arrival_speed_mae_cm_s": 0.10761234525883341
+    },
+    "stress_0.5": {
+      "n": 96,
+      "routes": 24,
+      "arrived": 96,
+      "task": 96,
+      "adherence": 96,
+      "survival": 96,
+      "mean_active_cte_cm": 2.5418094890919174,
+      "mean_active_height_mae_cm": 1.0972002772461165,
+      "arrival_speed_mae_cm_s": 0.7050115836804628
+    },
+    "stress_0.5_walk": {
+      "n": 24,
+      "routes": 24,
+      "arrived": 24,
+      "task": 24,
+      "adherence": 24,
+      "survival": 24,
+      "mean_active_cte_cm": 2.3695728187216925,
+      "mean_active_height_mae_cm": 0.8110389014220111,
+      "arrival_speed_mae_cm_s": 0.3361584653946254
+    },
+    "stress_0.5_crouch": {
+      "n": 24,
+      "routes": 24,
+      "arrived": 24,
+      "task": 24,
+      "adherence": 24,
+      "survival": 24,
+      "mean_active_cte_cm": 2.479579908496801,
+      "mean_active_height_mae_cm": 0.9919854708736899,
+      "arrival_speed_mae_cm_s": 1.1164025634498087
+    },
+    "stress_0.5_walk_to_crouch": {
+      "n": 24,
+      "routes": 24,
+      "arrived": 24,
+      "task": 24,
+      "adherence": 24,
+      "survival": 24,
+      "mean_active_cte_cm": 3.0012595929270915,
+      "mean_active_height_mae_cm": 1.2131485662844652,
+      "arrival_speed_mae_cm_s": 0.9938808583788585
+    },
+    "stress_0.5_crouch_to_walk": {
+      "n": 24,
+      "routes": 24,
+      "arrived": 24,
+      "task": 24,
+      "adherence": 24,
+      "survival": 24,
+      "mean_active_cte_cm": 2.316825636222085,
+      "mean_active_height_mae_cm": 1.3726281704042993,
+      "arrival_speed_mae_cm_s": 0.3736044474985585
+    },
+    "stress_0.85": {
+      "n": 96,
+      "routes": 24,
+      "arrived": 81,
+      "task": 61,
+      "adherence": 59,
+      "survival": 83,
+      "mean_active_cte_cm": 6.943251630932231,
+      "mean_active_height_mae_cm": 2.031952341925548,
+      "arrival_speed_mae_cm_s": 6.9997712194925965
+    },
+    "stress_0.85_walk": {
+      "n": 24,
+      "routes": 24,
+      "arrived": 20,
+      "task": 20,
+      "adherence": 19,
+      "survival": 20,
+      "mean_active_cte_cm": 6.140081207126283,
+      "mean_active_height_mae_cm": 1.4394335922256147,
+      "arrival_speed_mae_cm_s": 0.7021259270978331
+    },
+    "stress_0.85_crouch": {
+      "n": 24,
+      "routes": 24,
+      "arrived": 18,
+      "task": 7,
+      "adherence": 7,
+      "survival": 19,
+      "mean_active_cte_cm": 10.727005648596121,
+      "mean_active_height_mae_cm": 2.1340491612050707,
+      "arrival_speed_mae_cm_s": 21.240501971009405
+    },
+    "stress_0.85_walk_to_crouch": {
+      "n": 24,
+      "routes": 24,
+      "arrived": 20,
+      "task": 11,
+      "adherence": 10,
+      "survival": 21,
+      "mean_active_cte_cm": 6.168790831424142,
+      "mean_active_height_mae_cm": 2.06361825279256,
+      "arrival_speed_mae_cm_s": 7.477738656022886
+    },
+    "stress_0.85_crouch_to_walk": {
+      "n": 24,
+      "routes": 24,
+      "arrived": 23,
+      "task": 23,
+      "adherence": 23,
+      "survival": 23,
+      "mean_active_cte_cm": 4.737128836582377,
+      "mean_active_height_mae_cm": 2.4907083614789456,
+      "arrival_speed_mae_cm_s": 0.9154409407963825
+    }
+  },
+  "primary": {
+    "n": 256,
+    "routes": 32,
+    "arrived": 252,
+    "task": 252,
+    "adherence": 252,
+    "survival": 250,
+    "mean_active_cte_cm": 1.9728689403459532,
+    "mean_active_height_mae_cm": 0.9681662579386641,
+    "arrival_speed_mae_cm_s": 0.4413444358532873,
+    "route_stratified_bootstrap_95_percent": [
+      96.484375,
+      100.0
+    ]
+  },
+  "scope": "One preselected actor; inference repetitions and conditions are not independent geometries. Bootstrap describes sampled generator families, not arbitrary paths.",
+  "reporting_revision": "Absolute arrival-speed error; original signed-mean draft is retained if present. No episode or task predicate changed."
+}
