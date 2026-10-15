@@ -25,6 +25,11 @@ parser.add_argument("--num_envs", type=int, default=2048)
 parser.add_argument("--iterations", type=int, default=1000, help="Additional PPO iterations to run.")
 parser.add_argument("--rollout_chunks", type=int, default=32)
 parser.add_argument("--episode_length_s", type=float, default=24.0)
+parser.add_argument("--posture_tracking_mode", choices=("instantaneous", "nominal_window"), default="instantaneous")
+parser.add_argument("--posture_window_s", type=float, default=0.4)
+parser.add_argument("--vertical_velocity_reward_weight", type=float, default=0.025)
+parser.add_argument("--transition_margin_m", type=float, default=0.25,
+                    help="Recorded profile transition margin; v3+ tracks the full profile, use 0 for matched evaluation.")
 parser.add_argument(
     "--profile_height_mae_tolerance_m",
     type=float,
@@ -216,7 +221,6 @@ from scripts.dppo_diffusion_rl.checkpointing import (
 )
 from scripts.dppo_diffusion_rl.config import DPPOConfig
 from scripts.dppo_diffusion_rl.critic import ValueCritic
-from scripts.dppo_diffusion_rl.isaaclab_env import CRITIC_FEATURE_DIM
 from scripts.dppo_diffusion_rl.ppo import DPPOUpdater
 from scripts.dppo_diffusion_rl.trainer import DPPOTrainer
 
@@ -289,6 +293,10 @@ def main() -> None:
     if args_cli.episode_length_s <= 0.0:
         raise ValueError("episode_length_s must be positive.")
     env_cfg.episode_length_s = float(args_cli.episode_length_s)
+    env_cfg.posture_tracking_mode = args_cli.posture_tracking_mode
+    env_cfg.posture_window_s = float(args_cli.posture_window_s)
+    env_cfg.vertical_velocity_reward_weight = float(args_cli.vertical_velocity_reward_weight)
+    env_cfg.transition_margin_m = float(args_cli.transition_margin_m)
     env_cfg.profile_height_mae_tolerance_m = float(
         args_cli.profile_height_mae_tolerance_m
     )
@@ -306,6 +314,7 @@ def main() -> None:
     env_cfg.transition_boundary_min_m = float(args_cli.transition_boundary_min_m)
     env_cfg.transition_boundary_max_m = float(args_cli.transition_boundary_max_m)
     env_cfg.goal_representation = goal_representation
+    env_cfg.validate_task()
     # Use a generated flat mesh rather than the remote Grid USD.  Physics is
     # equivalent, while local and cluster runs no longer depend on asset-cache
     # state or network availability during scene creation.
@@ -356,7 +365,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     critic_input_dim = policy.cfg.history * (
         policy.cfg.proprio_dim + policy.cfg.action_hist_dim + policy.cfg.goal_dim
-    ) + CRITIC_FEATURE_DIM
+    ) + env.unwrapped.get_critic_features().shape[-1]
     critic = ValueCritic(critic_input_dim).to(device)
     updater = DPPOUpdater(policy, critic, dppo_cfg)
     if restore_optimization:

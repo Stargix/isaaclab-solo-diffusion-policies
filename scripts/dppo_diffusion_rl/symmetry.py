@@ -74,9 +74,12 @@ class LeftRightAugmentation:
         condition_dim = self.policy.cfg.history * (
             self.policy.cfg.proprio_dim + self.policy.cfg.action_hist_dim + self.policy.cfg.goal_dim
         )
-        if critic_observation.shape[-1] != condition_dim + 14:
-            raise ValueError("Mirror critic requires the declared fourteen route features.")
-        privileged = critic_observation[..., -14:].clone()
+        privileged_dim = critic_observation.shape[-1] - condition_dim
+        if privileged_dim not in (14, 17):
+            raise ValueError("Mirror critic requires fourteen route features, optionally plus three posture features.")
+        # Nominal posture adds height mean, reference mean and window fill;
+        # all three are invariant under left/right reflection.
+        privileged = critic_observation[..., condition_dim:].clone()
         privileged[..., 6] *= -1.0  # sin(tangent_yaw - robot_yaw)
         privileged[..., 10] *= -1.0  # projected gravity y
         p, a, g = self.reflect_conditions(proprio, actions, goals)

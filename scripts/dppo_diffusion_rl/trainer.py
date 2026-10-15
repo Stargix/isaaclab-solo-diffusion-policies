@@ -36,6 +36,7 @@ class EpisodeAccumulator:
     profile_height_constraint_active: float = 0.0
     profile_height_success: float = 0.0
     profile_height_mae_m: float = 0.0
+    raw_profile_height_mae_m: float = 0.0
     profile_height_within_tolerance_fraction: float = 0.0
     route_cte_constraint_active: float = 0.0
     route_cte_success: float = 0.0
@@ -53,6 +54,10 @@ class EpisodeAccumulator:
             return
         count = float(keep.sum())
         self.count += count
+        # Legacy/fake events predate v9; their profile metric is already raw.
+        self.raw_profile_height_mae_m += float(
+            event.get("raw_profile_height_mae_m", event["profile_height_mae_m"])[keep].sum()
+        )
         for name in (
             "success",
             "position_arrival",
@@ -102,6 +107,7 @@ class EpisodeAccumulator:
             ),
             "Episode/profile_height_success_rate": self.profile_height_success / divisor,
             "Episode/profile_height_mae_m": self.profile_height_mae_m / divisor,
+            "Episode/raw_profile_height_mae_m": self.raw_profile_height_mae_m / divisor,
             "Episode/profile_height_within_tolerance_fraction": (
                 self.profile_height_within_tolerance_fraction / divisor
             ),

@@ -6,6 +6,8 @@ the 12-dimensional joint command produced directly by the diffusion actor.
 
 from __future__ import annotations
 
+import math
+
 import torch
 
 from isaaclab_tasks.direct.solo12.solo12_env import Solo12Env
@@ -15,6 +17,7 @@ from scripts.diffusion_policy.train.data.obs_utils import proprio_from_env_tenso
 from scripts.residual_diffusion_rl.routes import RouteBank, RouteState
 
 from .conditioning import remaining_speed_budget
+from .posture import CausalPostureWindow, posture_window_steps
 from .hybrid_routes import HYBRID_ROUTE_CONTRACT_VERSION, SupportedHybridRouteBank
 from .procedural_routes import SupportedProceduralRouteBank
 from .route_feasibility import (
@@ -93,6 +96,10 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
     # waiting cannot improve or worsen the result.
     profile_height_mae_tolerance_m: float = 0.04
     profile_height_reward_weight: float = 2.0
+    # Additive ablation contract; historical WC/WCT remains pointwise.
+    posture_tracking_mode: str = "instantaneous"
+    posture_window_s: float = 0.4
+    vertical_velocity_reward_weight: float = 0.025
     path_reward_weight: float = 1.25
     # ``None`` preserves every historical task contract. V3 enables a
     # distance-weighted full-route precision gate explicitly.
@@ -125,6 +132,20 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
 
     def validate_task(self) -> None:
         """Validate task fields, including values overridden after construction."""
+
+        posture_window_steps(
+            self.posture_tracking_mode, self.posture_window_s, self.sim.dt * self.decimation
+        )
+        if (
+            self.posture_tracking_mode == "nominal_window"
+            and self.goal_representation != "hindsight_geom_profile16"
+        ):
+            raise ValueError("Nominal posture requires the height-profile actor.")
+        if (
+            not math.isfinite(self.vertical_velocity_reward_weight)
+            or self.vertical_velocity_reward_weight < 0
+        ):
+            raise ValueError("vertical_velocity_reward_weight must be finite and non-negative.")
 
         if self.route_stage not in (0, 1, 2):
             raise ValueError("route_stage must be 0, 1 or 2.")
@@ -404,6 +425,15 @@ class DPPODiffusionEnv(Solo12Env):
         self._reward_weights = TaskRewardWeights(
             path=cfg.path_reward_weight,
             height=reward_height,
+            vertical_velocity=cfg.vertical_velocity_reward_weight,
+        )
+        self._posture = (
+            CausalPostureWindow(
+                self.num_envs,
+                posture_window_steps(cfg.posture_tracking_mode, cfg.posture_window_s, self.step_dt),
+                self.device,
+            )
+            if cfg.posture_tracking_mode == "nominal_window" else None
         )
         self._route_state: RouteState | None = None
         self._goal = torch.zeros(
@@ -427,6 +457,7 @@ class DPPODiffusionEnv(Solo12Env):
         self._profile_height_error_distance_sum = torch.zeros(
             self.num_envs, device=self.device
         )
+        self._raw_height_error_distance_sum = torch.zeros_like(self._profile_height_error_distance_sum)
         self._profile_height_within_tolerance_distance_sum = torch.zeros_like(
             self._profile_height_error_distance_sum
         )
@@ -490,6 +521,14 @@ class DPPODiffusionEnv(Solo12Env):
 
     def _base_height(self) -> torch.Tensor:
         return self._robot.data.root_pos_w[:, 2] - self._terrain.env_origins[:, 2]
+
+    def _posture_height(self) -> torch.Tensor:
+        return self._base_height() if self._posture is None else self._posture.mean[:, 0]
+
+    def _posture_error(self, state: RouteState) -> torch.Tensor:
+        if self._posture is None:
+            return self._base_height() - state.target_height
+        return self._posture.mean[:, 0] - self._posture.mean[:, 1]
 
     def _update_route_and_goal(self) -> RouteState:
         self._route_state = self._routes.update(self._local_position())
@@ -565,7 +604,7 @@ class DPPODiffusionEnv(Solo12Env):
         elapsed_fraction = (
             self._task_step.float() / max(float(self.max_episode_length), 1.0)
         ).clamp(0.0, 1.0)
-        return torch.cat(
+        features = torch.cat(
             (
                 (state.progress / self._routes.length.clamp_min(1.0e-6))[:, None],
                 state.remaining_fraction[:, None],
@@ -583,18 +622,31 @@ class DPPODiffusionEnv(Solo12Env):
             ),
             dim=1,
         )
+        if self._posture is not None:
+            # Privileged critic only; actor conditioning/history is unchanged.
+            features = torch.cat(
+                (features, self._posture.mean,
+                 (self._posture.count.float() / self._posture.steps)[:, None]),
+                dim=1,
+            )
+        return features
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         self._task_step += 1
         contact, timeout = super()._get_dones()
         state = self._update_route_and_goal()
-        height_abs_error = (self._base_height() - state.target_height).abs()
+        if self._posture is not None:
+            self._posture.update(self._base_height(), state.target_height)
+        height_abs_error = self._posture_error(state).abs()
         height_tracking_weight = getattr(
             self._routes,
             "height_tracking_weight",
             torch.ones_like(state.progress),
         )
         height_distance = state.progress_delta.clamp_min(0.0) * height_tracking_weight
+        self._raw_height_error_distance_sum += (
+            (self._base_height() - state.target_height).abs() * height_distance
+        )
         self._profile_height_error_distance_sum += height_abs_error * height_distance
         self._profile_height_within_tolerance_distance_sum += (
             height_abs_error <= self.cfg.profile_height_mae_tolerance_m
@@ -662,7 +714,7 @@ class DPPODiffusionEnv(Solo12Env):
             terminal_yaw_error.abs() <= self.cfg.terminal_yaw_tolerance_rad
         )
         terminal_height_ok = (
-            (self._base_height() - self._routes.height[:, -1]).abs()
+            (self._posture_height() - self._routes.height[:, -1]).abs()
             <= self.cfg.terminal_height_tolerance_m
         )
         terminal_mean_speed_ok = (
@@ -731,7 +783,7 @@ class DPPODiffusionEnv(Solo12Env):
             ),
             terminal_distance=state.terminal_distance,
             terminal_yaw_error=terminal_yaw_error,
-            terminal_height_error=self._base_height() - self._routes.height[:, -1],
+            terminal_height_error=self._posture_height() - self._routes.height[:, -1],
             weights=self._reward_weights,
         )
         terminal_pose_improvement = (
@@ -752,7 +804,7 @@ class DPPODiffusionEnv(Solo12Env):
             # instantaneously. The procedural contract scores the surrounding
             # plateaus and leaves a small boundary interval for a learned
             # physical transition; it does not blend or override actions.
-            height_error=(self._base_height() - state.target_height)
+            height_error=self._posture_error(state)
             * getattr(
                 self._routes,
                 "height_tracking_weight",
@@ -774,6 +826,11 @@ class DPPODiffusionEnv(Solo12Env):
             "Metrics/progress_fraction": float((state.progress / self._routes.length).mean()),
             "Metrics/cross_track_abs_m": float(state.cross_track.abs().mean()),
             "Metrics/height_error_abs_m": float((self._base_height() - state.target_height).abs().mean()),
+            "Metrics/posture_error_abs_m": float(self._posture_error(state).abs().mean()),
+            "Metrics/raw_profile_height_mae_m": float(
+                (self._raw_height_error_distance_sum
+                 / self._profile_height_distance_sum.clamp_min(1e-6)).mean()
+            ),
             "Metrics/profile_height_mae_m": float(self._last_profile_height_mae.mean()),
             "Metrics/profile_height_within_tolerance_fraction": float(
                 self._last_profile_height_within_tolerance.mean()
@@ -918,6 +975,10 @@ class DPPODiffusionEnv(Solo12Env):
                     "profile_height_mae_m": self._last_profile_height_mae[
                         completed_ids
                     ].clone(),
+                    "raw_profile_height_mae_m": (
+                        self._raw_height_error_distance_sum[completed_ids]
+                        / self._profile_height_distance_sum[completed_ids].clamp_min(1e-6)
+                    ).clone(),
                     "profile_height_within_tolerance_fraction": (
                         self._last_profile_height_within_tolerance[completed_ids].clone()
                     ),
@@ -950,6 +1011,8 @@ class DPPODiffusionEnv(Solo12Env):
                 log[f"Episode/{name}"] = value
             self.extras["dppo_episode"] = episode_event
         self._reset_routes(env_ids)
+        if self._posture is not None:
+            self._posture.reset(env_ids)
         self._task_step[env_ids] = 0
         self._success[env_ids] = False
         self._position_arrival[env_ids] = False
@@ -964,6 +1027,7 @@ class DPPODiffusionEnv(Solo12Env):
         self._last_mean_speed_error[env_ids] = 0.0
         self._last_terminal_pose_potential[env_ids] = 0.0
         self._profile_height_error_distance_sum[env_ids] = 0.0
+        self._raw_height_error_distance_sum[env_ids] = 0.0
         self._profile_height_within_tolerance_distance_sum[env_ids] = 0.0
         self._profile_height_distance_sum[env_ids] = 0.0
         self._last_profile_height_mae[env_ids] = 0.0
