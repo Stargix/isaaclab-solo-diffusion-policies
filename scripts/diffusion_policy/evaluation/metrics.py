@@ -479,6 +479,8 @@ def compute_first_task_success(
     height_tolerance_m: float = 0.05,
     mean_speed_tolerance_m_s: float = 0.08,
     corridor_half_width_m: float = 0.60,
+    posture_tracking_mode: str = "instantaneous",
+    posture_window_s: float = 0.4,
 ) -> TaskSuccessMetrics:
     """Reproduce the DPPO terminal predicate on an offline trajectory.
 
@@ -490,6 +492,8 @@ def compute_first_task_success(
     is accumulated up to first arrival. For task contract v5,
     ``path_heights_m`` and ``profile_transition_margin_m`` exclude the same
     narrow spatial interval around discontinuous requirements as training.
+    V9's optional nominal window averages measured and required posture
+    causally, but keeps endpoint reference and arrival time unfiltered.
     """
 
     positions = np.asarray(positions_xy, dtype=np.float64)
@@ -528,6 +532,17 @@ def compute_first_task_success(
         raise ValueError("profile_height_mae_tolerance_m must be positive.")
     if requested_speed_m_s <= 0.0 or target_progress_m <= 0.0 or dt <= 0.0:
         raise ValueError("speed, target progress and dt must be positive.")
+    if posture_tracking_mode != "instantaneous":
+        from scripts.dppo_diffusion_rl.posture import causal_posture_trace
+        # Same causal observer as training, starting at the first scored step.
+        # Raw inputs are NOT mutated; all existing raw tracking metrics remain.
+        heights, filtered_target = causal_posture_trace(
+            heights,
+            target_heights if target_heights is not None else np.full_like(heights, target_height_m),
+            mode=posture_tracking_mode, window_s=posture_window_s, dt=dt,
+        )
+        if target_heights is not None:
+            target_heights = filtered_target
     tolerances = (
         position_tolerance_m,
         yaw_tolerance_rad,
