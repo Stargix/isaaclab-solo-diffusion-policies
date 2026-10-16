@@ -31,7 +31,9 @@ class DSRLNAConfig:
     actor_lr: float = 3.0e-4
     critic_lr: float = 3.0e-4
     alpha_lr: float = 3.0e-4
-    gamma: float = 0.99
+    # This project's finite-route rewards telescope only without discounting.
+    # Copying the original locomotion benchmark's 0.99 changes the task.
+    gamma: float = 1.0
     tau: float = 0.005
     batch_size: int = 256
     # Number of vectorized macro-steps collected before the official 20 SAC updates.
@@ -59,7 +61,7 @@ class DSRLNAConfig:
             raise ValueError("Invalid DSRL discount or target update rate.")
         if self.exec_horizon != 4 or self.inference_steps != 10:
             raise ValueError("This adapter pins the four-action chunk and the 10-step prior.")
-        if self.initial_rollout_chunks < 1 or self.initial_alpha <= 0:
+        if self.initial_rollout_chunks < 1 or not math.isfinite(self.initial_alpha) or self.initial_alpha <= 0:
             raise ValueError("DSRL requires positive initial rollouts and entropy temperature.")
         if self.critic_backup_combine_type not in {"min", "mean"}:
             raise ValueError("critic_backup_combine_type must be 'min' or 'mean'.")
@@ -275,7 +277,10 @@ class DSRLNA:
 
     def update(self, replay: DSRLNoiseReplay):
         metrics = {name: [] for name in (
-            "q_action_loss", "q_noise_loss", "actor_loss", "alpha", "alpha_loss", "q_target"
+            "q_action_loss", "q_noise_loss", "actor_loss", "alpha", "alpha_loss", "q_target",
+            "reward", "reward_abs", "entropy_bonus", "entropy_bonus_abs",
+            "q_bootstrap", "q_action_value", "q_noise_actor_value", "terminal_fraction",
+            "bootstrap_contribution", "entropy_contribution",
         )}
         for _ in range(self.cfg.gradient_steps):
             batch = replay.sample(self.cfg.batch_size)
@@ -296,9 +301,11 @@ class DSRLNA:
                               "goals": batch["next_goals"]}
                 next_action = self._decode_flat(next_batch, next_noise).flatten(1)
                 target_values = self._combine(self.q_action_target(next_obs, next_action))
-                target = batch["rewards"] + (1.0 - batch["dones"]) * self.cfg.gamma * (
-                    target_values - alpha * next_log_prob
-                )
+                entropy_bonus = -alpha * next_log_prob
+                continuation = (1.0 - batch["dones"]) * self.cfg.gamma
+                bootstrap_contribution = continuation * target_values
+                entropy_contribution = continuation * entropy_bonus
+                target = batch["rewards"] + bootstrap_contribution + entropy_contribution
             current_q = self.q_action(obs, batch["actions"])
             action_loss = 0.5 * sum(F.mse_loss(value, target) for value in current_q)
             self.q_action_optimizer.zero_grad(set_to_none=True)
@@ -306,6 +313,15 @@ class DSRLNA:
             self.q_action_optimizer.step()
             metrics["q_action_loss"].append(float(action_loss.detach()))
             metrics["q_target"].append(float(target.mean()))
+            metrics["reward"].append(float(batch["rewards"].mean()))
+            metrics["reward_abs"].append(float(batch["rewards"].abs().mean()))
+            metrics["entropy_bonus"].append(float(entropy_bonus.mean()))
+            metrics["entropy_bonus_abs"].append(float(entropy_bonus.abs().mean()))
+            metrics["q_bootstrap"].append(float(target_values.mean()))
+            metrics["q_action_value"].append(float(self._combine(current_q).detach().mean()))
+            metrics["terminal_fraction"].append(float(batch["dones"].mean()))
+            metrics["bootstrap_contribution"].append(float(bootstrap_contribution.mean()))
+            metrics["entropy_contribution"].append(float(entropy_contribution.mean()))
 
             # Freeze critic parameters without detaching Q_W from its latent
             # input: the pathwise SAC gradient must reach the noise actor.
@@ -319,6 +335,7 @@ class DSRLNA:
             for parameter in self.q_noise.parameters():
                 parameter.requires_grad_(True)
             metrics["actor_loss"].append(float(actor_loss.detach()))
+            metrics["q_noise_actor_value"].append(float(actor_q.detach().mean()))
             metrics["alpha_loss"].append(float(alpha_loss.detach()))
             metrics["alpha"].append(float(self.log_alpha.detach().exp()))
 

@@ -104,6 +104,53 @@ def test_bellman_target_discounts_once_per_chunk_and_masks_terminals():
     assert metrics["DSRL/q_target"] == pytest.approx((3.0 + 3.0 + 1.8) / 2.0)
 
 
+def test_default_discount_preserves_finite_route_potential_objective():
+    from scripts.dppo_diffusion_rl.rewards import schedule_error_improvement
+    assert DSRLNAConfig().gamma == 1.0
+    # Equal endpoints reached by different intermediate paths must have the
+    # same return for a pure potential difference, including chunk aggregation.
+    for potential in (torch.tensor([0., -2., -1., -3., -1.]),
+                      torch.tensor([0.,  1.,  2.,  0., -1.])):
+        chunks = torch.diff(potential).reshape(2, 2).sum(-1)
+        assert chunks.sum().item() == pytest.approx(-1.)
+    # Exercise the actual task function: same duration and endpoint, different
+    # progress histories. Their undiscounted chunk returns must agree.
+    returns = []
+    discounted_returns = []
+    for progress in (torch.tensor([0., .5, 1., 1.5, 2.]),
+                     torch.tensor([.5, 1., 1.5, 2., 2.])):
+        rewards = schedule_error_improvement(
+            progress=progress, progress_delta=torch.diff(progress, prepend=torch.zeros(1)),
+            elapsed_s=torch.arange(1, 6, dtype=torch.float32),
+            desired_speed=torch.full((5,), .5), route_length=torch.full((5,), 2.), dt=1.,
+        )
+        returns.append(rewards.sum().item())
+        discounted_returns.append((rewards * .99 ** torch.arange(5)).sum().item())
+    assert returns == pytest.approx([-.5, -.5])
+    assert abs(discounted_returns[0] - discounted_returns[1]) > .01
+
+
+def test_training_rejects_discounted_endpoint_rewards(tmp_path):
+    agent, _, _ = _agent(gamma=0.99)
+    class Env:
+        @property
+        def unwrapped(self):
+            return self
+    with pytest.raises(ValueError, match="require gamma=1.0"):
+        DSRLNATrainer(env=Env(), agent=agent, source={}, source_path="unused",
+                      source_sha="unused", output_dir=tmp_path)
+
+
+def test_logged_bellman_components_reconstruct_mean_target():
+    agent, replay, _ = _agent()
+    replay.dones[:4] = torch.tensor([[0.], [1.], [0.], [1.]])
+    metrics = agent.update(replay)
+    assert metrics["DSRL/q_target"] == pytest.approx(
+        metrics["DSRL/reward"] + metrics["DSRL/bootstrap_contribution"] + metrics["DSRL/entropy_contribution"],
+        abs=1.e-5,
+    )
+
+
 def test_collector_sums_chunk_rewards_and_stops_terminal_rows(tmp_path):
     agent, _, _ = _agent()
     class Env:
@@ -136,8 +183,9 @@ def test_collector_sums_chunk_rewards_and_stops_terminal_rows(tmp_path):
 
 
 @pytest.mark.parametrize("family", ["wc", "wcp"])
-def test_checkpoint_and_eval_api_preserve_seeded_executable_actions(tmp_path, family):
-    agent, _, inputs = _agent()
+@pytest.mark.parametrize("gamma", [0.99, 1.0])
+def test_checkpoint_and_eval_api_preserve_seeded_executable_actions(tmp_path, family, gamma):
+    agent, _, inputs = _agent(gamma=gamma)
     flat = asdict(agent.decoder.prior.cfg)
     source = {
         "schema_version": 8, "policy_kind": "spatial_hindsight_height_profile_ddpm",

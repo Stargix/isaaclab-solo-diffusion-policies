@@ -19,6 +19,8 @@ class DSRLNATrainer:
         if rollout_chunks < 1 or save_interval < 1:
             raise ValueError("rollout_chunks and save_interval must be positive.")
         self.env, self.raw_env, self.agent = env, env.unwrapped, agent
+        if agent.cfg.gamma != 1.0:
+            raise ValueError("Finite-route difference rewards require gamma=1.0 during training.")
         if rollout_chunks != agent.cfg.train_freq:
             raise ValueError("rollout_chunks must match the pinned DSRL train_freq.")
         self.source, self.source_path, self.source_sha = source, str(source_path), source_sha
@@ -170,8 +172,12 @@ class DSRLNATrainer:
                   f"fall={episodes['Episode/base_contact_rate']:.3f} "
                   f"return={episodes['Episode/return']:.3f} "
                   f"alpha={metrics['alpha']:.4f} replay={self.replay.size} "
-                  f"qA={metrics.get('DSRL/q_action_loss', float('nan')):.4g} "
-                  f"qW={metrics.get('DSRL/q_noise_loss', float('nan')):.4g}", flush=True)
+                  f"loss_QA={metrics['DSRL/q_action_loss']:.4g} "
+                  f"loss_QW={metrics['DSRL/q_noise_loss']:.4g} "
+                  f"Q={metrics['DSRL/q_action_value']:.3f} "
+                  f"entropy_bonus={metrics['DSRL/entropy_bonus']:.3f} "
+                  f"reward_abs={metrics['DSRL/reward_abs']:.3f} "
+                  f"episodes={episodes['Episode/completed']:.0f}", flush=True)
             if (iteration + 1) % self.save_interval == 0:
                 self.save(f"model_{iteration + 1}.pt", iteration, metrics)
             if (iteration + 1) % 100 == 0:

@@ -120,7 +120,7 @@ The analyzer writes a per-scenario CSV and two compact diagnostic figures. It
 labels contact unloading as unloading; contact forces alone do not establish
 geometric flight.
 
-## Paper-faithful DSRL-NA follow-up
+## DSRL-NA follow-up
 
 `train_dsrl_na.py` implements the paper's Noise-Aliased DSRL (DSRL-NA) update,
 not the PPO pilot above. The default experiment is WC (`--prior wc`), initialized
@@ -145,7 +145,8 @@ frozen DSRL decoder uses DDIM whereas historical DPPO uses its DDPM chain.
 
 The update sequence follows the authors' [DSRL-NA implementation](https://github.com/ajwagen/stable-baselines3-dsrl/blob/master/stable_baselines3/dsrl/dsrl.py).
 The adapter sums the rewards of the four executed 50-Hz controls and applies
-`gamma=0.99` once per chunk, as in their `ActionChunkWrapper`. Each collection
+`gamma=1.0` once per chunk. Unlike the authors' Gym benchmark, this task uses
+undiscounted endpoint-potential differences; see the job-4197 audit below. Each collection
 block has two vectorized macro-actions followed by 20 SAC updates. Ten
 noise-critic updates follow that complete block, rather than each SAC update.
 
@@ -174,29 +175,21 @@ checkpoint exists, first run the short integration smoke in its own directory:
 ./isaaclab.sh -p scripts/latent_noise_rl/train_dsrl_na.py \
   --prior wc --checkpoint checkpoints_iri/checkpoints_dp/wc_wct_phase_a.pt \
   --output_dir scripts/latent_noise_rl/runs/wc_dsrl_na_smoke_seed42 \
-  --run_name wc_dsrl_na_smoke_seed42 --smoke --headless --device cuda:0
+  --run_name wc_dsrl_na_smoke_seed42 --initial_alpha 0.01 --smoke --headless --device cuda:0
 ```
 
-Only if the smoke reports `SMOKE_OK`, start the pilot below. This deliberately
-uses the four environments of the authors' locomotion configuration. With
+Only if the smoke reports `SMOKE_OK`, use the corrected pilot command in the
+job-4197 audit below. It uses four environments, as in the authors' locomotion
+configuration. With
 batch 256 and 20 updates per two vectorized macro-actions, it uses 640 replay
 samples per newly collected transition, compared with 0.625 in the rejected
 4096-environment draft. The 2001 standard-noise initialization macro-actions
 per environment cover 160.08 simulated seconds before the first actor update;
 the previous 0.32-second warmup did not cover complete routes.
 
-```bash
-./isaaclab.sh -p scripts/latent_noise_rl/train_dsrl_na.py \
-  --prior wc --checkpoint checkpoints_iri/checkpoints_dp/wc_wct_phase_a.pt \
-  --output_dir scripts/latent_noise_rl/runs/wc_dsrl_na_seed42 \
-  --run_name wc_dsrl_na_seed42 --num_envs 4 --iterations 1000 \
-  --initial_rollout_chunks 2001 --rollout_chunks 2 --save_interval 100 \
-  --seed 42 --headless --device cuda:0
-```
-
-The pilot collects 8004 initialization and 8000 optimization macro-transitions
-(64,016 total control transitions), and performs 20,000 SAC updates plus 10,000
-noise-critic updates. This is a shorter feasibility budget than the original
+The historical 1000-iteration pilot collected 8004 initialization and 8000 optimization macro-transitions
+(64,016 total control transitions), and performed 20,000 SAC updates plus 10,000
+noise-critic updates. This was a shorter feasibility budget than the original
 experiments. It does not establish preserved pronk or generalization; those
 require the frozen multi-route evaluation. The run metadata reports the sample
 ratio and all update counts explicitly. Do not increase `num_envs` to PPO scale
@@ -226,3 +219,74 @@ zero completed episodes in that smoke must not be interpreted as a success rate.
 - DDIM changes the sampler relative to historical DDPM evaluation.
 - Inference still executes ten denoising passes and has no real-robot qualification.
 - A low-foot-load interval is not proof of flight or pronk.
+
+## WC job 4197 audit and corrected follow-up
+
+The completed job is a failed pilot, not evidence against diffusion steering.
+Its baseline completed 85 routes: 76.5% position arrival, 2.35% timing success,
+21.2% base contact and 1.18% joint success. Height MAE was 1.13 cm and CTE RMSE
+4.10 cm. The optimized actor had zero successes across 83 completed episodes
+(ten non-overlapping 100-iteration metric windows). This is not 1000 independent
+evaluations. Baseline and actor visited different routes, so these figures are
+not a paired generalization comparison.
+
+One concrete implementation mismatch was copying SAC's `gamma=0.99` into this
+task. `dppo_diffusion_rl/config.py` explicitly requires 1.0: schedule and terminal
+pose rewards are potential differences. With discounting, their sum depends on
+intermediate states and arrival time, rather than only the intended endpoints.
+At 0.08 s per macro-action, gamma=0.99 weights a signal 20 s later by only
+`0.99**250 = 0.081`; the same signal 4 s later retains `0.99**50 = 0.605`.
+The new trainer rejects discounted task returns. Old checkpoints remain readable
+for evaluation and are not resumable; their recorded gamma is preserved.
+
+The reported `qA` and `qW` were MSE losses, not Q values. Mean Bellman target
+peaked around 506 and later decreased, so the logs do not establish numerical
+Q divergence. They do show initial targets around 89 despite initially small
+random critic predictions. The 144-dimensional entropy term is a plausible
+major contributor; the old logs did not record its decomposition. New logs
+separately record task reward, entropy bonus, bootstrap Q, current Q, actor Q
+and terminal fraction, and label losses unambiguously.
+
+For the next pilot, keep the source, task, architecture and update schedule
+fixed. Use gamma=1 (the correction) and explicitly lower initial alpha to 0.01
+(a declared tuning hypothesis, not an original-paper default). Automatic
+temperature adaptation remains enabled with target entropy 0. This only reduces
+the initial entropy scale; it neither removes SAC's entropy objective nor proves
+that it will remain well balanced. The default alpha remains 1 for reproducibility.
+An entropy-regularized finite-horizon objective can still favour extra steps,
+even with the task's discount repaired. Do not interpret this as a guarantee of
+matching the DPPO objective exactly.
+
+After the smoke, use a fresh output directory, never the failed run's directory:
+
+```bash
+./isaaclab.sh -p scripts/latent_noise_rl/train_dsrl_na.py \
+  --prior wc --checkpoint checkpoints_iri/checkpoints_dp/wc_wct_phase_a.pt \
+  --output_dir scripts/latent_noise_rl/runs/wc_dsrl_na_endpoint_v2_seed42 \
+  --run_name wc_dsrl_na_endpoint_v2_seed42 --num_envs 4 --iterations 5000 \
+  --initial_alpha 0.01 --initial_rollout_chunks 2001 --rollout_chunks 2 \
+  --save_interval 500 --seed 42 --headless --device cuda:0
+```
+
+This collects 40,000 optimization macro-transitions, five times the previous
+pilot's online experience, plus 8,004 initialization transitions. The increased
+budget is not itself a bug fix or a claim of sufficient convergence. Inspect
+periodic checkpoints using a fixed development route bank, with identical seeds
+for the prior, initial actor and trained actor. Evaluate stochastic sampling as
+primary and the actor mean separately. Keep the paper's final holdout untouched.
+If timing does not improve after meaningful completed-episode counts, stop this
+optional experiment rather than adding gait rewards or changing the main task.
+
+References: [DSRL paper](https://arxiv.org/abs/2506.15799),
+[authors' implementation](https://github.com/ajwagen/stable-baselines3-dsrl/blob/master/stable_baselines3/dsrl/dsrl.py).
+The gamma and initial-temperature choices above are project adaptations, not a
+claim to reproduce the original experimental configuration exactly.
+
+Local validation (2026-10-16, Isaac Sim 5.1): the integration smoke completed,
+including frozen-prior checks and seeded checkpoint round-trip. An additional
+four-environment diagnostic collected 9 baseline episodes, then 2 actor episodes
+in five completed optimizer blocks. It was manually interrupted during the
+following block to bound local test cost, not because it converged or failed.
+Its initialization used 256 rather than 2001 chunks and is not a training-result
+comparison. The logged Q losses were finite; this establishes integration only.
+Both diagnostics are ignored artifacts under `scripts/latent_noise_rl/runs/`.

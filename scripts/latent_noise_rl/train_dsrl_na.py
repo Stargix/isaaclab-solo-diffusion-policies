@@ -60,6 +60,8 @@ def make_parser():
     parser.add_argument("--noise_critic_grad_steps", type=int, default=10)
     parser.add_argument("--replay_capacity", type=int, default=100_000)
     parser.add_argument("--initial_rollout_chunks", type=int, default=2001)
+    parser.add_argument("--initial_alpha", type=float, default=1.0,
+                        help="SAC initial entropy temperature; 1 matches the reference implementation.")
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--wandb_project", default="solo12-dsrl-na")
     AppLauncher.add_app_launcher_args(parser)
@@ -104,6 +106,7 @@ def _run(args, source, prior, source_sha, agent, output):
             "discount_unit": "action_chunk",
             "entropy_coordinates": "normalized_tanh_noise",
             "evaluation_sampling": "stochastic",
+            "reward_discount_contract": "undiscounted_finite_route_potentials",
             "git_commit": subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
                                          capture_output=True, text=True, check=True).stdout.strip(),
             "git_dirty": bool(subprocess.run(["git", "status", "--porcelain"], cwd=ROOT,
@@ -197,7 +200,12 @@ def main():
         noise_critic_grad_steps=args.noise_critic_grad_steps,
         replay_capacity=args.replay_capacity,
         initial_rollout_chunks=args.initial_rollout_chunks,
+        initial_alpha=args.initial_alpha,
     )
+    # Training must preserve the same endpoint objective as DPPO. Old inference
+    # checkpoints with gamma=0.99 remain readable for auditing, not resumable.
+    if dsrl_cfg.gamma != 1.0:
+        raise ValueError("The Solo12 finite-route reward requires gamma=1.0.")
     agent = DSRLNA(
         FrozenDDIMDecoder(prior, inference_steps=10), prior.normalizer_stats,
         history=model_cfg.history, proprio_dim=model_cfg.proprio_dim,
