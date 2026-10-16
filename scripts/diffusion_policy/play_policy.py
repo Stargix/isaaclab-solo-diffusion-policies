@@ -46,6 +46,8 @@ parser.add_argument(
     help="Latent-noise checkpoint only: its actor, raw Gaussian noise, or bounded initial actor.",
 )
 parser.add_argument("--num_envs", type=int, default=1)
+parser.add_argument("--dsrl_sampling", choices=("stochastic", "deterministic"), default=None,
+                    help="DSRL-NA only: default stochastic, as in the official evaluation.")
 parser.add_argument("--num_inference_steps", type=int, default=None, help="Denoising steps; default from checkpoint.")
 parser.add_argument(
     "--path_file", type=str, default=None,
@@ -669,14 +671,15 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         expected_policy_kind=("spatial_time_preview_ddpm", "spatial_reference_path_ddpm", "holonomic_reference_path_ddpm", "path_guidance_terminal_ddpm", "spatial_hindsight_geometry_ddpm", "spatial_hindsight_height_profile_ddpm"),
         allow_dppo=True,
         allow_latent_noise_ppo=True,
+        allow_dsrl_na=True,
     )
     config_dict = checkpoint["config"]
     if args_cli.exec_horizon is None:
         args_cli.exec_horizon = (
             int(checkpoint["dppo_config"]["exec_horizon"])
             if checkpoint.get("algorithm") == "dppo"
-            else int(checkpoint["latent_ppo_config"]["exec_horizon"])
-            if checkpoint.get("algorithm") == "latent_noise_ppo"
+            else int(checkpoint.get("latent_ppo_config", checkpoint.get("dsrl_na_config", {}))["exec_horizon"])
+            if checkpoint.get("algorithm") in {"latent_noise_ppo", "dsrl_na"}
             else 8
         )
     print(
@@ -684,7 +687,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         f"goal_source={config_dict['dataset'].get('goal_source', 'achieved')}"
     )
     normalizer_stats = NormalizerStats.from_dict(checkpoint["normalizer_stats"])
-    is_latent_backend = checkpoint.get("algorithm") == "latent_noise_ppo"
+    is_latent_backend = checkpoint.get("algorithm") in {"latent_noise_ppo", "dsrl_na"}
+    if args_cli.dsrl_sampling is not None and checkpoint.get("algorithm") != "dsrl_na":
+        raise ValueError("--dsrl_sampling requires a DSRL-NA checkpoint.")
     latent_generator = None
     if is_latent_backend:
         infer_steps = int(checkpoint["latent_policy_config"]["inference_steps"])
@@ -694,15 +699,21 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             raise ValueError("Latent DDIM requires guidance 1 without compile or TorchScript overrides.")
         if str(_PROJECT_ROOT) not in sys.path:
             sys.path.insert(0, str(_PROJECT_ROOT))
-        from scripts.latent_noise_rl.checkpointing import build_inference_policy
-        policy = build_inference_policy(checkpoint, device)
+        if checkpoint.get("algorithm") == "dsrl_na":
+            from scripts.latent_noise_rl.dsrl_na import build_dsrl_na_inference_policy
+            policy = build_dsrl_na_inference_policy(checkpoint, device)
+            args_cli.dsrl_sampling = args_cli.dsrl_sampling or "stochastic"
+            policy.set_sampling_mode(args_cli.dsrl_sampling)
+        else:
+            from scripts.latent_noise_rl.checkpointing import build_inference_policy
+            policy = build_inference_policy(checkpoint, device)
         args_cli.latent_reference_mode = args_cli.latent_reference_mode or "checkpoint"
         policy.set_reference_mode(args_cli.latent_reference_mode)
         latent_generator = torch.Generator(device=device).manual_seed(args_cli.seed + 99173)
         policy_cfg = _model_cfg_from_checkpoint(config_dict)
     else:
         if args_cli.latent_reference_mode is not None:
-            raise ValueError("--latent_reference_mode is valid only for latent_noise_ppo checkpoints.")
+            raise ValueError("--latent_reference_mode is valid only for latent-noise checkpoints.")
         infer_steps = resolve_inference_steps(args_cli.num_inference_steps, config_dict["diffusion"])
         policy_cfg = _model_cfg_from_checkpoint(config_dict)
     policy_cfg.num_inference_steps = infer_steps
@@ -847,7 +858,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         device=device,
     )
     dynamic_speed_budget = bool(
-        checkpoint.get("algorithm") in {"dppo", "latent_noise_ppo"}
+        checkpoint.get("algorithm") in {"dppo", "latent_noise_ppo", "dsrl_na"}
         and int(checkpoint.get("dppo_task_contract_version", 1)) >= 3
     )
     speed_budget_max_mps = float(

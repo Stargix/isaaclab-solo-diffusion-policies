@@ -220,7 +220,7 @@ def test_eval_play_dispatch_is_explicit_and_paired_recipe_is_complete():
     for name in ("evaluate_policy.py", "play_policy.py"):
         source = (root / "scripts" / "diffusion_policy" / name).read_text(encoding="utf-8")
         compile(source, name, "exec")
-        assert 'checkpoint.get("algorithm") == "latent_noise_ppo"' in source
+        assert 'checkpoint.get("algorithm") in {"latent_noise_ppo", "dsrl_na"}' in source
         assert 'predict_kwargs["generator"] = latent_generator' in source
     commands = evaluation_commands(
         launcher="./isaaclab.sh", checkpoint="/models/latent.pt",

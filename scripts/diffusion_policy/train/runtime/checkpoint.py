@@ -24,6 +24,7 @@ def load_training_checkpoint(
     expected_policy_kind: str | Iterable[str] | None = None,
     allow_dppo: bool = False,
     allow_latent_noise_ppo: bool = False,
+    allow_dsrl_na: bool = False,
 ) -> dict[str, Any]:
     """Load a Solo12 diffusion-policy checkpoint saved by ``train.py``.
 
@@ -44,6 +45,10 @@ def load_training_checkpoint(
         raise ValueError(
             f"Checkpoint {path} is a latent-noise PPO actor. This consumer would otherwise "
             "load only a diffusion prior; use the latent_noise_ddim backend explicitly."
+        )
+    if checkpoint.get("algorithm") == "dsrl_na" and not allow_dsrl_na:
+        raise ValueError(
+            f"Checkpoint {path} is a DSRL-NA latent-noise actor. Load it through the explicit DSRL-NA backend."
         )
     config = checkpoint.get("config", {})
     schema_version = checkpoint.get("schema_version", config.get("schema_version"))

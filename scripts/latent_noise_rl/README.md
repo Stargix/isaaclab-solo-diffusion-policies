@@ -1,5 +1,9 @@
 # Frozen-prior latent-noise PPO pilot
 
+> The section below documents the earlier PPO pilot. It is **not** the
+> paper's original RL optimizer. The DSRL-NA implementation and launch recipe
+> are documented at the end of this file.
+
 This is one exploratory run on the WCP Phase-A imitation checkpoint. PPO changes
 the first 12 rows of the diffusion sampler's initial noise, while a deterministic
 10-step DDIM decoder and its learned prior remain frozen. It does not add gait
@@ -115,6 +119,88 @@ python -m scripts.latent_noise_rl.analyze --run checkpoint=PATH_TO_CHECKPOINT_EV
 The analyzer writes a per-scenario CSV and two compact diagnostic figures. It
 labels contact unloading as unloading; contact forces alone do not establish
 geometric flight.
+
+## Paper-faithful DSRL-NA follow-up
+
+`train_dsrl_na.py` implements the paper's Noise-Aliased DSRL (DSRL-NA) update,
+not the PPO pilot above. The Phase-A diffusion prior and deterministic DDIM
+decoder stay frozen. SAC's bounded actor chooses the initial latent noise;
+the action critic learns from replayed decoded action chunks, and the twin
+noise critic is repeatedly distilled on fresh `N(0, I)` latents using the
+action critic's values. SAC then updates the noise actor through that learned
+noise critic. The decoder is never differentiated through.
+
+The update sequence follows the authors' [DSRL-NA implementation](https://github.com/ajwagen/stable-baselines3-dsrl/blob/master/stable_baselines3/dsrl/dsrl.py).
+The adapter sums the rewards of the four executed 50-Hz controls and applies
+`gamma=0.99` once per chunk, as in their `ActionChunkWrapper`. Each collection
+block has two vectorized macro-actions followed by 20 SAC updates. Ten
+noise-critic updates follow that complete block, rather than each SAC update.
+
+The actor, its log probability and the noise critic use normalized tanh noise
+coordinates. Scaling noise before the frozen decoder does not change the
+entropy objective. Default noise bounds are `[-1,1]`, matching the normalized
+action bounds inherited by the official NA launcher; its `action_magnitude=1.5`
+configuration is used by the DSRL-SAC environment wrapper. Actor and critic
+networks use Tanh and LayerNorm; width 512 is a project setting for the larger
+history/conditioning input, not a claim that the paper used this width.
+
+The training checkpoint records the Phase-A prior, actor, both critics, target
+critic, temperature, scheduler and task contract. Evaluation/play sample the
+learned noise distribution with an explicit seeded generator and the same
+10-step DDIM decoder. `--dsrl_sampling deterministic` is an optional separate
+actor-mean diagnostic; the default is `--dsrl_sampling stochastic`, matching
+the authors' primary evaluation. Checkpoint version 2 records the corrected
+entropy and discount conventions and rejects the earlier draft's version 1.
+There is no `best.pt` chosen from training return; retain periodic checkpoints
+and select a model only with the frozen evaluation protocol.
+
+On the cluster, after checking out this branch and confirming the pinned Phase-A
+checkpoint exists, first run the short integration smoke in its own directory:
+
+```bash
+./isaaclab.sh -p scripts/latent_noise_rl/train_dsrl_na.py \
+  --checkpoint scripts/diffusion_policy/runs/walk_crouch_pronk_speed_partition_v1_k10/best.pt \
+  --output_dir scripts/latent_noise_rl/runs/wcp_dsrl_na_smoke_seed42 \
+  --run_name wcp_dsrl_na_smoke_seed42 --smoke --headless --device cuda:0
+```
+
+Only if the smoke reports `SMOKE_OK`, start the pilot below. This deliberately
+uses the four environments of the authors' locomotion configuration. With
+batch 256 and 20 updates per two vectorized macro-actions, it uses 640 replay
+samples per newly collected transition, compared with 0.625 in the rejected
+4096-environment draft. The 2001 standard-noise initialization macro-actions
+per environment cover 160.08 simulated seconds before the first actor update;
+the previous 0.32-second warmup did not cover complete routes.
+
+```bash
+./isaaclab.sh -p scripts/latent_noise_rl/train_dsrl_na.py \
+  --checkpoint scripts/diffusion_policy/runs/walk_crouch_pronk_speed_partition_v1_k10/best.pt \
+  --output_dir scripts/latent_noise_rl/runs/wcp_dsrl_na_seed42 \
+  --run_name wcp_dsrl_na_seed42 --num_envs 4 --iterations 1000 \
+  --initial_rollout_chunks 2001 --rollout_chunks 2 --save_interval 100 \
+  --seed 42 --headless --device cuda:0
+```
+
+The pilot collects 8004 initialization and 8000 optimization macro-transitions
+(64,016 total control transitions), and performs 20,000 SAC updates plus 10,000
+noise-critic updates. This is a shorter feasibility budget than the original
+experiments. It does not establish preserved pronk or generalization; those
+require the frozen multi-route evaluation. The run metadata reports the sample
+ratio and all update counts explicitly. Do not increase `num_envs` to PPO scale
+without redesigning this ratio. Generated checkpoints are ignored local artifacts.
+
+Regression checks cover replay column shapes/wraparound, terminal masking,
+undiscounted chunk rewards, the exact optimizer-block order, entropy coordinate
+invariance, frozen-prior integrity, checkpoint round-tripping and the evaluation
+action-chunk API:
+
+```bash
+python -m pytest scripts/latent_noise_rl/tests/test_dsrl_na.py scripts/latent_noise_rl/tests/test_latent_noise.py -q
+```
+
+The Isaac smoke runs for only 0.64 simulated seconds per environment. It checks
+updates and seeded checkpoint round-tripping, not task success or gait retention;
+zero completed episodes in that smoke must not be interpreted as a success rate.
 
 ## Limits
 

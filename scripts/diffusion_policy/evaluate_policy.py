@@ -154,6 +154,8 @@ parser.add_argument(
     help="Latent-noise checkpoint only: its actor, raw Gaussian noise, or bounded initial actor.",
 )
 parser.add_argument("--seed", type=int, default=42)
+parser.add_argument("--dsrl_sampling", choices=("stochastic", "deterministic"), default=None,
+                    help="DSRL-NA only: default stochastic, as in the official evaluation.")
 parser.add_argument(
     "--deterministic_resets", action="store_true",
     help="Disable reset joint/velocity randomization for paired causal evaluation.",
@@ -926,6 +928,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         ),
         allow_dppo=True,
         allow_latent_noise_ppo=True,
+        allow_dsrl_na=True,
     )
     config = checkpoint["config"]
     dppo_task_contract_version = int(checkpoint.get("dppo_task_contract_version", 0))
@@ -939,8 +942,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             if checkpoint.get("algorithm") == "dppo"
             else int(checkpoint["gaussian_ppo_config"]["exec_horizon"])
             if checkpoint.get("algorithm") == "gaussian_chunk_ppo"
-            else int(checkpoint["latent_ppo_config"]["exec_horizon"])
-            if checkpoint.get("algorithm") == "latent_noise_ppo"
+            else int(checkpoint.get("latent_ppo_config", checkpoint.get("dsrl_na_config", {}))["exec_horizon"])
+            if checkpoint.get("algorithm") in {"latent_noise_ppo", "dsrl_na"}
             else 8
         )
     if args_cli.path_height is not None and args_cli.path_heights is not None:
@@ -1034,7 +1037,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         raise ValueError("The randomized ood_* and sweep_* families require --route_bank.")
     num_envs = len(scenarios)
     print(f"[INFO] Evaluating {num_envs} vectorized scenarios in parallel.")
-    is_latent_backend = checkpoint.get("algorithm") == "latent_noise_ppo"
+    is_latent_backend = checkpoint.get("algorithm") in {"latent_noise_ppo", "dsrl_na"}
+    if args_cli.dsrl_sampling is not None and checkpoint.get("algorithm") != "dsrl_na":
+        raise ValueError("--dsrl_sampling requires a DSRL-NA checkpoint.")
     latent_generator = None
     deterministic_backend = checkpoint.get("policy_backend") == "deterministic_chunk" or (
         checkpoint.get("policy_kind") == "spatial_hindsight_height_profile_deterministic_chunk_bc"
@@ -1049,10 +1054,18 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             "checkpoint", "gaussian", "initial"
         }:
             raise ValueError("Unknown latent reference mode.")
+        if checkpoint.get("algorithm") == "dsrl_na" and args_cli.latent_reference_mode not in (None, "checkpoint"):
+            raise ValueError("DSRL-NA only supports its learned checkpoint noise actor.")
         if str(_PROJECT_ROOT) not in sys.path:
             sys.path.insert(0, str(_PROJECT_ROOT))
-        from scripts.latent_noise_rl.checkpointing import build_inference_policy
-        policy = build_inference_policy(checkpoint, device)
+        if checkpoint.get("algorithm") == "dsrl_na":
+            from scripts.latent_noise_rl.dsrl_na import build_dsrl_na_inference_policy
+            policy = build_dsrl_na_inference_policy(checkpoint, device)
+            args_cli.dsrl_sampling = args_cli.dsrl_sampling or "stochastic"
+            policy.set_sampling_mode(args_cli.dsrl_sampling)
+        else:
+            from scripts.latent_noise_rl.checkpointing import build_inference_policy
+            policy = build_inference_policy(checkpoint, device)
         args_cli.latent_reference_mode = args_cli.latent_reference_mode or "checkpoint"
         policy.set_reference_mode(args_cli.latent_reference_mode)
         latent_generator = torch.Generator(device=device).manual_seed(int(args_cli.seed) + 99173)
@@ -1060,7 +1073,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         policy_cfg = _model_cfg_from_checkpoint(config)
         print(f"[INFO] Frozen DDIM latent actor, mode={args_cli.latent_reference_mode}, K={inference_steps}.")
     elif args_cli.latent_reference_mode is not None:
-        raise ValueError("--latent_reference_mode is valid only for latent_noise_ppo checkpoints.")
+        raise ValueError("--latent_reference_mode is valid only for latent-noise RL checkpoints.")
     elif deterministic_backend:
         if args_cli.num_inference_steps is not None:
             print("[WARN] --num_inference_steps is ignored for deterministic_chunk checkpoints.")
@@ -1418,7 +1431,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     # as free route progress.
     rollout_start_pos = raw_env._robot.data.root_pos_w.cpu().numpy().copy()
     dynamic_speed_budget = bool(
-        checkpoint.get("algorithm") in {"dppo", "gaussian_chunk_ppo", "latent_noise_ppo"}
+        checkpoint.get("algorithm") in {"dppo", "gaussian_chunk_ppo", "latent_noise_ppo", "dsrl_na"}
         and int(checkpoint.get("dppo_task_contract_version", 1)) >= 3
     )
     if args_cli.pace_budget_mode != "checkpoint" and not dynamic_speed_budget:
@@ -2292,11 +2305,14 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             plan = path_plans[i]
             ref_xy = (plan.path_w[:, :2] - start_pos[i, :2])[:duration_steps]
             active_steps = int(summary_rows[i].get("active_steps", 0))
-            act_traj = np.array(trajectories[i]["actual"][:active_steps or None])
+            act_traj = np.asarray(
+                trajectories[i]["actual"][:active_steps], dtype=float
+            ).reshape(-1, 2)
             
             # Plot reference and actual
             ax.plot(ref_xy[:, 0], ref_xy[:, 1], color="#333333", linestyle="--", linewidth=2.0, label="Reference", zorder=3)
-            ax.plot(act_traj[:, 0], act_traj[:, 1], color="#0052CC", alpha=0.9, linewidth=2.0, label="Actual", zorder=4)
+            if len(act_traj):
+                ax.plot(act_traj[:, 0], act_traj[:, 1], color="#0052CC", alpha=0.9, linewidth=2.0, label="Actual", zorder=4)
             
             ax.set_title(f"{plan.demo_name}\n({scenarios[i].speed:.2f} m/s)", fontsize=11, fontweight="bold", pad=8, color="#222222")
             ax.set_xlabel("Relative X [m]", fontsize=9)
@@ -2348,9 +2364,12 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 for i, s in enumerate(scenarios):
                     if s.path_shape == shape and s.speed == speed and s.repeat == 0:
                         active_steps = int(summary_rows[i].get("active_steps", 0))
-                        act_traj = np.array(trajectories[i]["actual"][:active_steps or None])
+                        act_traj = np.asarray(
+                            trajectories[i]["actual"][:active_steps], dtype=float
+                        ).reshape(-1, 2)
                         color = colors_list[speed_idx % len(colors_list)]
-                        ax.plot(act_traj[:, 0], act_traj[:, 1], color=color, alpha=0.9, linewidth=2.0, label=f"{speed} m/s", zorder=4)
+                        if len(act_traj):
+                            ax.plot(act_traj[:, 0], act_traj[:, 1], color=color, alpha=0.9, linewidth=2.0, label=f"{speed} m/s", zorder=4)
                         plan = path_plans[i]
                         start_progress, _ = project_trajectory_to_polyline(
                             rollout_start_pos[i : i + 1, :2], plan.path_w[:, :2]
@@ -2645,6 +2664,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         "policy_kind": checkpoint.get("policy_kind", "unknown"),
         "policy_backend": checkpoint.get("policy_backend", "diffusion"),
         "latent_reference_mode": args_cli.latent_reference_mode,
+        "dsrl_sampling": args_cli.dsrl_sampling,
         "diffusion_sampler": "ddim_eta_0" if is_latent_backend else None,
         "dppo_task_contract_version": dppo_task_contract_version,
         "pace_budget_mode": effective_pace_budget_mode,
