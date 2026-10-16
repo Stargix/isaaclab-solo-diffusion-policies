@@ -123,12 +123,25 @@ geometric flight.
 ## Paper-faithful DSRL-NA follow-up
 
 `train_dsrl_na.py` implements the paper's Noise-Aliased DSRL (DSRL-NA) update,
-not the PPO pilot above. The Phase-A diffusion prior and deterministic DDIM
+not the PPO pilot above. The default experiment is WC (`--prior wc`), initialized
+from the same Phase-A checkpoint as archived WC-v3 DPPO, SHA256
+`b94a6ae7e1da298ff0a33b314adc5e6639a059a61452d423cd926fd9103fedbd`.
+The Phase-A diffusion prior and deterministic DDIM
 decoder stay frozen. SAC's bounded actor chooses the initial latent noise;
 the action critic learns from replayed decoded action chunks, and the twin
 noise critic is repeatedly distilled on fresh `N(0, I)` latents using the
 action critic's values. SAC then updates the noise actor through that learned
 noise critic. The decoder is never differentiated through.
+
+WC uses the archived DPPO task: pointwise (`instantaneous`) height tracking,
+0.25-m transition margin and vertical-velocity weight 0.025, alongside the
+same supported_hybrid_v3 geometry, timing and tracking settings. `--prior wcp`
+is an explicit follow-up for gait preservation; it keeps the WCP prior SHA
+and its nominal-window posture task, zero transition margin and zero vertical
+velocity cost. The loader rejects a checkpoint from the other prior family.
+Changing only `--checkpoint` must not silently switch physical task contracts.
+Comparison with historical DPPO still compares complete pipelines because the
+frozen DSRL decoder uses DDIM whereas historical DPPO uses its DDPM chain.
 
 The update sequence follows the authors' [DSRL-NA implementation](https://github.com/ajwagen/stable-baselines3-dsrl/blob/master/stable_baselines3/dsrl/dsrl.py).
 The adapter sums the rewards of the four executed 50-Hz controls and applies
@@ -159,9 +172,9 @@ checkpoint exists, first run the short integration smoke in its own directory:
 
 ```bash
 ./isaaclab.sh -p scripts/latent_noise_rl/train_dsrl_na.py \
-  --checkpoint scripts/diffusion_policy/runs/walk_crouch_pronk_speed_partition_v1_k10/best.pt \
-  --output_dir scripts/latent_noise_rl/runs/wcp_dsrl_na_smoke_seed42 \
-  --run_name wcp_dsrl_na_smoke_seed42 --smoke --headless --device cuda:0
+  --prior wc --checkpoint checkpoints_iri/checkpoints_dp/wc_wct_phase_a.pt \
+  --output_dir scripts/latent_noise_rl/runs/wc_dsrl_na_smoke_seed42 \
+  --run_name wc_dsrl_na_smoke_seed42 --smoke --headless --device cuda:0
 ```
 
 Only if the smoke reports `SMOKE_OK`, start the pilot below. This deliberately
@@ -174,9 +187,9 @@ the previous 0.32-second warmup did not cover complete routes.
 
 ```bash
 ./isaaclab.sh -p scripts/latent_noise_rl/train_dsrl_na.py \
-  --checkpoint scripts/diffusion_policy/runs/walk_crouch_pronk_speed_partition_v1_k10/best.pt \
-  --output_dir scripts/latent_noise_rl/runs/wcp_dsrl_na_seed42 \
-  --run_name wcp_dsrl_na_seed42 --num_envs 4 --iterations 1000 \
+  --prior wc --checkpoint checkpoints_iri/checkpoints_dp/wc_wct_phase_a.pt \
+  --output_dir scripts/latent_noise_rl/runs/wc_dsrl_na_seed42 \
+  --run_name wc_dsrl_na_seed42 --num_envs 4 --iterations 1000 \
   --initial_rollout_chunks 2001 --rollout_chunks 2 --save_interval 100 \
   --seed 42 --headless --device cuda:0
 ```

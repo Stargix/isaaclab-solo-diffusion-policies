@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train the official noise-aliased DSRL (DSRL-NA) recipe on the frozen WCP prior."""
+"""Train noise-aliased DSRL on a pinned WC or WCP Phase-A prior."""
 from __future__ import annotations
 
 import argparse
@@ -21,18 +21,29 @@ if _project_scripts.__spec__ is not None:
     _project_scripts.__spec__.submodule_search_locations = _project_scripts.__path__
 
 from scripts.dppo_diffusion_rl.checkpointing import model_config_from_checkpoint, task_config_from_env_cfg
-from scripts.latent_noise_rl.checkpointing import load_phase_a_prior, source_semantic_digest
+from scripts.latent_noise_rl.checkpointing import PHASE_A_SOURCES, load_phase_a_prior, source_semantic_digest
 from scripts.latent_noise_rl.decoder import FrozenDDIMDecoder
 from scripts.latent_noise_rl.dsrl_na import DSRLNA, DSRLNAConfig
 from scripts.latent_noise_rl.dsrl_na_trainer import DSRLNATrainer
+
+# WC reproduces the archived WC-v3 DPPO task, including its original pointwise
+# height tracking and transition margin. WCP keeps its nominal-window contract.
+TASK_OVERRIDES = {
+    "wc": {"posture_tracking_mode": "instantaneous", "transition_margin_m": 0.25,
+           "vertical_velocity_reward_weight": 0.025},
+    "wcp": {"posture_tracking_mode": "nominal_window", "transition_margin_m": 0.0,
+            "vertical_velocity_reward_weight": 0.0},
+}
 
 
 def make_parser():
     from isaaclab.app import AppLauncher
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--prior", choices=tuple(PHASE_A_SOURCES), default="wc",
+                        help="Pinned Phase-A source and matching physical task contract.")
     parser.add_argument("--output_dir", required=True)
-    parser.add_argument("--run_name", default="wcp_dsrl_na_seed42")
+    parser.add_argument("--run_name", default=None)
     parser.add_argument("--num_envs", type=int, default=4)
     parser.add_argument("--iterations", type=int, default=1000)
     # Match the official DSRL train_freq=2 transition cadence: collect two
@@ -63,7 +74,7 @@ def _check_output(path):
 def _run(args, source, prior, source_sha, agent, output):
     from scripts.latent_noise_rl.train import _make_environment, _module_provenance
 
-    env, recipe = _make_environment(args)
+    env, recipe = _make_environment(args, task_overrides=TASK_OVERRIDES[args.prior])
     logger = None
     try:
         if abs(float(env.unwrapped.step_dt) - 0.02) > 1.0e-8:
@@ -72,6 +83,7 @@ def _run(args, source, prior, source_sha, agent, output):
         task_config = task_config_from_env_cfg(env.unwrapped.cfg)
         metadata = {
             "algorithm": "dsrl_na", "command": vars(args), "task": task_config,
+            "source_prior_family": args.prior,
             "task_recipe": recipe, "source_checkpoint": str(Path(args.checkpoint).resolve()),
             "source_checkpoint_sha256": source_sha,
             "frozen_prior_semantic_sha256": source_semantic_digest(prior),
@@ -156,6 +168,7 @@ def _run(args, source, prior, source_sha, agent, output):
 
 def main():
     args = make_parser().parse_args()
+    args.run_name = args.run_name or f"{args.prior}_dsrl_na_seed{args.seed}"
     output = Path(args.output_dir).resolve()
     if args.preflight_only and args.smoke:
         raise ValueError("Choose either --preflight-only or --smoke.")
@@ -173,7 +186,9 @@ def main():
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
-    source, prior, source_sha = load_phase_a_prior(args.checkpoint, "cpu")
+    source, prior, source_sha = load_phase_a_prior(
+        args.checkpoint, "cpu", expected_source_sha256=PHASE_A_SOURCES[args.prior]
+    )
     model_cfg = model_config_from_checkpoint(source["config"])
     dsrl_cfg = DSRLNAConfig(
         hidden_dim=args.hidden_dim, hidden_layers=args.hidden_layers,
@@ -193,6 +208,7 @@ def main():
     if args.preflight_only:
         print(json.dumps({
             "status": "PREFLIGHT_OK", "algorithm": "DSRL-NA",
+            "source_prior_family": args.prior, "task_overrides": TASK_OVERRIDES[args.prior],
             "source_sha256": source_sha, "source_policy_kind": source["policy_kind"],
             "source_schema": source["schema_version"], "output_dir": str(output),
             "dsrl_na_config": dsrl_cfg.to_dict(),

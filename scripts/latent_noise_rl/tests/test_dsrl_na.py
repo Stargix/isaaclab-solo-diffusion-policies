@@ -10,7 +10,7 @@ from scripts.latent_noise_rl.dsrl_na import (
     build_dsrl_na_inference_policy, save_dsrl_na_checkpoint,
 )
 from scripts.latent_noise_rl.dsrl_na_trainer import DSRLNATrainer
-from scripts.latent_noise_rl.checkpointing import SOURCE_SHA256, source_semantic_digest
+from scripts.latent_noise_rl.checkpointing import PHASE_A_SOURCES, source_semantic_digest
 from scripts.latent_noise_rl.tests.test_latent_noise import _fixture
 
 
@@ -135,7 +135,8 @@ def test_collector_sums_chunk_rewards_and_stops_terminal_rows(tmp_path):
     assert trainer.control_steps == 32
 
 
-def test_checkpoint_and_eval_api_preserve_seeded_executable_actions(tmp_path):
+@pytest.mark.parametrize("family", ["wc", "wcp"])
+def test_checkpoint_and_eval_api_preserve_seeded_executable_actions(tmp_path, family):
     agent, _, inputs = _agent()
     flat = asdict(agent.decoder.prior.cfg)
     source = {
@@ -146,11 +147,12 @@ def test_checkpoint_and_eval_api_preserve_seeded_executable_actions(tmp_path):
     }
     path = tmp_path / "dsrl.pt"
     save_dsrl_na_checkpoint(
-        path, source=source, source_path=path, source_sha=SOURCE_SHA256,
+        path, source=source, source_path=path, source_sha=PHASE_A_SOURCES[family],
         source_digest=source_semantic_digest(agent.decoder.prior), agent=agent,
         iteration=0, total_control_transitions=16, metrics={}, task_config={},
     )
     saved = torch.load(path, weights_only=False)
+    assert saved["source_prior_family"] == family
     loaded = build_dsrl_na_inference_policy(saved)
     expected = agent.act(*inputs, generator=torch.Generator().manual_seed(700))[1]
     full = loaded.predict_action_denormalized(*inputs, generator=torch.Generator().manual_seed(700))
@@ -164,3 +166,10 @@ def test_checkpoint_and_eval_api_preserve_seeded_executable_actions(tmp_path):
     saved["dsrl_checkpoint_version"] = 1
     with pytest.raises(ValueError, match="version"):
         build_dsrl_na_inference_policy(saved)
+
+
+def test_explicit_wc_selector_rejects_wcp_prior_before_loading(monkeypatch):
+    from scripts.latent_noise_rl import checkpointing
+    monkeypatch.setattr(checkpointing, "sha256_file", lambda _: PHASE_A_SOURCES["wcp"])
+    with pytest.raises(ValueError, match=PHASE_A_SOURCES["wc"]):
+        checkpointing.load_phase_a_prior("unused.pt", expected_source_sha256=PHASE_A_SOURCES["wc"])

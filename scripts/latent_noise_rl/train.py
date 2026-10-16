@@ -77,7 +77,7 @@ def _module_provenance():
     return result
 
 
-def _make_environment(args):
+def _make_environment(args, *, task_overrides=None):
     import gymnasium as gym
     import isaaclab_tasks  # noqa: F401
     import isaaclab.terrains as terrain_gen
@@ -107,6 +107,7 @@ def _make_environment(args):
         "posture_window_s": 0.4,
         "vertical_velocity_reward_weight": 0.0,
     }
+    settings.update(task_overrides or {})
     for name, value in settings.items():
         setattr(env_cfg, name, value)
     env_cfg.validate_task()

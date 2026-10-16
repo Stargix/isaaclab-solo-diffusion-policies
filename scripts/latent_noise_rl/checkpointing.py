@@ -21,6 +21,10 @@ from .decoder import FrozenDDIMDecoder
 from .policy import LatentNoisePolicy, ALGORITHM, POLICY_BACKEND, CHECKPOINT_VERSION
 
 SOURCE_SHA256 = "40caf9ad17846797980c96ef9a621474ca5bb730239185edf9b32cc9cc3d7886"
+PHASE_A_SOURCES = {
+    "wc": "b94a6ae7e1da298ff0a33b314adc5e6639a059a61452d423cd926fd9103fedbd",
+    "wcp": SOURCE_SHA256,
+}
 SOURCE_POLICY_KIND = "spatial_hindsight_height_profile_ddpm"
 
 
@@ -38,11 +42,12 @@ def _state_digest(state: dict[str, torch.Tensor], stats: dict) -> str:
     return digest.hexdigest()
 
 
-def load_phase_a_prior(path: str | Path, device="cpu", *, verify_pinned_sha: bool = True):
+def load_phase_a_prior(path: str | Path, device="cpu", *, verify_pinned_sha: bool = True,
+                       expected_source_sha256: str = SOURCE_SHA256):
     path = Path(path).resolve()
     actual_sha = sha256_file(path)
-    if verify_pinned_sha and actual_sha != SOURCE_SHA256:
-        raise ValueError(f"Unexpected Phase-A prior SHA256 {actual_sha}; expected {SOURCE_SHA256}.")
+    if verify_pinned_sha and actual_sha != expected_source_sha256:
+        raise ValueError(f"Unexpected Phase-A prior SHA256 {actual_sha}; expected {expected_source_sha256}.")
     source = load_training_checkpoint(path, device, expected_policy_kind=SOURCE_POLICY_KIND)
     if source.get("algorithm") is not None:
         raise ValueError("Latent steering must start directly from the pinned Phase-A imitation checkpoint.")

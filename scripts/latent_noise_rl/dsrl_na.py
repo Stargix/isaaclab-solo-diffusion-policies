@@ -435,9 +435,12 @@ class DSRLNAInferencePolicy:
 
 def save_dsrl_na_checkpoint(path, *, source, source_path, source_sha, source_digest,
                             agent, iteration, total_control_transitions, metrics, task_config):
-    from .checkpointing import assert_finite_state, source_semantic_digest
+    from .checkpointing import PHASE_A_SOURCES, assert_finite_state, source_semantic_digest
 
     prior = agent.decoder.prior
+    source_family = next((name for name, digest in PHASE_A_SOURCES.items() if digest == source_sha), None)
+    if source_family is None:
+        raise ValueError("DSRL-NA source must be a pinned WC or WCP Phase-A checkpoint.")
     if source_semantic_digest(prior) != source_digest:
         raise RuntimeError("Frozen source prior changed during DSRL-NA training.")
     prior_state = {name: tensor.detach().cpu().clone() for name, tensor in prior.state_dict().items()}
@@ -474,6 +477,7 @@ def save_dsrl_na_checkpoint(path, *, source, source_path, source_sha, source_dig
         "frozen_prior_semantic_sha256": source_digest,
         "source_checkpoint_path": str(Path(source_path).resolve()),
         "source_checkpoint_sha256": source_sha,
+        "source_prior_family": source_family,
         "ddim_scheduler_config": agent.decoder.scheduler_config(),
         "iteration": int(iteration),
         "total_control_transitions": int(total_control_transitions),
@@ -500,7 +504,7 @@ def build_dsrl_na_inference_policy(checkpoint, device="cpu"):
     from scripts.diffusion_policy.model.solo12_diffusion_policy import Solo12DiffusionPolicy
     from scripts.diffusion_policy.train.data.normalization import NormalizerStats
     from scripts.dppo_diffusion_rl.checkpointing import model_config_from_checkpoint
-    from .checkpointing import SOURCE_SHA256, source_semantic_digest
+    from .checkpointing import PHASE_A_SOURCES, source_semantic_digest
 
     if checkpoint.get("algorithm") != "dsrl_na" or checkpoint.get("policy_backend") != "frozen_ddim_dsrl_na":
         raise ValueError("Checkpoint is not a supported DSRL-NA policy.")
@@ -508,8 +512,10 @@ def build_dsrl_na_inference_policy(checkpoint, device="cpu"):
         raise ValueError("Unsupported DSRL-NA checkpoint version or resume contract.")
     if checkpoint.get("entropy_coordinates") != "normalized_tanh_noise" or checkpoint.get("discount_unit") != "action_chunk":
         raise ValueError("Incompatible DSRL-NA entropy/discount contract.")
-    if checkpoint.get("source_checkpoint_sha256") != SOURCE_SHA256:
-        raise ValueError("DSRL-NA checkpoint is not based on the pinned Phase-A prior.")
+    source_sha = checkpoint.get("source_checkpoint_sha256")
+    source_family = next((name for name, digest in PHASE_A_SOURCES.items() if digest == source_sha), None)
+    if source_family is None or checkpoint.get("source_prior_family", source_family) != source_family:
+        raise ValueError("DSRL-NA checkpoint does not identify a pinned WC or WCP Phase-A prior.")
     if checkpoint.get("policy_kind") != "spatial_hindsight_height_profile_ddpm":
         raise ValueError("DSRL-NA checkpoint does not identify the expected Phase-A policy.")
     cfg = DSRLNAConfig(**checkpoint["dsrl_na_config"])
