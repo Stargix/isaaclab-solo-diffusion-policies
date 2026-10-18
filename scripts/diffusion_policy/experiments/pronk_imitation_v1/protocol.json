@@ -1,0 +1,13 @@
+{
+  "name": "pronk_imitation_v1",
+  "dataset": "scripts/diffusion_policy/data/datasets/walk_crouch_pronk_v1_aligned/pronk_full.hdf5",
+  "dataset_sha256": "2d4c3947e2403841883e8c734d1a44fec41908e855e7df9f829e8b887e489ca4",
+  "expert_sha256": "73c572ffa444576e6afad230dac1a6d0fd91db59050469af60737d845679807d",
+  "base_config": "scripts/diffusion_policy/train/configs/walk_crouch_hindsight_geom_profile16_a0_faithful_k10.json",
+  "base_config_sha256": "df066b2a27be2c56c3d59b051ebf6f2f04b6f217ef990758c6967d47fc803a87",
+  "episodes": 3345,
+  "frames_per_episode": 299,
+  "nominal_height_m": 0.2932,
+  "seed": 42,
+  "output": "scripts/diffusion_policy/runs/pronk_imitation_v1_k10_seed42"
+}
