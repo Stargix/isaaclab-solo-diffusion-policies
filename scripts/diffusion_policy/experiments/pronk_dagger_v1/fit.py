@@ -12,7 +12,8 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 from scripts.diffusion_policy.experiments.pronk_intervention_v1.protocol import load_checkpoint, sha256
-from scripts.diffusion_policy.experiments.pronk_intervention_v1.finetune import make_dataset, retain_representable_targets
+from scripts.diffusion_policy.experiments.pronk_intervention_v1.finetune import make_dataset
+from scripts.diffusion_policy.experiments.pronk_dagger_v1.support import PROTOCOL, audit_action_support, unclipped_checkpoint
 from scripts.diffusion_policy.experiments.pronk_dagger_v1.protocol import UPDATES, BATCH_SIZE, LEARNING_RATE, early_anchor
 from scripts.diffusion_policy.model.solo12_diffusion_policy import Solo12DiffusionPolicy
 from scripts.diffusion_policy.model.ema_model import EMAModel
@@ -35,7 +36,7 @@ def recovery_pools(paths, ck, stats):
     train, early, validation, audits = [], [], [], []
     for path in paths:
         ds = make_dataset(path, ck)
-        audits.append(dict(path=str(path), sha256=sha256(path), **retain_representable_targets(ds, stats)))
+        audits.append(dict(path=str(path), sha256=sha256(path), **audit_action_support(ds,stats,path)))
         with h5py.File(path, 'r') as f:
             tr = [i for i,d in enumerate(ds.demos) if int(f['data'][d.demo_name].attrs['cohort']) < 3]
             va = [i for i,d in enumerate(ds.demos) if int(f['data'][d.demo_name].attrs['cohort']) == 3]
@@ -79,11 +80,11 @@ def main():
     args = ap.parse_args()
     if args.output.exists():
         raise FileExistsError(args.output)
-    ck = load_checkpoint(args.checkpoint, args.expected_sha256)
+    ck = unclipped_checkpoint(load_checkpoint(args.checkpoint, args.expected_sha256))
     stats = NormalizerStats.from_dict(ck['normalizer_stats'])
     recovery, early, heldout, audits = recovery_pools(args.collections, ck, stats)
     nominal = make_dataset(args.nominal, ck)
-    nominal_audit = retain_representable_targets(nominal, stats)
+    nominal_audit = audit_action_support(nominal,stats,args.nominal)
     train_names = {x['demo_name'] for x in ck['split_manifest']['train']}
     val_names = {x['demo_name'] for x in ck['split_manifest']['validation']}
     if train_names & val_names:
@@ -92,10 +93,11 @@ def main():
     va = nominal.sample_indices_for_demos([i for i,d in enumerate(nominal.demos) if d.demo_name in val_names])
     if not tr or not va:
         raise ValueError('Original episode splits not found')
-    provenance = dict(protocol='pronk_dagger_v1', arm=args.arm, parent_sha256=args.expected_sha256,
+    provenance = dict(protocol=PROTOCOL, arm=args.arm, parent_sha256=args.expected_sha256,
                       updates=UPDATES, batch_size=BATCH_SIZE, lr=LEARNING_RATE,
                       collection_audits=audits, nominal_range_audit=nominal_audit,
                       nominal_sha256=sha256(args.nominal), fixed_normalizer=True,
+                      clip_sample=False, support_policy='retain all finite labels; no range-based exclusion',
                       mixture=('100% nominal' if args.arm=='nominal' else
                                '50% nominal, 25% all corrective, 25% first 16 corrective anchors'),
                       selection='last.pt at fixed update budget, not selected on rollout performance')

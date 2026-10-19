@@ -8,6 +8,13 @@ experiment, **not** new WC/WCT training, DPPO, a skill classifier or a gait rewa
 It uses the original architecture, diffusion objective, normalization, action
 history, quadruped augmentation and native V8 PD parameters.
 
+**2026-10-20 revision (`pronk_dagger_v1_support_v2`):** job 4311 found
+121/9050 raw target windows outside the original min/max range (reported by the
+cluster, not remeasured locally). The 1% stop rule was an engineering guard,
+not a DAgger requirement. It counted overlapping past and future targets and
+could delete early corrective windows. This revision replaces that filter with
+a non-destructive audit and an explicit matched sampler change.
+
 The earlier one-round intervention pilot collected useful recoveries but neither
 600-update arm survived any of its 18 unassisted attempts. Lower denoising loss
 did not establish physical improvement. That result does not reject iterative
@@ -39,9 +46,17 @@ limitations without simultaneously changing the model or observation space.
   corrective anchors. Collections are sampled uniformly, then windows within
   each collection. Nominal control: 100% original nominal windows with the same
   update budget. No fixed 2,048-window cache.
-- Never refit old normalization or clip expert labels silently. Existing range
-  audit explicitly excludes rare unsupported raw target windows and aborts if
-  more than 1% would be excluded. Reports retain the excluded anchor list.
+- Keep the exact original affine normalization and every finite action label.
+  Disable DDPM `clip_sample` **in both fine-tuning arms**, and save this in both
+  checkpoint config representations. No network or loss change is needed:
+  affine normalization can express labels outside [-1,1], whereas the old
+  sampler's clean-sample clipping prevented reproducing those outputs.
+  This changes inference behavior, not normalization or actuator limits.
+- Audit past-only, future-only and mixed out-of-range windows; independently
+  count raw frames/components and identify student versus expert control.
+  Also report the first 16 correction anchors and per-joint excess magnitudes.
+  No 1%, 1.5% or 2% exclusion threshold remains in this revision.
+  Nonfinite actions still abort. The earlier pilot's filter is unchanged.
 
 All numbers above are declared engineering choices, not hyperparameters proved
 optimal by literature. There is no adaptive uncertainty detector in this version.
@@ -68,9 +83,13 @@ only if unassisted nominal reproduction works.
 
 ## Evaluation and decision
 
+Before training, evaluate both the original clipped prior and an identical-weight
+prior with only sample clipping disabled (`sampler_only`). This isolates any
+immediate effect of the sampler change. Round-zero collection still uses the
+original clipped student, or a validated existing collection from that student.
 After each round, evaluate both arms from reset with no expert help, seed 543,
 18 attempts. This diagnostic bank never selects checkpoints or changes budgets.
-After all three rounds, evaluate original / nominal / recovery on fresh seeds
+After all three rounds, evaluate original / sampler-only / nominal / recovery on fresh seeds
 9543, 10543, 11543: 54 attempts per arm, no seed selection.
 
 Report all failures, verified cycles, speed and survival; denoising loss alone
@@ -89,7 +108,12 @@ Even a successful imitation result does not guarantee DPPO preserves pronk.
 The runner saves source/input hashes, Git dirtiness, per-stage logs and outcomes.
 It checks required artifacts because Kit can close without a trustworthy exit
 status. Existing output directories are never overwritten. There is deliberately
-no automatic resume or automatic new variant after a failed gate.
+no automatic resume or automatic new variant after a failed gate. The explicit
+`--reuse_round0` option reuses only a qualified complete collection from the
+frozen original student. It checks inputs, schedule, expert masks, report/HDF5
+agreement and hindsight anchors, then records file hashes. It never overwrites
+the old run and never imports its fitted checkpoints. Training outputs go to
+a new directory. This is not optimizer resume.
 
 ## Run
 
@@ -103,13 +127,32 @@ This is **preflight only**: checks frozen inputs/dependencies, no Kit or trainin
 To run the bounded experiment locally:
 
 ```powershell
-.\isaaclab.bat -p scripts/diffusion_policy/experiments/pronk_dagger_v1/run.py --execute --device cuda:0 --output scratch/pronk_dagger_v1
+.\isaaclab.bat -p scripts/diffusion_policy/experiments/pronk_dagger_v1/run.py --execute --device cuda:0 --output scratch/pronk_dagger_v1_support_v2
 ```
 
 Linux uses `./isaaclab.sh -p` instead. On another machine, provide `--checkpoint`,
 `--expert` and `--nominal` paths explicitly; file hashes must still match. The
 native V8 task, runtime helper and both experiment folders must exist there.
 No Slurm launcher or generated data is added to the public repository.
+
+To reuse job 4311's round-zero collection on the cluster, retain the existing
+checkpoint/expert/dataset arguments from the launcher and add:
+
+```bash
+--output scratch/pronk_dagger_v1_support_v2 --reuse_round0 scratch/pronk_dagger_v1/round_0_collection
+```
+
+Pass these to `run.py`, not to `sbatch` unless the private launcher forwards
+arguments. Do not delete the previous directory. This revision keeps all its
+finite corrective labels; it does not claim the untested revised sampler is
+already stable. Existing simulator clipping/termination remains in force and
+this experiment is not qualified for hardware deployment.
+
+Read-only support audit, independent of Kit and training:
+
+```powershell
+python scripts/diffusion_policy/experiments/pronk_dagger_v1/support.py --checkpoint best.pt --collection scratch/pronk_dagger_v1/round_0_collection/recovery.hdf5
+```
 
 ### Source publication prerequisite
 

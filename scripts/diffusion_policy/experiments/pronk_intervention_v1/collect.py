@@ -184,6 +184,8 @@ def main():
                             action[active]=chunk[active,phases[active]%4]
                         if runner.clip_actions is not None:
                             action=action.clamp(-runner.clip_actions,runner.clip_actions)
+                        if not torch.isfinite(action).all():
+                            raise FloatingPointError('Nonfinite action; refusing simulator step')
                         record=dict(joint_pos=p[:,:12].cpu().numpy().copy(),joint_vel=p[:,12:24].cpu().numpy().copy(),
                             base_ang_vel=p[:,24:27].cpu().numpy().copy(),projected_gravity=p[:,27:].cpu().numpy().copy(),
                             root_pos_w=pos,root_quat_w=quat,command_speed=commands.cpu().numpy().copy(),
