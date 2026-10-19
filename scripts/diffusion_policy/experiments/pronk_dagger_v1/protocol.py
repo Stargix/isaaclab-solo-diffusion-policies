@@ -22,3 +22,26 @@ def success_count(report):
 def qualified(report):
     # Small-screen qualification only, not a paper success-rate estimate.
     return bool(report['gate_passed'])
+
+
+def enforce_collection_gate(*, evaluate, fixed_exposure):
+    """A performance diagnostic must not veto valid iterative recovery data."""
+    return evaluate or not fixed_exposure
+
+
+def exposure_increment(round_index, *, fixed_exposure):
+    if round_index not in range(ROUNDS):
+        raise ValueError('Invalid DAgger round')
+    return 0 if fixed_exposure else 10*round_index
+
+
+def usable_collection_counts(path):
+    """Keep episode separation and the existing minimums, not a success-rate gate."""
+    import h5py
+    with h5py.File(path,'r') as f:
+        cohorts=[int(d.attrs['cohort']) for d in f['data'].values()]
+    if any(c not in range(4) for c in cohorts):
+        raise ValueError('Unexpected recovery cohort')
+    train=sum(c<3 for c in cohorts)
+    validation=sum(c==3 for c in cohorts)
+    return dict(train=train,validation=validation,usable=train>=30 and validation>=10)

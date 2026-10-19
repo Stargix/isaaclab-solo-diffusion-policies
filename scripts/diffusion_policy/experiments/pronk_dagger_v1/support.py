@@ -13,7 +13,7 @@ import h5py
 import numpy as np
 
 
-PROTOCOL = 'pronk_dagger_v1_support_v2'
+PROTOCOL = 'pronk_dagger_v1_fixed_exposure_v3'
 
 
 def unclipped_checkpoint(checkpoint):
@@ -139,6 +139,58 @@ def validate_reused_collection(directory, base_sha, expert_sha):
             if not len(anchors) or any(t<0 or t+100>300 or not control[t:t+100].all() for t in anchors):
                 raise ValueError('Invalid expert-controlled hindsight anchors')
     return hdf5
+
+
+def validate_round0_fits(directory, collection, original, base_sha, nominal_sha):
+    """Reuse completed matched round-zero fits, never unfinished optimizer state."""
+    from scripts.diffusion_policy.experiments.pronk_intervention_v1.protocol import load_checkpoint, sha256
+    from scripts.diffusion_policy.experiments.pronk_dagger_v1.protocol import UPDATES, BATCH_SIZE, LEARNING_RATE
+    directory=Path(directory).resolve()
+    collection_sha=sha256(collection)
+
+    def equal_stats(a,b):
+        if isinstance(a,dict) and isinstance(b,dict):
+            return a.keys()==b.keys() and all(equal_stats(a[k],b[k]) for k in a)
+        return np.array_equal(np.asarray(a),np.asarray(b))
+
+    expected_diffusion=deepcopy(original['config']['diffusion'])
+    expected_diffusion['clip_sample']=False
+    paths={}
+    for arm in ('recovery','nominal'):
+        path=directory/f'round_0_{arm}'/'last.pt'
+        ck=load_checkpoint(path)
+        experiment=ck.get('experiment',{})
+        if (experiment.get('protocol') not in ('pronk_dagger_v1_support_v2',PROTOCOL)
+                or experiment.get('arm')!=arm or experiment.get('parent_sha256')!=base_sha
+                or experiment.get('updates')!=UPDATES or experiment.get('lr')!=LEARNING_RATE
+                or experiment.get('batch_size')!=BATCH_SIZE
+                or experiment.get('clip_sample') is not False
+                or experiment.get('fixed_normalizer') is not True
+                or experiment.get('nominal_sha256')!=nominal_sha):
+            raise ValueError(f'Cannot reuse incomplete or incompatible round-zero fit: {path}')
+        audits=experiment.get('collection_audits',[])
+        if len(audits)!=1 or audits[0].get('sha256')!=collection_sha:
+            raise ValueError(f'Round-zero fit used different correction data: {path}')
+        if (ck.get('schema_version')!=original.get('schema_version')
+                or ck.get('policy_kind')!=original.get('policy_kind')
+                or ck['config']['model']!=original['config']['model']
+                or ck['config']['diffusion']!=expected_diffusion
+                or ck['noise_scheduler_config'].get('clip_sample') is not False
+                or not equal_stats(ck['normalizer_stats'],original['normalizer_stats'])):
+            raise ValueError(f'Round-zero model/normalization/sampler mismatch: {path}')
+        dataset={k:v for k,v in ck['config']['dataset'].items() if k!='hdf5_paths'}
+        expected_dataset={k:v for k,v in original['config']['dataset'].items() if k!='hdf5_paths'}
+        if dataset!=expected_dataset:
+            raise ValueError(f'Round-zero conditioning/history mismatch: {path}')
+        # The next fit loads this EMA strictly; verify tensor validity before reuse.
+        import torch
+        expected=original['ema_model_state_dict']
+        actual=ck['ema_model_state_dict']
+        if (actual.keys()!=expected.keys() or any(actual[k].shape!=expected[k].shape
+                or not torch.isfinite(actual[k]).all() for k in actual)):
+            raise ValueError(f'Invalid round-zero EMA weights: {path}')
+        paths[arm]=path
+    return paths
 
 
 if __name__=='__main__':

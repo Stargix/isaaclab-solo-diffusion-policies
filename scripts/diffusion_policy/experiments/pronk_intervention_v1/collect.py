@@ -19,6 +19,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[4]))
 from scripts.diffusion_policy.experiments.pronk_intervention_v1.protocol import (
     ROOT, BASE_SHA, EXPERT, EXPERT_SHA, START, STEPS, PREFIXES, SPEEDS,
     DEFAULT_OUTPUT, load_checkpoint, recovery_anchors, gate_passes, sha256)
+from scripts.diffusion_policy.experiments.pronk_dagger_v1.protocol import enforce_collection_gate, exposure_increment
 
 ap=argparse.ArgumentParser(description=__doc__)
 ap.add_argument('--checkpoint',type=Path,default=ROOT/'best.pt')
@@ -29,8 +30,11 @@ ap.add_argument('--evaluate',action='store_true',help='Student-only physical scr
 ap.add_argument('--expected_sha256',help='Explicit integrity pin for an iterative student checkpoint.')
 ap.add_argument('--expert',type=Path,default=EXPERT)
 ap.add_argument('--dagger_round',type=int,choices=(0,1,2),help='Opt-in iterative protocol; pilot defaults remain unchanged.')
+ap.add_argument('--dagger_fixed_exposure',action='store_true',help='Keep round-zero exposure; record the cohort gate without stopping collection.')
 AppLauncher.add_app_launcher_args(ap)
 args=ap.parse_args()
+if args.dagger_fixed_exposure and (args.dagger_round is None or args.evaluate):
+    raise ValueError('Fixed-exposure aggregation requires a DAgger collection round, not evaluation.')
 if args.rounds not in (1,4):
     raise ValueError('Use one feasibility cohort or the frozen four-cohort pilot.')
 if args.evaluate and args.rounds != 1:
@@ -92,6 +96,8 @@ def main():
     report=dict(protocol='pronk_intervention_v1',mode='student_evaluation' if args.evaluate else 'takeover_collection',seed=args.seed,
                 base_sha256=sha256(args.checkpoint),expert_sha256=sha256(args.expert),
                 dagger_round=args.dagger_round,
+                dagger_fixed_exposure=args.dagger_fixed_exposure,
+                gate_is_diagnostic=args.dagger_fixed_exposure,
                 physics='native V8 nominal, no DR/noise/delay/push; unchanged PD',
                 source_sha256={str(p.relative_to(ROOT)):sha256(p) for p in Path(__file__).parent.glob('*.py')},
                 git_head=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),
@@ -118,7 +124,7 @@ def main():
             # Half the attempts expose reset/startup; half expose an established gait.
             starts[::2]=0
             prefixes=torch.tensor([20,20,30,30,40,40],device=device).repeat(3)
-            takeover=starts+prefixes+10*args.dagger_round
+            takeover=starts+prefixes+exposure_increment(args.dagger_round,fixed_exposure=args.dagger_fixed_exposure)
         with (nullcontext(None) if args.evaluate else h5py.File(args.output/'recovery.hdf5','w')) as f:
             group=None if f is None else f.create_group('data')
             if group is not None:
@@ -243,7 +249,8 @@ def main():
                     **{key:np.asarray([r[key] for r in records]) for key in ('height','vx','physical_flight','completed','expert_control','flight_duration','clearance','foot_force','valid')})
                 (args.output/'collection.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
                 print(json.dumps(dict(cohort=cohort,survived=int(survived.sum()),saved=sum(r['saved'] for r in rows if r['cohort']==cohort),gate_passed=report['gate_passed'])),flush=True)
-                if not report['gate_passed']:
+                if not report['gate_passed'] and enforce_collection_gate(
+                        evaluate=args.evaluate,fixed_exposure=args.dagger_fixed_exposure):
                     print('Student-only screen did not pass.' if args.evaluate else
                           'Gate failed: no further collection or training authorized by this protocol.',flush=True)
                     break

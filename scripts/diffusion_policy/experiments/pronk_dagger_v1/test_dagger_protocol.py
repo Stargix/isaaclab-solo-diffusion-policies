@@ -186,3 +186,115 @@ def test_reuse_complete_collection_is_read_only_and_validates_masks(tmp_path):
         f['data/demo_0/diagnostics/expert_control'][100]=False
     with pytest.raises(ValueError,match='control mask'):
         validate_reused_collection(tmp_path,'base','expert')
+
+
+def test_fixed_exposure_does_not_stop_on_aggregate_gate_or_increase_difficulty():
+    from scripts.diffusion_policy.experiments.pronk_dagger_v1.protocol import enforce_collection_gate, exposure_increment
+    assert not enforce_collection_gate(evaluate=False,fixed_exposure=True)
+    assert enforce_collection_gate(evaluate=False,fixed_exposure=False)  # old pilot unchanged
+    assert enforce_collection_gate(evaluate=True,fixed_exposure=True)
+    assert [exposure_increment(i,fixed_exposure=True) for i in range(3)]==[0,0,0]
+    assert [exposure_increment(i,fixed_exposure=False) for i in range(3)]==[0,10,20]
+
+
+def test_collection_eligibility_uses_episode_counts_not_aggregate_success(tmp_path):
+    import h5py
+    from scripts.diffusion_policy.experiments.pronk_dagger_v1.protocol import usable_collection_counts
+    path=tmp_path/'partial_success.hdf5'
+    with h5py.File(path,'w') as f:
+        for i in range(40):
+            f.create_group(f'data/demo_{i}').attrs['cohort']=0 if i<30 else 3
+    assert usable_collection_counts(path)==dict(train=30,validation=10,usable=True)
+    with h5py.File(path,'r+') as f:
+        del f['data/demo_39']
+    assert usable_collection_counts(path)==dict(train=30,validation=9,usable=False)
+
+
+def test_round0_fit_reuse_requires_matching_data_sampler_and_completed_budget(tmp_path,monkeypatch):
+    from copy import deepcopy
+    import pytest
+    import scripts.diffusion_policy.experiments.pronk_intervention_v1.protocol as pilot
+    from scripts.diffusion_policy.experiments.pronk_dagger_v1.support import validate_round0_fits
+    collection=tmp_path/'recovery.hdf5'
+    collection.write_bytes(b'unchanged-recording')
+    original=dict(schema_version=8,policy_kind='test',
+        config=dict(model={'d_model':128},diffusion={'clip_sample':True},dataset={'history':8,'hdf5_paths':['old']}),
+        normalizer_stats={'action':{'min':np.array([-1.]),'max':np.array([1.])}},
+        ema_model_state_dict={'weight':torch.zeros(2)})
+    checkpoints={}
+    for arm in ('recovery','nominal'):
+        ck=deepcopy(original)
+        ck['config']['diffusion']['clip_sample']=False
+        ck['noise_scheduler_config']={'clip_sample':False}
+        ck['experiment']=dict(protocol='pronk_dagger_v1_support_v2',arm=arm,parent_sha256='base',updates=4000,
+            batch_size=128,lr=1e-5,clip_sample=False,fixed_normalizer=True,nominal_sha256='nominal',
+            collection_audits=[{'sha256':pilot.sha256(collection)}])
+        checkpoints[arm]=ck
+    monkeypatch.setattr(pilot,'load_checkpoint',lambda path:checkpoints[path.parent.name.removeprefix('round_0_')])
+    paths=validate_round0_fits(tmp_path,collection,original,'base','nominal')
+    assert set(paths)=={'recovery','nominal'}
+    checkpoints['recovery']['experiment']['updates']=3999
+    with pytest.raises(ValueError,match='incomplete or incompatible'):
+        validate_round0_fits(tmp_path,collection,original,'base','nominal')
+    checkpoints['recovery']['experiment']['updates']=4000
+    checkpoints['recovery']['normalizer_stats']['action']['max'][0]=2.
+    with pytest.raises(ValueError,match='normalization/sampler mismatch'):
+        validate_round0_fits(tmp_path,collection,original,'base','nominal')
+    checkpoints['recovery']['normalizer_stats']['action']['max'][0]=1.
+    checkpoints['nominal']['experiment']['collection_audits'][0]['sha256']='different'
+    with pytest.raises(ValueError,match='different correction data'):
+        validate_round0_fits(tmp_path,collection,original,'base','nominal')
+
+
+def test_runner_finishes_three_rounds_despite_failed_aggregate_gates(tmp_path,monkeypatch):
+    """Mock processes only: exercise orchestration, not a simulated learning claim."""
+    import json
+    import sys
+    from pathlib import Path
+    import scripts.diffusion_policy.experiments.pronk_dagger_v1.run as run
+    import scripts.diffusion_policy.experiments.pronk_dagger_v1.summarise as summary
+    output=tmp_path/'output'
+    monkeypatch.setattr(sys,'argv',['run.py','--execute','--output',str(output)])
+    monkeypatch.setattr(run,'source_closure',lambda:[])
+    monkeypatch.setattr(run,'publication_report',lambda _:dict(untracked=[],modified=[]))
+    pins={run.ROOT/'best.pt':run.BASE_SHA,run.EXPERT:run.EXPERT_SHA,run.NOMINAL:run.NOMINAL_SHA}
+    monkeypatch.setattr(run,'sha256',lambda path:pins.get(Path(path),'fixed-file-hash'))
+    base=dict(split_manifest={},config={'diffusion':{'clip_sample':True}},
+              noise_scheduler_config={'clip_sample':True})
+    monkeypatch.setattr(run,'load_checkpoint',lambda path,*args:base if Path(path).name=='best.pt'
+                        else {'experiment':{'updates':4000}})
+    monkeypatch.setattr(run.subprocess,'check_output',lambda *args,**kw:'test-head')
+    monkeypatch.setattr(run.torch,'save',lambda ck,path:Path(path).write_bytes(b'fixture'))
+    monkeypatch.setattr(summary,'summarise',lambda path:None)
+    # Round one contributes no new data, but round zero remains usable.
+    monkeypatch.setattr(run,'usable_collection_counts',lambda path:
+        dict(train=0,validation=0,usable=False) if 'round_1_collection' in str(path)
+        else dict(train=32,validation=12,usable=True))
+    fits=[]
+
+    def process(command,**kwargs):
+        dest=Path(command[command.index('--output')+1])
+        dest.mkdir(parents=True)
+        if Path(command[1]).name=='collect.py':
+            evaluation='--evaluate' in command
+            if not evaluation:
+                assert '--dagger_fixed_exposure' in command
+            count=18 if evaluation else 72
+            rows=[dict(speed=(.2,.35,.5)[(i%18)//6],mean_vx=(.2,.35,.5)[(i%18)//6],
+                       survived=True,cycles=3) for i in range(count)]
+            (dest/'collection.json').write_text(json.dumps(dict(attempts=rows,gate_passed=False)),encoding='utf-8')
+        else:
+            fits.append(command)
+            (dest/'last.pt').write_bytes(b'fixture')
+
+    monkeypatch.setattr(run.subprocess,'run',process)
+    run.main()
+    result=json.loads((output/'experiment.json').read_text(encoding='utf-8'))
+    assert result['status']=='complete'
+    assert len(fits)==6
+    assert len(result['results'])==20
+    assert [r['usable'] for r in result['collection_decisions']]==[True,False,True]
+    for command in fits:
+        if 'round_1_' in command[command.index('--output')+1]:
+            paths=command[command.index('--collections')+1:command.index('--output')]
+            assert len(paths)==1 and 'round_0_collection' in paths[0]
