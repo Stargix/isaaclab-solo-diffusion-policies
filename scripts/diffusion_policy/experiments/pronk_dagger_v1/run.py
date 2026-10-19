@@ -10,6 +10,7 @@ from scripts.diffusion_policy.experiments.pronk_intervention_v1.protocol import 
     ROOT, BASE_SHA, EXPERT, EXPERT_SHA, NOMINAL, load_checkpoint, sha256)
 from scripts.diffusion_policy.experiments.pronk_dagger_v1.protocol import (
     ROUNDS, UPDATES, BATCH_SIZE, NOMINAL_SHA, qualified, success_count)
+from scripts.diffusion_policy.experiments.pronk_dagger_v1.dependencies import source_closure, publication_report
 
 COLLECT = ROOT/'scripts/diffusion_policy/experiments/pronk_intervention_v1/collect.py'
 FIT = Path(__file__).with_name('fit.py')
@@ -31,19 +32,15 @@ def main():
     ap.add_argument('--device',default='cuda:0')
     ap.add_argument('--execute',action='store_true')
     args = ap.parse_args()
+    sources = set(source_closure())
+    publication = publication_report(sources)
+    if publication['untracked'] or publication['modified']:
+        raise RuntimeError('Required experiment sources differ from HEAD. Commit the reviewed dependencies before running: '
+                           + json.dumps(publication))
     for name,pin in ((args.checkpoint,BASE_SHA),(args.expert,EXPERT_SHA),(args.nominal,NOMINAL_SHA)):
         if sha256(name)!=pin: raise ValueError(f'Frozen input hash mismatch: {name}')
     ck = load_checkpoint(args.checkpoint,BASE_SHA)
     if 'split_manifest' not in ck: raise ValueError('Original train/validation manifest required')
-    dependencies = [COLLECT,FIT,ROOT/'scripts/diffusion_policy/runtime/controller.py',
-                    ROOT/'source/isaaclab_tasks/isaaclab_tasks/direct/solo12/solo12_pronk_v8.py']
-    sources = set(dependencies)
-    for directory in (FIT.parent,COLLECT.parent,ROOT/'scripts/diffusion_policy/model',
-                      ROOT/'scripts/diffusion_policy/train/data',
-                      ROOT/'scripts/diffusion_policy/train/conditioning',
-                      ROOT/'scripts/diffusion_policy/runtime',
-                      ROOT/'source/isaaclab_tasks/isaaclab_tasks/direct/solo12'):
-        sources.update(directory.glob('*.py'))
     source_hashes = {str(p.relative_to(ROOT)):sha256(p) for p in sorted(sources)}
     manifest = dict(protocol='pronk_dagger_v1',rounds=ROUNDS,updates_per_round=UPDATES,
                     batch_size=BATCH_SIZE,checkpoint_sha256=BASE_SHA,expert_sha256=EXPERT_SHA,

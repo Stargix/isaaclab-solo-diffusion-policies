@@ -111,6 +111,31 @@ Linux uses `./isaaclab.sh -p` instead. On another machine, provide `--checkpoint
 native V8 task, runtime helper and both experiment folders must exist there.
 No Slurm launcher or generated data is added to the public repository.
 
+### Source publication prerequisite
+
+V8 inherits historical configurations; publishing only its final file is not
+sufficient. Its required local additions are `solo12_pronk_v4.py` through
+`solo12_pronk_v8.py`, `pronk_curriculum.py`, `pronk_schedule.py`, and the matching
+changes in `solo12_pronk_env.py` and `pronk_gait.py`. V2 and `pronk_ppo.py` are
+already tracked. V3 is not in V8's import chain. Do not publish every historical
+launcher or every task registration to solve this dependency problem.
+
+The collector registers V8 privately when needed; the global `solo12/__init__.py`
+does not need any change. The new `dependencies.py` checks transitive local
+Python imports without starting Kit or requiring data:
+
+```powershell
+python scripts/diffusion_policy/experiments/pronk_dagger_v1/dependencies.py
+```
+
+The runner refuses sources absent from Git or different from HEAD, before
+loading data or starting Kit. Use the committed checkout on the cluster. A
+research working directory with unpublished changes to imported sources
+(including package initializers) intentionally fails this check. Unrelated
+documentation, launcher and data changes do not block it. Third-party packages,
+Isaac versions and physical behavior still need an actual cluster smoke check;
+the AST dependency audit does not prove those are compatible.
+
 Tests without Kit:
 
 ```powershell

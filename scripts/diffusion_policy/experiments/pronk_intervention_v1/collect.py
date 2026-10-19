@@ -59,6 +59,14 @@ from scripts.diffusion_policy.runtime.controller import DelayedHistory, validate
 
 def main():
     args.output.mkdir(parents=True)
+    # Keep the optional historical task local to this experiment. A clean
+    # checkout need not register every intervening pronk training variant.
+    if 'solo12-pronk-v8-v0' not in gym.registry:
+        gym.register(
+            id='solo12-pronk-v8-v0',
+            entry_point='isaaclab_tasks.direct.solo12.solo12_pronk_v8:Solo12PronkV8Env',
+            disable_env_checker=True,
+        )
     cfg=Solo12PronkV8EnvCfg()
     cfg.use_full_difficulty()
     cfg.scene.num_envs=18

@@ -61,3 +61,29 @@ def test_recovery_split_and_early_indices_preserve_augmentation(monkeypatch,tmp_
     assert len(tr[0][1])==30*3*4
     assert len(early[0][1])==30*2*4
     assert set(tr[0][1]).isdisjoint(val[0][1])
+
+
+def test_dependency_closure_finds_nested_missing_module(monkeypatch,tmp_path):
+    from scripts.diffusion_policy.experiments.pronk_dagger_v1 import dependencies as dep
+    package=tmp_path/'fixture'
+    package.mkdir()
+    (package/'__init__.py').write_text('',encoding='utf-8')
+    (package/'v8.py').write_text('from .v7 import Config\n',encoding='utf-8')
+    (package/'v7.py').write_text('from .v6 import Config\n',encoding='utf-8')
+    monkeypatch.setattr(dep,'MODULE_ROOTS',{'fixture':package})
+    monkeypatch.setattr(dep,'SEEDS',('fixture.v8',))
+    import pytest
+    with pytest.raises(FileNotFoundError,match='fixture.v6'):
+        dep.source_closure()
+
+
+def test_collection_registers_v8_without_global_initializer():
+    import ast
+    from pathlib import Path
+    collector=Path(__file__).resolve().parents[1]/'pronk_intervention_v1/collect.py'
+    tree=ast.parse(collector.read_text(encoding='utf-8'))
+    registrations=[node for node in ast.walk(tree) if isinstance(node,ast.Call)
+                   and isinstance(node.func,ast.Attribute) and node.func.attr=='register']
+    assert any(any(k.arg=='id' and isinstance(k.value,ast.Constant)
+                   and k.value.value=='solo12-pronk-v8-v0' for k in node.keywords)
+               for node in registrations)

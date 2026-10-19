@@ -94,6 +94,14 @@ class PronkCycleTracker:
         self.landing_time = torch.full((num_envs, 4), float("inf"), device=device)
         self.velocity_sum = torch.zeros((num_envs, 2), device=device)
         self.commands = torch.zeros_like(self.velocity_sum)
+        self.geometry_verified = torch.zeros_like(self.active)
+
+    def _flight_mask(self, contacts, clearance_m):
+        return ~contacts.any(dim=-1) & (clearance_m >= self.minimum_clearance_m).all(dim=-1)
+
+    def _verification_mask(self):
+        # Legacy v1-v4 already verify clearance on each timed airborne sample.
+        return torch.ones_like(self.active)
 
     def reset(self, env_ids=None):
         if env_ids is None:
@@ -105,6 +113,7 @@ class PronkCycleTracker:
         self.landing_time[env_ids] = float("inf")
         self.armed[env_ids] = False
         self.active[env_ids] = False
+        self.geometry_verified[env_ids] = False
 
     def update(self, contacts, clearance_m, air_time, commands_xy, velocity_xy, valid_pose):
         if contacts.shape != self.support_age.shape or clearance_m.shape != contacts.shape or air_time.shape != contacts.shape:
@@ -114,7 +123,8 @@ class PronkCycleTracker:
         self.support_age = torch.where(contacts, 0.0, self.support_age + self.dt)
         self.armed |= eligible & ~self.active & (self.support_age <= self.support_window_s).all(dim=-1)
         self.armed &= eligible
-        airborne = ~contacts.any(dim=-1) & (clearance_m >= self.minimum_clearance_m).all(dim=-1)
+        airborne = self._flight_mask(contacts, clearance_m)
+        geometric_flight = ~contacts.any(dim=-1) & (clearance_m >= self.minimum_clearance_m).all(dim=-1)
         start = self.armed & ~self.active & airborne
         self.active |= start
         self.armed &= ~start
@@ -124,6 +134,8 @@ class PronkCycleTracker:
         self.landing_time[start] = float("inf")
         self.takeoff_air_time[start] = air_time[start]
         self.commands[start] = commands_xy[start]
+        self.geometry_verified[start] = False
+        self.geometry_verified |= self.active & geometric_flight & eligible
 
         self.elapsed += self.active * self.dt
         self.flight += (self.active & airborne) * self.dt
@@ -139,17 +151,134 @@ class PronkCycleTracker:
             | (self.flight > self.maximum_flight_s + 1.0e-6)
             | (self.elapsed - first_landing > self.landing_window_s + 1.0e-6)
         )
-        completed = self.active & landed_all & ~invalid & (self.flight >= self.minimum_flight_s - 1.0e-6)
+        completed = (self.active & landed_all & ~invalid
+                     & (self.flight >= self.minimum_flight_s - 1.0e-6) & self._verification_mask())
         average_velocity = self.velocity_sum / self.elapsed.clamp_min(self.dt).unsqueeze(-1)
         landing_times_finite = torch.where(torch.isfinite(self.landing_time), self.landing_time, 0.0)
         components = pronk_cycle_score(
             self.commands, average_velocity, self.takeoff_air_time, landing_times_finite, completed,
             tracking_std_mps=self.tracking_std_mps, synchronization_std_s=self.synchronization_std_s,
         )
-        components.update(completed=completed, physical_flight=airborne & eligible,
+        components.update(completed=completed, physical_flight=geometric_flight & eligible,
+                          unloaded_flight=~contacts.any(dim=-1) & eligible,
                           flight_duration=self.flight.clone())
         finished = completed | invalid | (self.active & landed_all)
         self.active &= ~finished
         self.armed &= ~finished
         self.support_age[invalid | ~eligible] = float("inf")
         return components
+
+
+class SettledPronkCycleTracker(PronkCycleTracker):
+    """Confirm a substantive flight only after a supported, upright landing.
+
+    The reward quality ramps between minimum_flight_s and target_flight_s.
+    Multiplying it by the returned flight duration rewards validated airborne
+    seconds instead of hop counts. Brief contact gaps and extra hop frequency
+    therefore do not receive the same bonus as the original spring-like motion.
+    """
+
+    def __init__(self, *args, target_flight_s: float = 0.12, landing_settle_s: float = 0.06, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not self.minimum_flight_s < target_flight_s <= self.maximum_flight_s:
+            raise ValueError("Target flight must exceed the minimum and not exceed the maximum.")
+        if not math.isfinite(landing_settle_s) or landing_settle_s < self.dt:
+            raise ValueError("Landing settling must span at least one control step.")
+        self.target_flight_s = target_flight_s
+        self.landing_settle_s = landing_settle_s
+        self.pending = torch.zeros_like(self.active)
+        self.pending_age = torch.zeros_like(self.age)
+        self.pending_flight = torch.zeros_like(self.age)
+        self.pending_commands = torch.zeros_like(self.commands)
+        self.pending_components = {
+            name: torch.zeros_like(self.age) for name in ("gait", "progress", "tracking", "synchronization")
+        }
+
+    def _duration_quality(self, duration):
+        return ((duration - self.minimum_flight_s)
+                / (self.target_flight_s - self.minimum_flight_s)).clamp(0.0, 1.0)
+
+    def _bounced_mask(self, contacts, clearance_m):
+        return self.active & torch.isfinite(self.landing_time).any(dim=-1) & ~contacts.any(dim=-1)
+
+    def _landing_supported_mask(self, contacts, clearance_m):
+        return contacts.any(dim=-1) & (self.support_age <= self.landing_settle_s).all(dim=-1)
+
+    def reset(self, env_ids=None):
+        super().reset(env_ids)
+        if env_ids is None:
+            env_ids = slice(None)
+        self.pending[env_ids] = False
+        for tensor in (self.pending_age, self.pending_flight, self.pending_commands,
+                       *self.pending_components.values()):
+            tensor[env_ids] = 0.0
+
+    def update(self, contacts, clearance_m, air_time, commands_xy, velocity_xy, valid_pose):
+        # Once touchdown has begun, another complete loss of support is a
+        # bounced landing, not a longer continuous flight.
+        bounced = self._bounced_mask(contacts, clearance_m)
+        result = super().update(
+            contacts, clearance_m, air_time, commands_xy, velocity_xy, valid_pose & ~bounced
+        )
+        candidate = result["completed"]
+        self.pending |= candidate
+        self.pending_age[candidate] = 0.0
+        self.pending_flight[candidate] = result["flight_duration"][candidate]
+        self.pending_commands[candidate] = commands_xy[candidate]
+        for name, tensor in self.pending_components.items():
+            tensor[candidate] = result[name][candidate]
+
+        changed_command = (commands_xy - self.pending_commands).abs().amax(dim=-1) > 1.0e-6
+        # Use recent per-foot support to tolerate single-frame PhysX force
+        # flicker, but never confirm an airborne or failed landing.
+        supported = self._landing_supported_mask(contacts, clearance_m)
+        invalid = self.pending & (~valid_pose | changed_command | ~supported)
+        self.pending &= ~invalid
+        self.pending_age += self.pending * self.dt
+        confirmed = self.pending & (self.pending_age >= self.landing_settle_s - 1.0e-6)
+        flight_quality = self._duration_quality(self.pending_flight)
+        for name, tensor in self.pending_components.items():
+            result[name] = torch.where(confirmed, tensor, torch.zeros_like(tensor))
+        result["gait"] *= flight_quality
+        result["completed"] = confirmed
+        result["flight_duration"] = torch.where(confirmed, self.pending_flight, torch.zeros_like(self.age))
+        result["flight_quality"] = torch.where(confirmed, flight_quality, torch.zeros_like(self.age))
+        result["candidate_completed"] = candidate
+        self.pending &= ~confirmed
+        return result
+
+
+class IntervalPronkCycleTracker(SettledPronkCycleTracker):
+    """Time a complete unloaded interval, verify its geometry at the apex.
+
+    The common airborne interval starts at the first simultaneous unloading and
+    ends at the first foot contact. Near-ground portions count towards duration;
+    all four foot colliders must nevertheless clear the configured threshold at
+    least once during that SAME interval. A contact/bounce interrupts it. Reset
+    drops, failed landings, command changes and excessive duration still reject
+    payout. This does not reinterpret force-only sensor gaps as genuine hops.
+    """
+
+    def _flight_mask(self, contacts, clearance_m):
+        # Once the first foot touches down, timing is over. Force chatter
+        # during a partial landing must not append a second unloaded interval.
+        landing_started = self.active & torch.isfinite(self.landing_time).any(dim=-1)
+        return ~contacts.any(dim=-1) & ~landing_started
+
+    def _verification_mask(self):
+        return self.geometry_verified
+
+    def _bounced_mask(self, contacts, clearance_m):
+        # A one-frame force gap at ground level is not a second physical hop.
+        return (super()._bounced_mask(contacts, clearance_m)
+                & (clearance_m >= self.minimum_clearance_m).all(dim=-1))
+
+    def _landing_supported_mask(self, contacts, clearance_m):
+        recent_support = (self.support_age <= self.landing_settle_s).all(dim=-1)
+        support_now = contacts.any(dim=-1) | (clearance_m < self.minimum_clearance_m).any(dim=-1)
+        return recent_support & support_now
+
+    def _duration_quality(self, duration):
+        # A modest valid hop has a nonzero acquisition signal. Total payout
+        # scales as D^3 below target, rather than equally rewarding microhops.
+        return (duration / self.target_flight_s).clamp(0.0, 1.0).square()

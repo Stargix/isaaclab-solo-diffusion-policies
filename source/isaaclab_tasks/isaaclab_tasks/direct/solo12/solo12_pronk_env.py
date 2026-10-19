@@ -72,6 +72,51 @@ def compute_pronk_left_right_symmetry(env=None, obs=None, actions=None, obs_type
     return observations_aug, actions_aug
 
 
+def compute_pronk_quadruped_symmetry(env=None, obs=None, actions=None, obs_type: str = "policy"):
+    """Apply all four Solo12 body symmetries to the 48-D policy and 12-D actions.
+
+    The transform order is identity, left-right reflection, front-back reflection,
+    and their 180-degree composition. The front-back transforms also reverse the
+    forward-velocity and yaw commands; this is intentional and relies on the
+    Solo12's front/rear morphological symmetry.
+    """
+    if obs_type != "policy":
+        raise ValueError(f"Pronk symmetry only supports obs_type='policy', got {obs_type!r}.")
+    if obs is None and actions is None:
+        return None, None
+
+    if obs is not None:
+        policy_obs = obs if isinstance(obs, torch.Tensor) else obs[obs_type]
+        if policy_obs.ndim != 2 or policy_obs.shape[-1] != solo12_symmetry.OBSERVATION_SIZE:
+            raise ValueError(
+                "Full quadruped pronk symmetry expects [batch, 48] policy observations, "
+                f"got {tuple(policy_obs.shape)}."
+            )
+        batch_size = policy_obs.shape[0]
+    else:
+        batch_size = actions.shape[0]
+
+    if actions is not None and (actions.ndim != 2 or actions.shape[-1] != solo12_symmetry.ACTION_SIZE):
+        raise ValueError(
+            f"Full quadruped pronk symmetry expects [batch, 12] actions, got {tuple(actions.shape)}."
+        )
+    observations_aug, actions_aug = solo12_symmetry.compute_symmetric_observations_actions(
+        env=env, obs=obs, actions=actions, obs_type=obs_type
+    )
+    expected_batch = solo12_symmetry.NUM_SYMMETRY_TRANSFORMS * batch_size
+    if observations_aug is not None and observations_aug.shape[0] != expected_batch:
+        raise RuntimeError(
+            f"Expected {expected_batch} augmented observations from the four Solo12 symmetries, "
+            f"got {observations_aug.shape[0]}."
+        )
+    if actions_aug is not None and actions_aug.shape[0] != expected_batch:
+        raise RuntimeError(
+            f"Expected {expected_batch} augmented actions from the four Solo12 symmetries, "
+            f"got {actions_aug.shape[0]}."
+        )
+    return observations_aug, actions_aug
+
+
 @configclass
 class Solo12PronkEnvCfg(Solo12EnvCfg):
     """Keep the base SOLO12 randomization while restricting commands to useful steering."""
@@ -83,6 +128,7 @@ class Solo12PronkEnvCfg(Solo12EnvCfg):
     standing_env_prob = 0.02
     opposite_direction_cmd_prob = 0.0
     max_velx_range_curriculum = ()
+    pronk_bidirectional_commands = False
 
     # Keep the same nominal PD and action/observation contract as the walk actor.
     kp = 9.0
@@ -111,14 +157,19 @@ class Solo12PronkEnvCfg(Solo12EnvCfg):
         if self.policy_model != "simple_mlp" or self.observation_space != 48:
             raise ValueError("Pronk fine-tuning requires the compatible 48-D simple-MLP actor contract.")
         vx_range = tuple(self.command_lin_vel_x_range)
-        if len(vx_range) != 2 or not all(math.isfinite(v) for v in vx_range) or not 0.0 < vx_range[0] < vx_range[1]:
-            raise ValueError("Pronk forward command range must be finite, positive and ordered.")
+        if len(vx_range) != 2 or not all(math.isfinite(v) for v in vx_range) or vx_range[0] >= vx_range[1]:
+            raise ValueError("Pronk forward command range must be finite and ordered.")
+        if self.pronk_bidirectional_commands:
+            if not vx_range[0] < 0.0 < vx_range[1] or not math.isclose(vx_range[0], -vx_range[1], abs_tol=1e-8):
+                raise ValueError("Bidirectional pronk requires a symmetric forward/backward command range.")
+        elif vx_range[0] <= 0.0:
+            raise ValueError("This pronk task requires positive forward commands.")
         for name, bounds in (("vy", self.command_lin_vel_y_range), ("yaw", self.command_ang_vel_z_range)):
             bounds = tuple(bounds)
             if len(bounds) != 2 or not all(math.isfinite(v) for v in bounds):
                 raise ValueError(f"Pronk {name} command bounds must be two finite values.")
             if not math.isclose(bounds[0], -bounds[1], abs_tol=1e-8) or bounds[1] < 0.0:
-                raise ValueError(f"Pronk {name} bounds must be symmetric for left-right augmentation.")
+                raise ValueError(f"Pronk {name} bounds must be symmetric for symmetry augmentation.")
         if not math.isfinite(self.pronk_cycle_reward_scale) or self.pronk_cycle_reward_scale < 0.0:
             raise ValueError("pronk_cycle_reward_scale must be finite and non-negative.")
         if self.tricky_terrain:
@@ -235,7 +286,9 @@ class Solo12PronkEnv(Solo12Env):
             contacts, clearance, self._contact_sensor.data.current_air_time[:, self._pronk_foot_ids],
             command_xy, velocity_xy, valid_pose,
         )
-        pronk_reward = components["gait"] * self.cfg.pronk_cycle_reward_scale
+        components.update(clearance_m=clearance, valid_pose=valid_pose)
+        self._pronk_cycle_components = components
+        pronk_reward = self._compute_pronk_reward(components)
         self._episode_sums["pronk_gait"] += pronk_reward
         self._episode_reward_sums += pronk_reward
         completed_mask = components["completed"].float()
@@ -259,3 +312,7 @@ class Solo12PronkEnv(Solo12Env):
             }
         )
         return reward_base + pronk_reward
+
+    def _compute_pronk_reward(self, components: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Legacy per-cycle score; later tasks can specialize its payout units."""
+        return components["gait"] * self.cfg.pronk_cycle_reward_scale
