@@ -164,12 +164,24 @@ def main():
                     active=~expert_control
                     with torch.inference_mode():
                         action=teacher.act_inference(env.get_observations()).clone()
-                        phase=tick if (args.evaluate or args.dagger_round is not None) else tick-START
+                        # Per-env phase since THIS env's student takeover. A shared
+                        # tick%4 index skips replans when half the cohort starts at 0
+                        # and half at START, and feeds stale chunk slots to late starters.
+                        if args.evaluate:
+                            phases=torch.full((18,),tick,device=device,dtype=torch.long)
+                        elif args.dagger_round is not None:
+                            phases=(tick-starts).clamp(min=0)
+                        else:
+                            phases=torch.full((18,),tick-START,device=device,dtype=torch.long)
                         if active.any():
-                            if chunk is None or phase%4==0:
+                            need=active&((phases%4)==0)
+                            if chunk is None:
+                                chunk=torch.zeros(18,4,env.num_actions,device=device)
+                                need=active.clone()
+                            if need.any():
                                 pred=student.predict_action_denormalized(history.proprio,history.action,history.goal)
-                                chunk=student.executable_chunk(pred,4)
-                            action[active]=chunk[active,phase%4]
+                                chunk[need]=student.executable_chunk(pred,4)[need]
+                            action[active]=chunk[active,phases[active]%4]
                         if runner.clip_actions is not None:
                             action=action.clamp(-runner.clip_actions,runner.clip_actions)
                         record=dict(joint_pos=p[:,:12].cpu().numpy().copy(),joint_vel=p[:,12:24].cpu().numpy().copy(),

@@ -33,6 +33,18 @@ def test_gate_does_not_hide_a_failed_speed():
     assert not gate_passes([])
 
 
+def test_dagger_student_phase_is_per_env_not_global_tick():
+    """Late student starters must replan at phase 0, not reuse global tick%4."""
+    import torch
+    starts=torch.tensor([0,25,0,25])
+    tick=25
+    phases=(tick-starts).clamp(min=0)
+    assert phases.tolist()==[25,0,25,0]
+    assert (phases%4).tolist()==[1,0,1,0]
+    need=((phases%4)==0)
+    assert need.tolist()==[False,True,False,True]
+
+
 def test_range_mask_checks_past_and_future_without_editing_labels():
     from types import SimpleNamespace
     from scripts.diffusion_policy.experiments.pronk_intervention_v1.finetune import retain_representable_targets
