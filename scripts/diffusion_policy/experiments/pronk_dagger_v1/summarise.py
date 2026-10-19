@@ -12,7 +12,7 @@ def summarise(output):
 
     experiment=json.loads((output/'experiment.json').read_text(encoding='utf-8'))
     groups={arm:[r for r in experiment['results'] if r['name'].startswith('final_'+arm+'_')]
-            for arm in ('initial','nominal','recovery')}
+            for arm in ('initial','sampler_only','nominal','recovery')}
     lines=['# Iterative pronk imitation results','',f"Status: {experiment['status']}",'',
            'Nominal physics, six-second attempts. Success requires survival, at least two',
            'verified cycles after two seconds, and mean speed error <=0.10 m/s.',
@@ -20,7 +20,7 @@ def summarise(output):
            '| Arm | Successes / attempts | Per-seed successes / 18 |',
            '| --- | --- | --- |']
     fig,axes=plt.subplots(1,3,figsize=(10,3),layout='constrained')
-    for arm,color in zip(groups,('#4c78a8','#f58518','#54a24b')):
+    for arm,color in zip(groups,('#4c78a8','#b279a2','#f58518','#54a24b')):
         reports=groups[arm]
         if not reports: continue
         successes=sum(r['successes'] for r in reports)
