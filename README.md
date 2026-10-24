@@ -82,6 +82,8 @@ This repository is an Isaac Lab fork. Project code lives in a small set of direc
 
 Start with the [running guide](docs/project/running.md). It explains the installation requirements, the offline-to-online workflow and a visual Isaac Lab demo. Datasets, model weights, raw evaluations, videos and machine-specific Slurm launchers are kept outside the public source tree.
 
+The [artifact guide](docs/project/artifacts.md) lists exact checkpoint and dataset identities, verification commands and remaining archive gaps. Binary artifacts have not yet been hosted publicly.
+
 ## Scope and foundations
 
 The main learning evidence is in Isaac Lab, on open 4 m routes and the evaluated geometry, speed and posture ranges. Physical transfer to an audited MuJoCo model has also been tested on nominal and bounded perturbed development banks. High-speed corners, intermediate heights, and reliable three-gait retention remain open. Real-robot deployment has not been validated.

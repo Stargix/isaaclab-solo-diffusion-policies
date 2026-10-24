@@ -4,7 +4,7 @@
 
 Run commands from the repository root. The project uses Python 3.11, PyTorch and Isaac Sim 5.1 through this Isaac Lab fork. Follow [the framework installation guide](../../README_ISAACLAB.md#getting-started) first. The examples assume the Isaac Lab environment and SOLO12 task packages are installed.
 
-Datasets and checkpoints are not bundled. Supply your expert, imitation and refined checkpoints at the example paths. These commands reproduce interfaces and parameter recipes; they do not download the reported actors.
+Datasets and checkpoints are not bundled in Git. The [artifact guide](artifacts.md) identifies the reported files, verification profiles and remaining archive gaps. The examples below are parameter recipes, not automatic downloads or claims of bit-identical retraining.
 
 ## Visual demo
 
@@ -45,7 +45,7 @@ The [data tools](../../scripts/diffusion_policy/data/) collect trajectories, aud
 
 The config fixes `goal_source=achieved`, `goal_representation=hindsight_geom_profile16`, ten denoising steps and quadruped augmentation. Splits are by episode, with normalization fitted on training episodes.
 
-For the matched deterministic control, use `walk_crouch_hindsight_geom_profile16_deterministic_chunk_v1.json` and a separate output directory.
+For the matched deterministic control, use `walk_crouch_hindsight_geom_profile16_deterministic_chunk_v1.json`, explicitly add `--policy_backend deterministic_chunk`, and use a separate output directory. The JSON contains shared hyperparameters; its filename does not select the backend.
 
 ## Online diffusion refinement
 

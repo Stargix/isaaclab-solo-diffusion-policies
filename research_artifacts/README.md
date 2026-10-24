@@ -8,3 +8,5 @@ The public presentation uses a compact [paper snapshot](paper_snapshot/) and the
 - [Post-selection validation](final_validation_v1/): the frozen final route bank, aggregates and execution limits.
 
 Raw traces, generated galleries, training logs and historical snapshot bundles are retained locally.
+
+The [artifact guide](../docs/project/artifacts.md) and [identity manifest](reproduction/manifest.json) separate verified external artifacts from missing files. Large datasets and weights remain outside Git.
