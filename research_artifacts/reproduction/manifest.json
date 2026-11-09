@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "release_id": "quadruped-artifacts-20261024",
-  "availability": "Prepared locally; external hosting has not been configured. No download URL is implied.",
+  "availability": "Selected checkpoints are in the shared folder; training datasets and the full evaluation archive are separate.",
   "source_identity": {
     "public_base_commit": "0834cf77d1c89d0dd6d50f8be9c4df4cfc67f56a",
     "note": "Public cleaned code is not the byte-identical historical evaluation source. Use execution_source for the final frozen run."

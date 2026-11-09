@@ -2,18 +2,20 @@
 
 The [identity manifest](../../research_artifacts/reproduction/manifest.json)
 records expected SHA256 checksums for external weights, datasets and evaluation
-files. These large files are not committed to Git. An artifact bundle has been
-prepared locally; an external download location has not yet been published.
+files. These large files are not committed to Git. The [checkpoint folder](https://drive.google.com/drive/folders/1jqn0Mw2dDD_KCEnIzhhiit6yii1wtLhW?usp=sharing)
+contains the experts and available policy weights. The training datasets and
+the full evaluation archive are separate.
 The manifest is an inventory, not a promise that every file is available.
 
 ## Verify before loading
 
-After obtaining and extracting an artifact bundle to `artifacts/`, run:
+After downloading the checkpoint folder to `artifacts/`, run:
 
 ```bash
-python scripts/tools/verify_artifacts.py --root artifacts --profile final_evaluation
+python scripts/tools/verify_artifacts.py --root artifacts --profile demo
 ```
 
+The `final_evaluation` profile requires the separate evaluation archive.
 Verification uses only the Python standard library. It does not load a
 checkpoint, import PyTorch, start Isaac Sim or download anything. Exit code 0
 means every file in the selected profile matches its pinned identity; 1 means

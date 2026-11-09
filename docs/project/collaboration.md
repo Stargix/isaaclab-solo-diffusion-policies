@@ -6,7 +6,7 @@ This page covers the current walk/crouch controller and the files needed to run 
 
 Install Isaac Lab and this repository's task packages as described in the [framework guide](../../README_ISAACLAB.md#getting-started). The experiments used Python 3.11 and Isaac Sim 5.1; the [artifact guide](artifacts.md) records the historical software versions. Git LFS is needed for the robot assets.
 
-Model weights and datasets are stored separately. Place the artifact bundle in a directory accessible to the machine running Isaac Lab. To check the files needed for the demo:
+Model weights and datasets are stored separately. The [checkpoint folder](https://drive.google.com/drive/folders/1jqn0Mw2dDD_KCEnIzhhiit6yii1wtLhW?usp=sharing) contains the experts, available policies and metadata. Download its contents into an `artifacts` directory; the training datasets are separate. To check the files needed for the demo:
 
 ```bash
 python scripts/tools/verify_artifacts.py --root artifacts --profile demo
