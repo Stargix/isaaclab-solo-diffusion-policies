@@ -4,6 +4,7 @@
 
 | Read this | To understand |
 |---|---|
+| [Getting started](collaboration.md) | Required files, a first demo and the next comparisons |
 | [Method and design decisions](method.md) | Policy inputs, hindsight supervision and the rationale for the design |
 | [Results and limitations](results.md) | Measured outcomes, success definitions and remaining weaknesses |
 | [Running guide](running.md) | Installation, training, evaluation and a visual Isaac Lab demo |
