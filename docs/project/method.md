@@ -4,7 +4,7 @@
 
 ## Research question
 
-Can existing locomotion demonstrations support a route, spatial-posture and average-speed interface through hindsight relabelling and online refinement, without path-conditioned experts or a deployed skill identifier?
+Can existing locomotion demonstrations support a controller for route, height and average speed without path-following experts or a skill identifier?
 
 This work studies a conditioning extension for an offline diffusion locomotion prior. It is not a new diffusion architecture, a new DPPO algorithm, or a demonstration that every such task requires diffusion.
 
@@ -16,7 +16,7 @@ The policy consumes eight samples of proprioceptive, action and goal history. Th
 |---|---|
 | Four `[x, y, height]` preview tokens | Upcoming route positions in the local yaw frame and required height there |
 | Current required height | Posture at current route progress |
-| Terminal-yaw sine/cosine | Final relative heading without angle-wrap discontinuity |
+| Preview-yaw sine/cosine | Relative heading at the end of the local preview |
 | Speed scalar | Achieved speed during hindsight training; remaining-route speed budget during refinement |
 
 There is no input for walk, crouch, trot or pace. Behaviour names identify data sources and evaluation conditions.
@@ -81,7 +81,7 @@ The primary recipe uses path weight 2.0, profile-height weight 0.75, a 10 cm dis
 | Paired frozen references | Compare actors on identical geometries | More conditions do not create more independent routes |
 | Deterministic BC + Gaussian PPO | Competent comparison with the same transformer and task | Priors and optimizers differ; compute and offline seeds are not matched |
 
-WC uses walk/crouch demonstrations. WCT adds fast trot; the tested recipe did not explain superior fast capability, and its data amount, mixture and offline updates differ. An exploratory pace experiment aims to supply slow demonstrations while reusing walk for fast motion. Pace acquisition remains unvalidated and is not a completed main result.
+WC uses walk/crouch demonstrations. WCT adds fast trot, but its data amount, mixture and offline training budget also differ, so performance differences cannot be attributed to fast trot alone.
 
 ## Foundations
 

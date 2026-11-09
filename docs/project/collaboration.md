@@ -35,7 +35,7 @@ The [running guide](running.md#visual-demo) also has a PowerShell version and in
 |---|---|
 | [`scripts/diffusion_policy/`](../../scripts/diffusion_policy/) | Data collection, hindsight labels, imitation and evaluation |
 | [`scripts/dppo_diffusion_rl/`](../../scripts/dppo_diffusion_rl/) | Task distribution, rewards and diffusion policy refinement |
-| [`scripts/gaussian_chunk_rl/`](../../scripts/gaussian_chunk_rl/) | Deterministic imitation and Gaussian PPO comparison |
+| [`scripts/gaussian_chunk_rl/`](../../scripts/gaussian_chunk_rl/) | Gaussian PPO refinement of a deterministic imitation policy |
 | [`source/isaaclab_tasks/isaaclab_tasks/direct/solo12/`](../../source/isaaclab_tasks/isaaclab_tasks/direct/solo12/) | SOLO12 tasks and expert environments |
 
 The existing Gaussian comparison starts from an imitation checkpoint; it is not PPO from scratch. The next comparisons under consideration are a high-level controller using the original walk/crouch experts and a controller trained directly on the path-conditioned task. Their task inputs, reward, evaluation conditions and interaction budgets need to be recorded alongside each run.

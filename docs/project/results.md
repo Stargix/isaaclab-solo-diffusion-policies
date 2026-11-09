@@ -2,7 +2,7 @@
 
 [Overview](../../README.md) · [Method](method.md) · [Running guide](running.md)
 
-These tables and figures are a snapshot of the research manuscript. They are simulation evidence, not an accepted publication or a real-robot validation.
+The tables and figures below report simulation results.
 
 ## What success means
 
@@ -94,12 +94,7 @@ WC seed 42, 24 paired geometries, 144 attempts per mode. Only the final scalar c
 
 ## Exploratory gait experiments
 
-Pace and pronk were explored as additional demonstration sources. They did not
-establish reliable three-gait retention after task refinement and are not part
-of the main result. The pronk expert iterations and data-preparation scripts
-are preserved in the local `backup/public-main-20261015` branch at `43e1abd`,
-alongside the research worktree, rather than mixed into the main workflow.
-Historical pace and bound tasks remain available for existing checkpoints;
-their registration does not imply that they are recommended demonstrations.
+Pace and pronk were explored as additional demonstration sources, but reliable
+retention of a third gait after refinement has not been established.
 
 The [machine-readable snapshot](../../research_artifacts/paper_snapshot/results.json) and [figure provenance](figures/README.md) retain the metric definitions and source checksums.
