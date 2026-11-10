@@ -29,6 +29,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--actor_lr", type=float, default=0.0001)
     parser.add_argument("--initial_std", type=float, default=0.6)
+    parser.add_argument("--categorical_entropy_coef", type=float, default=0.0)
     parser.add_argument("--command_range_mode", choices=("configured", "shared"), default="configured")
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--sanity_steps", type=int, default=0,
@@ -81,7 +82,7 @@ def main(args, output, experts, reference):
         experts = experts.to(device).eval()
         policy = Hierarchy(ppo, args.command_range_mode).to(device)
         critic = ValueCritic(8 * (30 + 12 + 16) + CRITIC_FEATURE_DIM).to(device)
-        updater = GaussianPPOUpdater(policy, critic, ppo)
+        updater = GaussianPPOUpdater(policy, critic, ppo, categorical_entropy_coef=args.categorical_entropy_coef)
         output.mkdir(parents=True, exist_ok=False)
         repo = Path(__file__).resolve().parents[2]
         git_args = ["git", "-c", f"safe.directory={repo.as_posix()}", "-C", str(repo)]

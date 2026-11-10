@@ -6,8 +6,11 @@ from scripts.dppo_diffusion_rl.ppo import DPPOUpdater, UpdateMetrics
 
 
 class GaussianPPOUpdater:
-    def __init__(self, policy, critic, cfg):
+    def __init__(self, policy, critic, cfg, *, categorical_entropy_coef=0.0):
         self.policy, self.critic, self.cfg = policy, critic, cfg
+        if categorical_entropy_coef < 0 or not torch.isfinite(torch.tensor(categorical_entropy_coef)):
+            raise ValueError("categorical_entropy_coef must be finite and nonnegative")
+        self.categorical_entropy_coef = categorical_entropy_coef
         self.actor_optimizer = torch.optim.AdamW(policy.parameters(), lr=cfg.actor_lr, weight_decay=0.0)
         self.critic_optimizer = torch.optim.AdamW(critic.parameters(), lr=cfg.critic_lr, weight_decay=0.0)
 
@@ -66,6 +69,10 @@ class GaussianPPOUpdater:
                     break
                 clipped = ratio.clamp(1 - self.cfg.clip_ratio, 1 + self.cfg.clip_ratio)
                 loss = -torch.minimum(ratio * advantage[index], clipped * advantage[index]).mean()
+                if self.categorical_entropy_coef:
+                    _, categorical = self.policy.distribution(batch.proprio[index],
+                        batch.action_history[index], batch.goals[index])
+                    loss = loss - self.categorical_entropy_coef * categorical.entropy().mean()
                 self.actor_optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 norm = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.cfg.max_grad_norm)

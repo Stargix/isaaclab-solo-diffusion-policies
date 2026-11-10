@@ -20,7 +20,8 @@ class HierarchyTrainer(DPPOTrainer):
                  "old_logprobs", "old_values", "rewards", "dones")
         stored = {key: [] for key in names}
         episodes = EpisodeAccumulator()
-        crouch_sum = saturation_sum = switch_sum = switch_count = 0.0
+        crouch_sum = saturation_sum = switch_sum = switch_count = categorical_entropy_sum = 0.0
+        low_prob_sum = high_prob_sum = low_count = high_count = 0.0
         previous_skill = None
         previous_done = None
         for _ in range(self.rollout_chunks):
@@ -28,6 +29,16 @@ class HierarchyTrainer(DPPOTrainer):
             critic_obs = self._critic_observation()
             values = self.critic(critic_obs)
             latent, logprob = self.policy.sample(p, a, g)
+            _, categorical = self.policy.distribution(p, a, g)
+            categorical_entropy_sum += float(categorical.entropy().mean())
+            # Only clear posture plateaus: intermediate targets are not classified.
+            target = self.raw_env._route_state.target_height
+            low, high = target < 0.20, target > 0.25
+            crouch_prob = categorical.probs[:, 1]
+            low_prob_sum += float(crouch_prob[low].sum())
+            high_prob_sum += float(crouch_prob[high].sum())
+            low_count += float(low.sum())
+            high_count += float(high.sum())
             skill, command = self.policy.command(latent)
             if previous_skill is not None:
                 valid = ~previous_done
@@ -67,6 +78,11 @@ class HierarchyTrainer(DPPOTrainer):
         rollout.compute_gae(self.critic(self._critic_observation()), gamma=self.policy.dppo_cfg.gamma,
                             gae_lambda=self.policy.dppo_cfg.gae_lambda)
         metrics = {"Rollout/reward_mean": float(rollout.rewards.mean()),
+                   "Rollout/categorical_entropy": categorical_entropy_sum / self.rollout_chunks,
+                   "Rollout/crouch_prob_low_target": low_prob_sum / max(low_count, 1),
+                   "Rollout/crouch_prob_high_target": high_prob_sum / max(high_count, 1),
+                   "Rollout/low_target_samples": low_count,
+                   "Rollout/high_target_samples": high_count,
                    "Rollout/crouch_fraction": crouch_sum / self.rollout_chunks,
                    "Rollout/skill_change_fraction": switch_sum / max(switch_count, 1.0),
                    "Rollout/command_saturation": saturation_sum / self.rollout_chunks, **episodes.metrics()}
@@ -77,6 +93,7 @@ class HierarchyTrainer(DPPOTrainer):
                  "actor_state_dict": self.policy.state_dict(), "critic_state_dict": self.critic.state_dict(),
                  "actor_optimizer_state_dict": self.updater.actor_optimizer.state_dict(),
                  "critic_optimizer_state_dict": self.updater.critic_optimizer.state_dict(),
+                 "categorical_entropy_coef": self.updater.categorical_entropy_coef,
                  "ppo_config": self.policy.ppo_cfg.to_dict(), "expert_sha256": self.hashes,
                  "dppo_task_config": task_config_from_env_cfg(self.raw_env.cfg),
                  "iteration": iteration, "total_physics_steps": self.total_physics_steps,

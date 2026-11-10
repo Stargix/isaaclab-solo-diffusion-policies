@@ -71,6 +71,41 @@ def test_ppo_updates_joint_actor_and_critic():
     assert not torch.equal(before_velocity, policy.velocity_head.weight)
 
 
+def test_categorical_entropy_is_independent_of_velocity_head():
+    cfg = GaussianPPOConfig(initial_std=0.6, min_std=0.05, max_std=1.0)
+    policy = Hierarchy(cfg, "shared")
+    p, a, g = torch.randn(8, 8, 30), torch.randn(8, 8, 12), torch.randn(8, 8, 16)
+    with torch.no_grad():
+        policy.skill_head.bias.copy_(torch.tensor([2.0, -2.0]))
+    _, categorical = policy.distribution(p, a, g)
+    (-categorical.entropy().mean()).backward()
+    assert policy.skill_head.bias.grad.abs().sum() > 0
+    assert policy.velocity_head.weight.grad is None
+    assert torch.equal(policy.command_limits[0], policy.command_limits[1])
+
+
+def test_ppo_entropy_bonus_changes_skill_without_velocity_gradient():
+    cfg = GaussianPPOConfig(initial_std=0.6, min_std=0.05, max_std=1.0,
+                            update_epochs=1, minibatch_size=8, critic_minibatch_size=8)
+    policy = Hierarchy(cfg)
+    with torch.no_grad():
+        policy.skill_head.bias.copy_(torch.tensor([2.0, -2.0]))
+    critic = ValueCritic(478, hidden_dims=(32,))
+    p, a, g = torch.randn(2, 4, 8, 30), torch.randn(2, 4, 8, 12), torch.randn(2, 4, 8, 16)
+    with torch.no_grad():
+        latent, old = policy.sample(p.flatten(0, 1), a.flatten(0, 1), g.flatten(0, 1))
+    rollout = RolloutBatch(proprio=p, action_history=a, goals=g, critic_observation=torch.randn(2, 4, 478),
+                           chains=latent.reshape(2, 4, 1, 4), old_logprobs=old.reshape(2, 4, 1),
+                           old_values=torch.zeros(2, 4), rewards=torch.zeros(2, 4),
+                           dones=torch.zeros(2, 4, dtype=torch.bool), advantages=torch.zeros(2, 4),
+                           returns=torch.zeros(2, 4))
+    skill_before = policy.skill_head.bias.detach().clone()
+    velocity_before = policy.velocity_head.weight.detach().clone()
+    GaussianPPOUpdater(policy, critic, cfg, categorical_entropy_coef=0.01).update(rollout)
+    assert not torch.equal(skill_before, policy.skill_head.bias)
+    assert torch.equal(velocity_before, policy.velocity_head.weight)
+
+
 def test_evaluation_adapter_is_deterministic_and_checks_hashes(tmp_path):
     from scripts.hierarchical_experts.evaluation import EvaluationAdapter
     from scripts.dppo_diffusion_rl.checkpointing import sha256_file

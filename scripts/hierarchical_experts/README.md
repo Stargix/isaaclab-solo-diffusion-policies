@@ -10,6 +10,12 @@ The shared limits can restrict walk more than its configured range. Measure each
 
 The velocity distribution is Gaussian before `tanh`; the skill is categorical. PPO uses the joint likelihood of the sampled latent velocity and skill. The logged entropy is the joint *latent* entropy, not the entropy of bounded commands. The trainer saves `best.pt` only when a completed episode is available; its score belongs to the pre-update actor. `last.pt` is the post-update actor and has not yet been scored. Optimizer states are saved for inspection, but resume is not implemented.
 
+For a diagnostic pilot, `--categorical_entropy_coef` adds an entropy bonus only to the skill distribution (default 0 preserves the earlier objective). `Rollout/categorical_entropy` reports selector entropy separately. `--command_range_mode shared` tests the common command envelope. Neither is a proven fix: compare independent runs and task-conditioned evaluation, without tuning on the final holdout. The coefficient is recorded in `run_config.json`; checkpoint resume remains unsupported. Entropy regularization follows the PPO objective, while the expert hierarchy is inspired by, not a reproduction of, ANYmal Parkour: https://arxiv.org/abs/1707.06347 and https://arxiv.org/abs/2306.14874.
+
+`Rollout/crouch_prob_low_target` and `Rollout/crouch_prob_high_target` are mean sampled-policy probabilities at route target heights below 0.20 m and above 0.25 m, respectively; the sample counts are logged alongside them. Intermediate targets are excluded. These are not episode-level success or deterministic evaluation scores. The shared command envelope is a diagnostic restriction, not a measured safety guarantee.
+
+For an ablation, set `HIERARCHY_COMMAND_RANGE` to `configured` or `shared` and `HIERARCHY_CATEGORICAL_ENTROPY` to 0 or a small coefficient such as 0.01 when calling `run_cluster.sh`. Use a distinct `HIERARCHY_RUN_ROOT` for each condition and seed. These settings leave the reward and frozen experts unchanged. Compare equal interaction budgets and evaluate saved checkpoints on the same development cases; reserve the final holdout. A single pilot or this coefficient cannot establish that the collapse has been resolved.
+
 ## Smoke test
 
 From the repository root, with Isaac Lab activated and checkpoints downloaded into `scratch/artifacts`:

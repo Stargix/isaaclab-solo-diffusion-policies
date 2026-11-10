@@ -5,6 +5,8 @@ mode="${1:?Usage: bash scripts/hierarchical_experts/run_cluster.sh smoke|probe|p
 seed="${2:-42}"
 artifact_root="${ARTIFACT_ROOT:-artifacts}"
 run_root="${HIERARCHY_RUN_ROOT:-scratch/hierarchy_runs}"
+range_mode="${HIERARCHY_COMMAND_RANGE:-configured}"
+entropy_coef="${HIERARCHY_CATEGORICAL_ENTROPY:-0.0}"
 common=(--walk_checkpoint "$artifact_root/experts/walk_final.pt"
         --crouch_checkpoint "$artifact_root/experts/crouch_final.pt")
 export PYTHONPATH="$PWD:$PWD/source/isaaclab:$PWD/source/isaaclab_assets:$PWD/source/isaaclab_tasks:$PWD/source/isaaclab_rl:${PYTHONPATH:-}"
@@ -22,7 +24,7 @@ case "$mode" in
       --reference_checkpoint "$artifact_root/weights/wc_seed42.pt" \
       --output_dir "$run_root/${mode}_seed$seed" --seed "$seed" \
       --num_envs "$count" --iterations "$iterations" --rollout_chunks "$chunks" \
-      --command_range_mode configured "${extra[@]}" --headless --device cuda:0
+      --command_range_mode "$range_mode" --categorical_entropy_coef "$entropy_coef" "${extra[@]}" --headless --device cuda:0
     ;;
   eval)
     actor="${3:?Provide the hierarchy checkpoint as the third argument}"
