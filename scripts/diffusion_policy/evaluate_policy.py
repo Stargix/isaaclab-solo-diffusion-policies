@@ -34,6 +34,10 @@ parser.add_argument("--deployment_sampler", choices=("native", "graph"), default
                     help="Opt-in pinned WC-v3 FP32/K10 graph; historical default unchanged.")
 parser.add_argument("--deployment_perturbation", choices=("nominal", "mass_friction", "lateral_impulse"), default="nominal")
 parser.add_argument("--checkpoint", type=str, required=True)
+parser.add_argument("--hierarchy_checkpoint", type=str, default=None,
+                    help="Evaluate this hierarchy; --checkpoint supplies only the reference task schema.")
+parser.add_argument("--walk_checkpoint", type=str, default=None)
+parser.add_argument("--crouch_checkpoint", type=str, default=None)
 parser.add_argument("--output_dir", type=str, default=None)
 parser.add_argument("--speeds", type=float, nargs="+", default=(0.2, 0.4, 0.6, 0.8, 1.0))
 parser.add_argument(
@@ -1024,7 +1028,17 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     deterministic_backend = checkpoint.get("policy_backend") == "deterministic_chunk" or (
         checkpoint.get("policy_kind") == "spatial_hindsight_height_profile_deterministic_chunk_bc"
     )
-    if deterministic_backend:
+    if args_cli.hierarchy_checkpoint:
+        if not args_cli.walk_checkpoint or not args_cli.crouch_checkpoint:
+            raise ValueError("Hierarchy evaluation requires both frozen expert checkpoints.")
+        if args_cli.deployment_sampler != "native" or args_cli.runtime_fixture_output_dir is not None:
+            raise ValueError("Hierarchy evaluation does not support diffusion deployment fixtures.")
+        if str(_PROJECT_ROOT) not in sys.path:
+            sys.path.insert(0, str(_PROJECT_ROOT))
+        from scripts.hierarchical_experts.evaluation import EvaluationAdapter
+        policy_cfg = _model_cfg_from_checkpoint(config)
+        inference_steps = 0
+    elif deterministic_backend:
         if args_cli.num_inference_steps is not None:
             print("[WARN] --num_inference_steps is ignored for deterministic_chunk checkpoints.")
         inference_steps = None
@@ -1034,7 +1048,12 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         policy_cfg = _model_cfg_from_checkpoint(config)
         policy_cfg.num_inference_steps = inference_steps
 
-    if deterministic_backend:
+    if args_cli.hierarchy_checkpoint:
+        policy = EvaluationAdapter(args_cli.hierarchy_checkpoint, checkpoint,
+                                   args_cli.walk_checkpoint, args_cli.crouch_checkpoint,
+                                   device, args_cli.exec_horizon)
+        checkpoint_path = Path(args_cli.hierarchy_checkpoint).resolve()
+    elif deterministic_backend:
         if checkpoint.get("algorithm") not in {"deterministic_chunk_bc", "gaussian_chunk_ppo"}:
             raise ValueError("deterministic_chunk requires a BC or Gaussian PPO checkpoint.")
         policy = Solo12DeterministicChunkPolicy(policy_cfg)
@@ -1325,6 +1344,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                         full_trajectory, args_cli.exec_horizon
                     )
                 action = settle_chunk[:, settle_chunk_index]
+                if args_cli.hierarchy_checkpoint:
+                    action = policy.low_level_action(raw_env, action)
                 settle_chunk_index = (settle_chunk_index + 1) % args_cli.exec_horizon
                 if agent_cfg.clip_actions is not None:
                     action = torch.clamp(
@@ -1646,6 +1667,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
 
             action_from_chunk = current_chunk[:, chunk_index].clone()
             action = current_chunk[:, chunk_index]
+            if args_cli.hierarchy_checkpoint:
+                action = policy.low_level_action(raw_env, action)
             selected_chunk_slot = chunk_index
             chunk_index = (chunk_index + 1) % args_cli.exec_horizon
             if agent_cfg.clip_actions is not None:
@@ -2588,6 +2611,12 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     arrived_task_rows = [row for row in task_rows if row["task_arrived"]]
     overall_summary = {
         "timestamp": datetime.now().isoformat(),
+        "reference_schema_checkpoint": args_cli.checkpoint if args_cli.hierarchy_checkpoint else None,
+        "hierarchy_checkpoint": args_cli.hierarchy_checkpoint,
+        "hierarchy_checkpoint_sha256": (
+            sha256_file(Path(args_cli.hierarchy_checkpoint)) if args_cli.hierarchy_checkpoint else None
+        ),
+        "evaluated_controller": "hierarchical_expert_ppo" if args_cli.hierarchy_checkpoint else checkpoint.get("algorithm"),
         "task": args_cli.task,
         "checkpoint": str(checkpoint_path),
         "checkpoint_sha256": sha256_file(checkpoint_path),
@@ -2595,8 +2624,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         "git_dirty_before_evaluation": source_git_dirty,
         "config": config,
         "dataset_sha256": dataset_hashes(config),
-        "policy_kind": checkpoint.get("policy_kind", "unknown"),
-        "policy_backend": checkpoint.get("policy_backend", "diffusion"),
+        "policy_kind": "hierarchical_expert_ppo" if args_cli.hierarchy_checkpoint else checkpoint.get("policy_kind", "unknown"),
+        "policy_backend": "frozen_rl_experts" if args_cli.hierarchy_checkpoint else checkpoint.get("policy_backend", "diffusion"),
         "dppo_task_contract_version": dppo_task_contract_version,
         "pace_budget_mode": effective_pace_budget_mode,
         "scalar_only_intervention": scalar_only_intervention,
