@@ -387,7 +387,6 @@ class Solo12EnvCfg(DirectRLEnvCfg):
 
     # Base-mounted IMU stochastic model. The deterministic signal comes from PhysX link accelerations.
     # Defaults are robustness-oriented but still modest compared with the old foot-IMU corruption.
-    # Claude recommendation: https://claude.ai/share/30c6895d-7493-46b6-86ba-05d93dcd3add
     noisy_imu = True
     imu_noise_scale = 1.0
     imu_acc_noise_scale = 1.0

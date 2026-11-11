@@ -12,7 +12,9 @@ An interaction-budget step means one 50 Hz environment transition for one parall
 
 Before submitting a long job, run the local GPU smoke and short evaluator adapter check described in `CLUSTER.md`. A passing smoke verifies integration only; it is not evidence of task performance or a guaranteed convergence result. Keep V1 and V2 results separate and reserve final held-out cases.
 
-PPO chooses walk or crouch and a body-frame velocity command. The frozen expert runs at 50 Hz; the high-level decision is held for four steps. The actor receives the same eight-step proprioception, previous-action and 16-dimensional task history as the path-conditioned controller. The critic additionally receives the task's privileged critic features. The actor is trained from scratch; the WC-v3 checkpoint is used only to verify the environment contract.
+## Version 1 (earlier pilot)
+
+The following settings and commands describe V1, not the V2 experiment above. PPO chooses walk or crouch and a body-frame velocity command. The frozen expert runs at 50 Hz; the high-level decision is held for four steps. The actor receives the same eight-step proprioception, previous-action and 16-dimensional task history as the path-conditioned controller. The critic additionally receives the task's privileged critic features. The actor is trained from scratch; the WC-v3 checkpoint is used only to verify the environment contract.
 
 The experts also use body-frame base linear velocity, which is not part of the 30-dimensional high-level proprioception used by the diffusion actor. In simulation this is a true state measurement; on the robot it would require an estimator. This observation difference must be considered when interpreting any comparison.
 
@@ -57,7 +59,7 @@ The existing route evaluator accepts `--hierarchy_checkpoint` plus both expert p
 
 Before interpreting a comparison, use identical route banks, staging, conditions and metrics across actors. This baseline has a different low-level interface and initialization from DPPO, so results alone do not isolate every design choice. The short bridge check is not a performance benchmark.
 
-## Cluster sequence
+## V1 cluster sequence
 
 Use the same repository revision and the `isaaclab` environment on an allocated GPU node. The external artifact root must contain `experts/walk_final.pt`, `experts/crouch_final.pt` and `weights/wc_seed42.pt`. Output directories must not already exist.
 

@@ -35,7 +35,7 @@ def feet_air_time(
 
     If the commands are small (i.e. the agent is not supposed to take a step), then the reward is zero.
     """
-    """Note: first_contact is 1 when in contact 0 otherwise. last_air_time is the time since last contact, so when the feet contacts the ground it adds a reward that is the time that it has been in contact. It is only added when contacts again (https://chatgpt.com/s/t_69bc5d9be5148191a1c0ec5038241fb9)"""
+    """Reward the previous air time when a foot makes contact with the ground."""
     # extract the used quantities (to enable type-hinting)
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     # compute the reward
