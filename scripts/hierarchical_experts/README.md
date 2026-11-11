@@ -37,6 +37,8 @@ Commit the code before a scientific run, so the saved commit and dirty-tree flag
 
 For a separate wiring check, replace `--smoke` with `--sanity_steps 200`. This runs a simple scripted tracker with a height-based expert switch and writes `sanity.json`; it does not update the policy and is not the hierarchical RL baseline.
 
+The sanity report groups completed episodes by the target-height plateaus actually observed before termination, and records separate arrival, contact, corridor, overshoot and timeout outcomes. This grouping does not identify the complete intended route after an early failure. The scripted tracker caps its command at 0.6 m/s, so its results do not validate faster or arbitrary commands, nor replace a paired evaluation.
+
 The existing route evaluator accepts `--hierarchy_checkpoint` plus both expert paths. Its required `--checkpoint` argument supplies the WC-v3 task schema only; diffusion weights are not used for actions. The adapter checks task settings and expert hashes, uses deterministic skill argmax and velocity means, and recomputes expert actions at every low-level tick, including posture staging. Output identifies both the evaluated hierarchy and the reference schema checkpoint. Diffusion CUDA graphs and oracle fixtures are rejected for this backend.
 
 Before interpreting a comparison, use identical route banks, staging, conditions and metrics across actors. This baseline has a different low-level interface and initialization from DPPO, so results alone do not isolate every design choice. The short bridge check is not a performance benchmark.

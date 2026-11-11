@@ -110,6 +110,9 @@ def main(args, output, experts, reference):
         if args.sanity_steps:
             # Diagnostic controller, not a trained baseline or benchmark score.
             env.reset()
+            episode_first = torch.full((args.num_envs,), -1, dtype=torch.long, device=device)
+            episode_changed = torch.zeros(args.num_envs, dtype=torch.bool, device=device)
+            by_profile = {}
             done_count = 0
             reward_sum = 0.0
             crouch_count = 0
@@ -119,6 +122,8 @@ def main(args, output, experts, reference):
                 goal = env.unwrapped.get_goal()
                 xy = goal[:, :2]
                 skill = (goal[:, 12] < 0.23).long()
+                episode_first = torch.where(episode_first < 0, skill, episode_first)
+                episode_changed |= skill != episode_first
                 crouch_count += int(skill.sum())
                 speed_sum += float(env.unwrapped._robot.data.root_lin_vel_b[:, 0].sum())
                 height_sum += float(env.unwrapped._base_height().sum())
@@ -129,14 +134,31 @@ def main(args, output, experts, reference):
                 action = experts.action(env.unwrapped, skill, command)
                 if not torch.isfinite(action).all():
                     raise FloatingPointError("Non-finite expert action in tracker sanity check.")
-                _, reward, terminated, truncated, _ = env.step(action)
+                _, reward, terminated, truncated, extras = env.step(action)
                 done_count += int((terminated | truncated).sum())
+                event = extras.get("dppo_episode")
+                if event is not None:
+                    for j, env_id in enumerate(event["env_ids"].tolist()):
+                        initial = int(episode_first[env_id])
+                        name = ("crouch" if initial else "walk")
+                        if bool(episode_changed[env_id]):
+                            name += "_to_walk" if initial else "_to_crouch"
+                        row = by_profile.setdefault(name, {"episodes": 0, "success": 0,
+                            "base_contact": 0, "corridor_failure": 0, "time_out": 0,
+                            "arrival_failure": 0, "terminal_overshoot": 0})
+                        row["episodes"] += 1
+                        for key in row:
+                            if key != "episodes":
+                                row[key] += int(event[key][j].item())
+                        episode_first[env_id] = -1
+                        episode_changed[env_id] = False
                 reward_sum += float(reward.sum())
             report = {"steps_per_env": args.sanity_steps, "num_envs": args.num_envs,
                       "done_count": done_count, "reward_sum": reward_sum,
                       "crouch_fraction": crouch_count / (args.num_envs * args.sanity_steps),
                       "mean_forward_speed_mps": speed_sum / (args.num_envs * args.sanity_steps),
-                      "mean_height_m": height_sum / (args.num_envs * args.sanity_steps)}
+                      "mean_height_m": height_sum / (args.num_envs * args.sanity_steps),
+                      "completed_by_observed_profile": by_profile}
             (output / "sanity.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
             print(f"[SANITY_OK] {report}", flush=True)
             return
