@@ -33,6 +33,15 @@ def test_joint_logprob_and_command_limits():
     assert policy.velocity_head.weight.grad.abs().sum() > 0
 
 
+def test_longer_execution_interval_is_part_of_policy_config():
+    cfg = GaussianPPOConfig(exec_horizon=12, initial_std=0.6, min_std=0.05, max_std=1.0)
+    cfg.validate(prediction_horizon=12, execution_offset=0)
+    policy = Hierarchy(cfg, "shared")
+    assert policy.dppo_cfg.exec_horizon == 12
+    latent, _ = policy.sample(torch.zeros(2, 8, 30), torch.zeros(2, 8, 12), torch.zeros(2, 8, 16))
+    assert policy.command(latent)[1].shape == (2, 3)
+
+
 def test_expert_observation_order():
     batch = 2
     data = SimpleNamespace(root_lin_vel_b=torch.full((batch, 3), 1.), root_ang_vel_b=torch.full((batch, 3), 2.),
@@ -128,6 +137,12 @@ def test_evaluation_adapter_is_deterministic_and_checks_hashes(tmp_path):
                        adapter.predict_action_denormalized(p, a, g))
     with pytest.raises(ValueError, match="decision interval"):
         EvaluationAdapter(checkpoint, {"dppo_task_config": {}}, expert, expert, "cpu", 8)
+    long_cfg = GaussianPPOConfig(exec_horizon=12, initial_std=0.6, min_std=0.05, max_std=1.0)
+    payload = torch.load(checkpoint, weights_only=False)
+    payload["ppo_config"] = long_cfg.to_dict()
+    torch.save(payload, checkpoint)
+    long_adapter = EvaluationAdapter(checkpoint, {"dppo_task_config": {}}, expert, expert, "cpu", 12)
+    assert long_adapter.predict_action_denormalized(p, a, g).shape == (2, 12, 4)
     torch.save({"changed": True}, checkpoint.with_name("wrong.pt"))
     # Keep the actor loadable but deliberately change the recorded hash.
     payload = torch.load(checkpoint, weights_only=False)

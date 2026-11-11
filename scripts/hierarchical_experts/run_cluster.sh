@@ -7,6 +7,7 @@ artifact_root="${ARTIFACT_ROOT:-artifacts}"
 run_root="${HIERARCHY_RUN_ROOT:-scratch/hierarchy_runs}"
 range_mode="${HIERARCHY_COMMAND_RANGE:-configured}"
 entropy_coef="${HIERARCHY_CATEGORICAL_ENTROPY:-0.0}"
+execution_steps="${HIERARCHY_EXECUTION_STEPS:-4}"
 common=(--walk_checkpoint "$artifact_root/experts/walk_final.pt"
         --crouch_checkpoint "$artifact_root/experts/crouch_final.pt")
 export PYTHONPATH="$PWD:$PWD/source/isaaclab:$PWD/source/isaaclab_assets:$PWD/source/isaaclab_tasks:$PWD/source/isaaclab_rl:${PYTHONPATH:-}"
@@ -24,14 +25,14 @@ case "$mode" in
       --reference_checkpoint "$artifact_root/weights/wc_seed42.pt" \
       --output_dir "$run_root/${mode}_seed$seed" --seed "$seed" \
       --num_envs "$count" --iterations "$iterations" --rollout_chunks "$chunks" \
-      --command_range_mode "$range_mode" --categorical_entropy_coef "$entropy_coef" "${extra[@]}" --headless --device cuda:0
+      --command_range_mode "$range_mode" --categorical_entropy_coef "$entropy_coef" --execution_steps "$execution_steps" "${extra[@]}" --headless --device cuda:0
     ;;
   eval)
     actor="${3:?Provide the hierarchy checkpoint as the third argument}"
     ./isaaclab.sh -p scripts/diffusion_policy/evaluate_policy.py "${common[@]}" \
       --checkpoint "$artifact_root/weights/wc_seed42.pt" --hierarchy_checkpoint "$actor" \
       --path_shapes straight --path_heights 0.1705 0.2932 --speeds 0.25 0.50 \
-      --repeats 1 --duration_s 24 --exec_horizon 4 --seed "$seed" \
+      --repeats 1 --duration_s 24 --exec_horizon "$execution_steps" --seed "$seed" \
       --output_dir "$run_root/eval_seed$seed" --require_empty_output_dir \
       --headless --device cuda:0
     ;;

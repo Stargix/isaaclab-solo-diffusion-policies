@@ -29,6 +29,8 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--actor_lr", type=float, default=0.0001)
     parser.add_argument("--initial_std", type=float, default=0.6)
+    parser.add_argument("--execution_steps", type=int, choices=(4, 8, 12, 16), default=4,
+                        help="Physical steps per high-level decision, including both skill and velocity.")
     parser.add_argument("--categorical_entropy_coef", type=float, default=0.0)
     parser.add_argument("--command_range_mode", choices=("configured", "shared"), default="configured")
     parser.add_argument("--smoke", action="store_true")
@@ -70,9 +72,9 @@ def main(args, output, experts, reference):
     if (cfg.remove_root_lin_vel_b_from_obs or cfg.policy_model != "simple_mlp"
             or cfg.enable_observation_corruption or cfg.observation_noise_model):
         raise ValueError("Expert adapter requires uncorrupted simple_mlp observations with base linear velocity.")
-    ppo = GaussianPPOConfig(initial_std=args.initial_std, min_std=0.05, max_std=1.0,
+    ppo = GaussianPPOConfig(exec_horizon=args.execution_steps, initial_std=args.initial_std, min_std=0.05, max_std=1.0,
                             actor_lr=args.actor_lr, critic_warmup_iterations=0)
-    ppo.validate(prediction_horizon=4, execution_offset=0)
+    ppo.validate(prediction_horizon=args.execution_steps, execution_offset=0)
     hashes = {"walk": sha256_file(args.walk_checkpoint), "crouch": sha256_file(args.crouch_checkpoint)}
     env = gym.make("solo12-dppo-diffusion-rl-v0", cfg=cfg)
     try:
@@ -92,7 +94,7 @@ def main(args, output, experts, reference):
                     "experts_sha256": hashes, "reference_sha256": sha256_file(args.reference_checkpoint),
                     "reference_role": "task contract only", "torch_version": torch.__version__,
                     "git_commit": revision.stdout.strip(), "git_dirty": bool(status.stdout.strip()),
-                    "control": {"expert_step_hz": 50, "high_level_hz": 12.5,
+                    "control": {"expert_step_hz": 50, "high_level_hz": 50.0 / args.execution_steps,
                                 "velocity_limits": policy.command_limits.tolist(), "skill_order": ["walk", "crouch"]}}
         (output / "run_config.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         trainer = HierarchyTrainer(env=env, policy=policy, critic=critic, updater=updater,

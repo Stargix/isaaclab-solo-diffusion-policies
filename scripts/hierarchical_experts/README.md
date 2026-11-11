@@ -16,6 +16,8 @@ For a diagnostic pilot, `--categorical_entropy_coef` adds an entropy bonus only 
 
 For an ablation, set `HIERARCHY_COMMAND_RANGE` to `configured` or `shared` and `HIERARCHY_CATEGORICAL_ENTROPY` to 0 or a small coefficient such as 0.01 when calling `run_cluster.sh`. Use a distinct `HIERARCHY_RUN_ROOT` for each condition and seed. These settings leave the reward and frozen experts unchanged. Compare equal interaction budgets and evaluate saved checkpoints on the same development cases; reserve the final holdout. A single pilot or this coefficient cannot establish that the collapse has been resolved.
 
+`--execution_steps` (or `HIERARCHY_EXECUTION_STEPS` in the launcher) can test holding the entire high-level decision for 4, 8, 12 or 16 low-level steps. This holds velocity as well as skill and changes the effective GAE time scale, so it is not a skill-duration-only ablation. The history still advances at 50 Hz. Match physical steps rather than iteration counts when comparing intervals, and evaluate with the same interval used in training. The default remains 4.
+
 ## Smoke test
 
 From the repository root, with Isaac Lab activated and checkpoints downloaded into `scratch/artifacts`:
