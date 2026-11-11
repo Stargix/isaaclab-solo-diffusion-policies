@@ -46,6 +46,84 @@ class SupportedHybridV3RouteBank(SupportedHybridRouteBank):
             (self.num_envs,), self.crouch_speed_cap_mps, device=self.device
         )
         self._transition_context_counter = 0
+        self._straight_curriculum_counter = 0
+        self.straight_curriculum_sample_counts = torch.zeros(
+            4, 2, dtype=torch.long, device=self.device
+        )
+
+    @torch.no_grad()
+    def apply_straight_curriculum(self, env_ids: torch.Tensor) -> torch.Tensor:
+        """Replace selected sampled routes with balanced straight profile tasks.
+
+        The eight-cell cycle crosses the four audited profile classes with
+        requested means of 0.25 and 0.50 m/s. Geometry, height, boundary,
+        speed, and route metadata are updated together before goal generation.
+        """
+        count = int(env_ids.numel())
+        if count == 0:
+            return torch.empty(0, dtype=torch.long, device=self.device)
+        cells = (torch.arange(count, device=self.device) + self._straight_curriculum_counter) % 8
+        self._straight_curriculum_counter = (self._straight_curriculum_counter + count) % 8
+        profile = cells % 4
+        speed_index = torch.div(cells, 4, rounding_mode="floor")
+        self.straight_curriculum_sample_counts += torch.bincount(
+            profile * 2 + speed_index, minlength=8
+        ).reshape(4, 2)
+        self.profile_class[env_ids] = profile
+        self.geometry_class[env_ids] = self.SMOOTH
+        self.smooth_subclass[env_ids] = self.SMOOTH_V1
+        self.coherent_target_peak_curvature[env_ids] = 0.0
+        self.waypoint_segment_count[env_ids] = 0
+        self.waypoint_turn_angles[env_ids] = 0.0
+        self.waypoint_segment_lengths[env_ids] = 0.0
+        self.waypoint_corner_radii[env_ids] = 0.0
+        self.arc[env_ids] = torch.linspace(0.0, self.length_m, self.points, device=self.device)
+        self.xy[env_ids] = 0.0
+        self.xy[env_ids, :, 0] = self.arc[env_ids]
+        self.yaw[env_ids] = 0.0
+        self.maximum_abs_curvature[env_ids] = 0.0
+        self.route_kind[env_ids] = 4
+        self.transition_context[env_ids] = self.NO_TRANSITION
+        boundary = torch.where(profile >= 2, torch.full((count,), 2.0, device=self.device),
+                               torch.full((count,), torch.inf, device=self.device))
+        starts_crouched = (profile == 1) | (profile == 3)
+        start_height = torch.where(starts_crouched,
+                                   torch.full((count,), self.CROUCH_HEIGHT_M, device=self.device),
+                                   torch.full((count,), self.WALK_HEIGHT_M, device=self.device))
+        end_height = torch.where(profile >= 2, torch.where(starts_crouched,
+                                   torch.full_like(start_height, self.WALK_HEIGHT_M),
+                                   torch.full_like(start_height, self.CROUCH_HEIGHT_M)), start_height)
+        self.height[env_ids] = torch.where(self.arc[env_ids] < boundary[:, None],
+                                            start_height[:, None], end_height[:, None])
+        self.transition_boundary[env_ids] = boundary
+        self.speed[env_ids] = torch.where(speed_index == 0, 0.25, 0.50)
+        self.maximum_feasible_mean_speed[env_ids] = maximum_feasible_mean_speed(
+            self.yaw[env_ids], self.height[env_ids], self.arc[env_ids],
+            envelope=self.support_envelope,
+        )
+        self.height_tracking_weight[env_ids] = 1.0
+        return profile
+
+    def curriculum_state_dict(self) -> dict:
+        return {
+            "straight_curriculum_counter": self._straight_curriculum_counter,
+            "straight_curriculum_sample_counts": self.straight_curriculum_sample_counts.clone(),
+            "profile_sample_counter": self._profile_sample_counter,
+            "geometry_sample_counter": self._geometry_sample_counter,
+            "transition_context_counter": self._transition_context_counter,
+        }
+
+    @torch.no_grad()
+    def load_curriculum_state_dict(self, state: dict) -> None:
+        expected = {"straight_curriculum_counter", "straight_curriculum_sample_counts",
+                    "profile_sample_counter", "geometry_sample_counter", "transition_context_counter"}
+        if set(state) != expected:
+            raise ValueError("Route-sampler checkpoint is missing or has unknown curriculum counters.")
+        self._straight_curriculum_counter = int(state["straight_curriculum_counter"])
+        self.straight_curriculum_sample_counts.copy_(state["straight_curriculum_sample_counts"].to(self.device))
+        self._profile_sample_counter = int(state["profile_sample_counter"])
+        self._geometry_sample_counter = int(state["geometry_sample_counter"])
+        self._transition_context_counter = int(state["transition_context_counter"])
 
     def _sample_transition_context(self, count: int, *, stratified: bool) -> torch.Tensor:
         if count == 0:

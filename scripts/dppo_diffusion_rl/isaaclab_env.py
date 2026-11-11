@@ -115,6 +115,10 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
     # Historical checkpoints intentionally retain the old mixed conditioning.
     # V4 requires the same closed-loop pace for preview geometry and v_avg.
     pace_consistent_preview: bool = False
+    # Opt-in only for the hierarchical PPO curriculum; the final task contract
+    # and all existing callers retain their historical route distribution.
+    hierarchy_curriculum_enabled: bool = False
+    hierarchy_curriculum_stage: int = 1
     reset_x_pos = 0.0
     reset_y_pos = 0.0
     reset_yaw = 0.0
@@ -136,6 +140,10 @@ class DPPODiffusionEnvCfg(Solo12EnvCfg):
         posture_window_steps(
             self.posture_tracking_mode, self.posture_window_s, self.sim.dt * self.decimation
         )
+        if self.hierarchy_curriculum_stage not in (0, 1):
+            raise ValueError("hierarchy_curriculum_stage must be 0 or 1.")
+        if self.hierarchy_curriculum_enabled and self.route_distribution != "supported_hybrid_v3":
+            raise ValueError("The hierarchy curriculum currently requires supported_hybrid_v3.")
         if (
             self.posture_tracking_mode == "nominal_window"
             and self.goal_representation != "hindsight_geom_profile16"
@@ -491,6 +499,11 @@ class DPPODiffusionEnv(Solo12Env):
 
     def _reset_routes(self, env_ids: torch.Tensor) -> None:
         if self.cfg.route_distribution in SUPPORTED_ROUTE_DISTRIBUTIONS:
+            if (self.cfg.route_distribution == "supported_hybrid_v3"
+                    and self.cfg.hierarchy_curriculum_enabled
+                    and self.cfg.hierarchy_curriculum_stage == 0):
+                self._routes.apply_straight_curriculum(env_ids)
+                return
             self._routes.reset(
                 env_ids,
                 stratified=self.cfg.stratified_route_sampling,
