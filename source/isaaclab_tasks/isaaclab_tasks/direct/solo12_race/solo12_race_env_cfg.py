@@ -445,7 +445,7 @@ class Solo12RaceEnvCfg(DirectRLEnvCfg):
     # foot_imu_ang_vel_noise = (-0.15, 0.15)
     # foot_imu_lin_acc_noise = (-0.5, 0.5)
 
-    # IMU noise recommendation: https://chatgpt.com/share/69ee36d5-6740-832f-8bad-cd1fb7c66d48
+    # IMU noise settings.
     # per-step white noise
     foot_imu_gyro_noise_range = (-0.05, 0.05)      # rad/s
     foot_imu_acc_noise_range  = (-0.3, 0.3)        # m/s²
