@@ -167,6 +167,10 @@ parser.add_argument(
     help="Save per-step route progress, tangent speed, height and validity for temporal-allocation analysis.",
 )
 parser.add_argument(
+    "--save_hierarchy_trace", action="store_true",
+    help="Opt-in passive trace of hierarchical skill probabilities, commands and actions (requires --save_timeseries and a V2 hierarchy).",
+)
+parser.add_argument(
     "--runtime_fixture_output_dir", type=str, default=None,
     help="Opt-in WC-v3 batch=1 oracle snapshots for same-backend runtime parity.",
 )
@@ -1031,6 +1035,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     if args_cli.hierarchy_checkpoint:
         if not args_cli.walk_checkpoint or not args_cli.crouch_checkpoint:
             raise ValueError("Hierarchy evaluation requires both frozen expert checkpoints.")
+        if args_cli.save_hierarchy_trace and not args_cli.save_timeseries:
+            raise ValueError("--save_hierarchy_trace requires --save_timeseries.")
         if args_cli.deployment_sampler != "native" or args_cli.runtime_fixture_output_dir is not None:
             raise ValueError("Hierarchy evaluation does not support diffusion deployment fixtures.")
         if str(_PROJECT_ROOT) not in sys.path:
@@ -1038,6 +1044,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         from scripts.hierarchical_experts.evaluation import EvaluationAdapter
         policy_cfg = _model_cfg_from_checkpoint(config)
         inference_steps = 0
+    elif args_cli.save_hierarchy_trace:
+        raise ValueError("--save_hierarchy_trace requires --hierarchy_checkpoint.")
     elif deterministic_backend:
         if args_cli.num_inference_steps is not None:
             print("[WARN] --num_inference_steps is ignored for deterministic_chunk checkpoints.")
@@ -1051,7 +1059,10 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     if args_cli.hierarchy_checkpoint:
         policy = EvaluationAdapter(args_cli.hierarchy_checkpoint, checkpoint,
                                    args_cli.walk_checkpoint, args_cli.crouch_checkpoint,
-                                   device, args_cli.exec_horizon)
+                                   device, args_cli.exec_horizon,
+                                   capture_diagnostics=args_cli.save_hierarchy_trace)
+        if args_cli.save_hierarchy_trace and not getattr(policy, "is_v2", False):
+            raise ValueError("--save_hierarchy_trace is currently defined only for hierarchy V2.")
         checkpoint_path = Path(args_cli.hierarchy_checkpoint).resolve()
     elif deterministic_backend:
         if checkpoint.get("algorithm") not in {"deterministic_chunk_bc", "gaussian_chunk_ppo"}:
@@ -1294,6 +1305,53 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     previous_action = torch.zeros((num_envs, policy_cfg.action_dim), device=device)
     stand_action = torch.zeros_like(previous_action)
 
+    hierarchy_trace_rows = []
+
+    def record_hierarchy_trace(phase, step_index, action, *, action_before_clip=None,
+                               replan=False, dones=None):
+        if not args_cli.save_hierarchy_trace:
+            return
+        diag = policy.last_diagnostics if phase != 0 else None
+        robot = raw_env._robot.data
+        nan = np.full((num_envs,), np.nan, dtype=np.float32)
+        nan3 = np.full((num_envs, 3), np.nan, dtype=np.float32)
+        nan2 = np.full((num_envs, 2), np.nan, dtype=np.float32)
+        if diag is None:
+            skill = np.full((num_envs,), -1, dtype=np.int64)
+            probabilities, command_latent, saturation = nan2, nan3, np.zeros((num_envs, 3), dtype=bool)
+            goal16, expert_observation = np.full((num_envs, 16), np.nan, dtype=np.float32), np.full((num_envs, 48), np.nan, dtype=np.float32)
+        else:
+            skill = diag["skill"].detach().cpu().numpy().astype(np.int64, copy=True)
+            probabilities = diag["skill_probabilities"].detach().cpu().numpy().astype(np.float32, copy=True)
+            command_latent = diag["command_latent"].detach().cpu().numpy().astype(np.float32, copy=True)
+            saturation = diag["command_saturated"].detach().cpu().numpy().astype(bool, copy=True)
+            goal16 = diag["goal16_last"].detach().cpu().numpy().astype(np.float32, copy=True)
+            observed = getattr(policy.experts, "last_observation", None)
+            expert_observation = (observed.detach().cpu().numpy().astype(np.float32, copy=True)
+                                  if observed is not None else np.full((num_envs, 48), np.nan, dtype=np.float32))
+        sent_action = action.detach().cpu().numpy().astype(np.float32, copy=True)
+        unclipped = (sent_action if action_before_clip is None else
+                     action_before_clip.detach().cpu().numpy().astype(np.float32, copy=True))
+        actual_command = raw_env._commands.detach().cpu().numpy().astype(np.float32, copy=True)
+        limits = policy.policy.command_limits[torch.as_tensor(np.maximum(skill, 0), device=device)].detach().cpu().numpy().astype(np.float32, copy=True)
+        hierarchy_trace_rows.append({
+            "phase": int(phase), "step": int(step_index), "replan": bool(replan),
+            "skill": skill, "skill_probabilities": probabilities,
+            "command_latent": command_latent, "command_saturated": saturation,
+            "command_mps_rad_s": actual_command, "command_limits": limits,
+            "expert_observation": expert_observation, "action_sent": sent_action,
+            "action_before_clip": unclipped,
+            "action_clipped": np.any(np.abs(unclipped - sent_action) > 1.0e-7, axis=-1),
+            "goal16_input": goal16,
+            "root_position_w": robot.root_pos_w.detach().cpu().numpy().astype(np.float32, copy=True),
+            "root_quaternion_w": robot.root_quat_w.detach().cpu().numpy().astype(np.float32, copy=True),
+            "root_lin_vel_b": robot.root_lin_vel_b.detach().cpu().numpy().astype(np.float32, copy=True),
+            "root_ang_vel_b": robot.root_ang_vel_b.detach().cpu().numpy().astype(np.float32, copy=True),
+            "joint_position": robot.joint_pos[:, joint_ids].detach().cpu().numpy().astype(np.float32, copy=True),
+            "joint_velocity": robot.joint_vel[:, joint_ids].detach().cpu().numpy().astype(np.float32, copy=True),
+            "dones": (np.zeros((num_envs,), dtype=bool) if dones is None else dones.detach().cpu().numpy().astype(bool, copy=True)),
+        })
+
     # Fill history while the simulator settles from its reset state.  When a
     # policy-controlled posture settle follows, keep this staging history at
     # zero requested speed so a crouch-start route is not first conditioned as
@@ -1304,7 +1362,7 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     staging_speeds = (
         np.zeros_like(speeds) if args_cli.posture_settle_steps > 0 else speeds
     )
-    for _ in range(max(args_cli.warmup_steps, policy_cfg.history + 1)):
+    for warmup_step in range(max(args_cli.warmup_steps, policy_cfg.history + 1)):
         proprio = get_proprio_30d(raw_env, joint_ids)
         goals = compute_vectorized_goals(
             raw_env, path_plans, staging_speeds, staging_progress, goal_horizon_steps, waypoint_time_offsets_s, dt, v_req_clip, device,
@@ -1312,7 +1370,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             reference_step=0,
         )
         update_history(proprio_buffer, action_buffer, goal_buffer, proprio, previous_action, goals)
-        vec_env.step(stand_action)
+        _, _, warmup_dones, _ = vec_env.step(stand_action)
+        record_hierarchy_trace(0, warmup_step, stand_action, dones=warmup_dones)
         previous_action = stand_action.clone()
 
     # The base environment resets every scenario in the same safe standing
@@ -1333,7 +1392,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
         settle_chunk_index = 0
         for settle_step in range(args_cli.posture_settle_steps):
             with torch.inference_mode():
-                if settle_chunk is None or settle_chunk_index == 0:
+                settle_replan = settle_chunk is None or settle_chunk_index == 0
+                if settle_replan:
                     full_trajectory = inference_sampler.predict_action_denormalized(
                         proprio_buffer,
                         action_buffer,
@@ -1343,10 +1403,13 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                     settle_chunk = inference_sampler.executable_chunk(
                         full_trajectory, args_cli.exec_horizon
                     )
+                    if args_cli.save_hierarchy_trace:
+                        policy.last_diagnostics["goal16_last"] = goal_buffer[:, -1, :].clone()
                 action = settle_chunk[:, settle_chunk_index]
                 if args_cli.hierarchy_checkpoint:
                     action = policy.low_level_action(raw_env, action)
                 settle_chunk_index = (settle_chunk_index + 1) % args_cli.exec_horizon
+                action_before_clip = action.clone()
                 if agent_cfg.clip_actions is not None:
                     action = torch.clamp(
                         action, -agent_cfg.clip_actions, agent_cfg.clip_actions
@@ -1366,6 +1429,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                     reference_step=0,
                 )
                 _, _, staging_dones, _ = vec_env.step(action)
+                record_hierarchy_trace(1, settle_step, action,
+                                       action_before_clip=action_before_clip,
+                                       replan=settle_replan, dones=staging_dones)
                 update_history(
                     proprio_buffer,
                     action_buffer,
@@ -1656,7 +1722,8 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 rollout_start_pos_w=rollout_start_pos[0],
             )
         with torch.inference_mode():
-            if current_chunk is None or chunk_index == 0:
+            replan_now = current_chunk is None or chunk_index == 0
+            if replan_now:
                 full_trajectory = inference_sampler.predict_action_denormalized(
                     proprio_buffer,
                     action_buffer,
@@ -1664,11 +1731,14 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                     guidance_scale=args_cli.guidance_scale,
                 )
                 current_chunk = inference_sampler.executable_chunk(full_trajectory, args_cli.exec_horizon)
+                if args_cli.save_hierarchy_trace:
+                    policy.last_diagnostics["goal16_last"] = goal_buffer[:, -1, :].clone()
 
             action_from_chunk = current_chunk[:, chunk_index].clone()
             action = current_chunk[:, chunk_index]
             if args_cli.hierarchy_checkpoint:
                 action = policy.low_level_action(raw_env, action)
+            action_before_clip = action.clone()
             selected_chunk_slot = chunk_index
             chunk_index = (chunk_index + 1) % args_cli.exec_horizon
             if agent_cfg.clip_actions is not None:
@@ -1712,6 +1782,9 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 commanded_heights.append(goals[:, 8].detach().cpu().numpy())
             impulse_isaac(raw_env, args_cli.deployment_perturbation, step)
             _, _, dones, _ = vec_env.step(action)
+            record_hierarchy_trace(2, step, action,
+                                   action_before_clip=action_before_clip,
+                                   replan=replan_now, dones=dones)
             done_np = dones.cpu().numpy().astype(bool)
             if fixture_record is not None:
                 processed_target = getattr(raw_env, "_delayed_processed_actions", None)
@@ -1841,6 +1914,16 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
     if runtime_fixture_writer is not None:
         fixture_npz, fixture_json = runtime_fixture_writer.close()
         print(f"[INFO] Saved runtime oracle: {fixture_npz} and {fixture_json}")
+
+    if args_cli.save_hierarchy_trace:
+        if not hierarchy_trace_rows:
+            raise RuntimeError("Hierarchy trace was requested, but no samples were recorded.")
+        hierarchy_trace = {}
+        for name in hierarchy_trace_rows[0]:
+            hierarchy_trace[name] = np.stack([row[name] for row in hierarchy_trace_rows], axis=0)
+        hierarchy_trace["phase_names"] = np.asarray(["warmup", "posture_settle", "route"])
+        np.savez_compressed(output_dir / "hierarchy_trace.npz", **hierarchy_trace)
+        print(f"[INFO] Saved hierarchy diagnostic trace to {output_dir / 'hierarchy_trace.npz'}")
 
     if args_cli.save_timeseries:
         posture_traces = {}

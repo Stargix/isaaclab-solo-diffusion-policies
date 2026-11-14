@@ -94,6 +94,21 @@ class HierarchyV2(nn.Module):
         latent = self._selected_means(feature, skill)
         return skill, latent
 
+    def deterministic_with_diagnostics(self, proprio, actions, goals):
+        """Return the deterministic action and passive selector/command diagnostics."""
+        feature = self.network(self.features(proprio, actions, goals))
+        logits = self.skill_head(feature)
+        probabilities = logits.softmax(-1)
+        skill = logits.argmax(-1)
+        latent = self._selected_means(feature, skill)
+        command = self.command(skill, latent)
+        return skill, latent, {
+            "skill_probabilities": probabilities,
+            "command_latent": latent,
+            "command": command,
+            "command_saturated": torch.tanh(latent).abs() >= 0.98,
+        }
+
     def command(self, skill, command_latent):
         return command_latent.tanh() * self.command_limits[skill.long()]
 

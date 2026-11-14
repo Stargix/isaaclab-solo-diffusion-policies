@@ -8,7 +8,10 @@ from .policy_v2 import HierarchyV2
 
 
 class EvaluationAdapter:
-    def __init__(self, checkpoint, reference, walk, crouch, device, horizon):
+    def __init__(self, checkpoint, reference, walk, crouch, device, horizon,
+                 capture_diagnostics=False):
+        self.capture_diagnostics = bool(capture_diagnostics)
+        self.last_diagnostics = None
         state = torch.load(checkpoint, map_location=device, weights_only=False)
         if state.get("algorithm") != "hierarchical_expert_ppo":
             if state.get("algorithm") != "hierarchical_expert_ppo_v2":
@@ -52,7 +55,13 @@ class EvaluationAdapter:
         if guidance_scale != 1.0:
             raise ValueError("Classifier-free guidance does not apply to the hierarchy.")
         if getattr(self, "is_v2", False):
-            skill, command_latent = self.policy.deterministic(proprio, actions, goals)
+            if self.capture_diagnostics:
+                skill, command_latent, self.last_diagnostics = (
+                    self.policy.deterministic_with_diagnostics(proprio, actions, goals)
+                )
+            else:
+                skill, command_latent = self.policy.deterministic(proprio, actions, goals)
+                self.last_diagnostics = None
             latent = torch.cat((skill[:, None].float(), command_latent), -1)
         else:
             normal, categorical = self.policy.distribution(proprio, actions, goals)
@@ -69,6 +78,9 @@ class EvaluationAdapter:
         if getattr(self, "is_v2", False):
             skill = token[:, 0].long()
             command = self.policy.command(skill, token[:, 1:4])
-            return self.experts.action(env, skill, command)
+            if self.capture_diagnostics and self.last_diagnostics is not None:
+                self.last_diagnostics["skill"] = skill
+            return self.experts.action(env, skill, command,
+                                       capture_observation=self.capture_diagnostics)
         skill, command = self.policy.command(token)
         return self.experts.action(env, skill, command)

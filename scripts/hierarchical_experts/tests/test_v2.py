@@ -27,6 +27,22 @@ def test_v2_samples_and_replays_two_conditional_log_probabilities():
     assert policy.log_stds.shape == (2, 3)
 
 
+def test_deterministic_diagnostics_do_not_change_policy_outputs_or_rng():
+    torch.manual_seed(31)
+    policy = HierarchyV2().eval()
+    p, a, g = _inputs(11)
+    rng_before = torch.random.get_rng_state().clone()
+    expected_skill, expected_latent = policy.deterministic(p, a, g)
+    rng_after_plain = torch.random.get_rng_state().clone()
+    actual_skill, actual_latent, diagnostics = policy.deterministic_with_diagnostics(p, a, g)
+    assert torch.equal(actual_skill, expected_skill)
+    assert torch.equal(actual_latent, expected_latent)
+    assert torch.equal(torch.random.get_rng_state(), rng_after_plain)
+    assert diagnostics["skill_probabilities"].shape == (11, 2)
+    assert torch.allclose(diagnostics["skill_probabilities"].sum(-1), torch.ones(11))
+    assert torch.equal(diagnostics["command"], policy.command(actual_skill, actual_latent))
+
+
 def test_unselected_continuous_head_does_not_affect_selected_likelihood_or_gradient():
     policy = HierarchyV2()
     p, a, g = _inputs(8)

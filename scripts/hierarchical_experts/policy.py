@@ -48,10 +48,12 @@ class Experts(nn.Module):
                           data.joint_vel[:, env._joint_ids], action), dim=-1)
 
     @torch.no_grad()
-    def action(self, env, skill, command):
+    def action(self, env, skill, command, capture_observation=False):
         env._commands.copy_(command)
         env._command_steps_left.fill_(2)
         obs = self.observation(env, command)
+        if capture_observation:
+            self.last_observation = obs
         return torch.where(skill[:, None].bool(), self.crouch(obs), self.walk(obs))
 
 
