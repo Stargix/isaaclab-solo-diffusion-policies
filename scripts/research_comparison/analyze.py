@@ -43,8 +43,12 @@ def analyze(root):
             bucket=keys.setdefault((job['actor'],job['suite'],job['stage']),set())
             if key in bucket: raise ValueError('Duplicate condition')
             bucket.add(key)
-            if job['suite']=='composition' and int(r['target_height_changes'])!=4:
-                raise ValueError('Repeated profile did not contain four changes')
+            if job['suite']=='composition':
+                scenario=meta['scenarios'][i]
+                schedule=scenario['height_schedule_m']
+                if (len(schedule)!=5 or not np.isclose(scenario['height_segment_m'],.8)
+                        or not all(not np.isclose(a,b) for a,b in zip(schedule,schedule[1:]))):
+                    raise ValueError('The configured repeated route must have four posture changes')
             height=np.abs(z['achieved_height_m'][:n,i][valid]-z['required_height_m'][:n,i][valid])
             length=float(np.linalg.norm(np.diff(path,axis=0),axis=1).sum())
             boundaries=(np.arange(.8,length-1e-4,.8) if job['suite']=='composition'

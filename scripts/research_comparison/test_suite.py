@@ -69,8 +69,13 @@ def test_analysis_requires_complete_paired_outputs(tmp_path):
                      path_shape='straight',repeat=0,requested_speed=.5,requested_height=.2932,
                      transition_direction=None,transition_fraction=None,task_success=True,survived=True,
                      route_arrived=True,initialization_failure=False,route_arrival_mean_speed_m_s=.5)
+            if actor == 'wc' and suite == 'composition':
+                row.update(active_steps=0, active_cross_track_rmse_m=float('nan'),
+                           target_height_changes=0, task_success=False, survived=False,
+                           route_arrived=False, initialization_failure=True)
             (out/'episode_metrics.json').write_text(json.dumps([row]))
-            (out/'timeseries_metadata.json').write_text(json.dumps(dict(scenarios=[dict(path_xy=[[0,0],[4,0]])])))
+            (out/'timeseries_metadata.json').write_text(json.dumps(dict(scenarios=[dict(path_xy=[[0,0],[4,0]],
+                height_segment_m=.8, height_schedule_m=[.2932,.1705,.2932,.1705,.2932])])))
             np.savez(out/'timeseries.npz',valid=np.ones((8,1),bool),
                 positions_xy=np.array([[[x,.02]] for x in np.linspace(0,3.8,8)]),
                 progress_m=np.linspace(0,3.8,8)[:,None],achieved_height_m=np.full((8,1),.29),
@@ -81,5 +86,6 @@ def test_analysis_requires_complete_paired_outputs(tmp_path):
     (tmp_path/'protocol.json').write_text(json.dumps(protocol))
     analyze(tmp_path)
     assert json.loads((tmp_path/'analysis.json').read_text())['summary']['h/core/stage50']['success']==1
+    assert json.loads((tmp_path/'analysis.json').read_text())['summary']['wc/composition/stage50']['initialization_failure']==1
     (tmp_path/'state'/'wc_core.json').unlink()
     with pytest.raises(ValueError,match='Pending'): analyze(tmp_path)

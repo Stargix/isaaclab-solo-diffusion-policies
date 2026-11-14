@@ -230,6 +230,7 @@ from train.conditioning.goal_builder import (
 )
 from model.solo12_diffusion_policy import Solo12DiffusionPolicy, Solo12DiffusionPolicyConfig
 from model.solo12_deterministic_chunk_policy import Solo12DeterministicChunkPolicy, Solo12DeterministicChunkPolicyConfig
+from evaluation.trajectory_plot import active_trajectory_xy
 from evaluation.metrics import (
     compute_active_tracking_metrics,
     compute_first_task_success,
@@ -2351,11 +2352,12 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
             plan = path_plans[i]
             ref_xy = (plan.path_w[:, :2] - start_pos[i, :2])[:duration_steps]
             active_steps = int(summary_rows[i].get("active_steps", 0))
-            act_traj = np.array(trajectories[i]["actual"][:active_steps or None])
+            act_traj = active_trajectory_xy(trajectories[i]["actual"], active_steps)
             
             # Plot reference and actual
             ax.plot(ref_xy[:, 0], ref_xy[:, 1], color="#333333", linestyle="--", linewidth=2.0, label="Reference", zorder=3)
-            ax.plot(act_traj[:, 0], act_traj[:, 1], color="#0052CC", alpha=0.9, linewidth=2.0, label="Actual", zorder=4)
+            if len(act_traj):
+                ax.plot(act_traj[:, 0], act_traj[:, 1], color="#0052CC", alpha=0.9, linewidth=2.0, label="Actual", zorder=4)
             
             ax.set_title(f"{plan.demo_name}\n({scenarios[i].speed:.2f} m/s)", fontsize=11, fontweight="bold", pad=8, color="#222222")
             ax.set_xlabel("Relative X [m]", fontsize=9)
@@ -2407,9 +2409,10 @@ def main(env_cfg: Any, agent_cfg: Any) -> None:
                 for i, s in enumerate(scenarios):
                     if s.path_shape == shape and s.speed == speed and s.repeat == 0:
                         active_steps = int(summary_rows[i].get("active_steps", 0))
-                        act_traj = np.array(trajectories[i]["actual"][:active_steps or None])
+                        act_traj = active_trajectory_xy(trajectories[i]["actual"], active_steps)
                         color = colors_list[speed_idx % len(colors_list)]
-                        ax.plot(act_traj[:, 0], act_traj[:, 1], color=color, alpha=0.9, linewidth=2.0, label=f"{speed} m/s", zorder=4)
+                        if len(act_traj):
+                            ax.plot(act_traj[:, 0], act_traj[:, 1], color=color, alpha=0.9, linewidth=2.0, label=f"{speed} m/s", zorder=4)
                         plan = path_plans[i]
                         start_progress, _ = project_trajectory_to_polyline(
                             rollout_start_pos[i : i + 1, :2], plan.path_w[:, :2]
