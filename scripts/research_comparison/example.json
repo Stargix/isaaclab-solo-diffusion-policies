@@ -1,0 +1,21 @@
+{
+  "startup_sensitivity": false,
+  "expected_sha256": {
+    "bc_prior": "c874b2ad0a44cfaa69b0400ec354ec17fd3cad6d303923e1f55a91cc52305352",
+    "reference": "2e75422000cc22ab5023cfbc820eb8d391a69b4fc008a7e0a6bbb2c1e0b54868",
+    "walk": "e42e1ddd6645ec0b1ddb622cc064e84a521f57fbb3c244259dbae1675db9111a",
+    "crouch": "12821e4f58e678860794888fdf3358b7b9d922ccdf93ab58f7dcb870dc89e16d"
+  },
+  "inputs": {
+    "bc_prior": "${ARTIFACT_ROOT}/weights/deterministic_prior.pt",
+    "reference": "${ARTIFACT_ROOT}/weights/wc_seed42.pt",
+    "walk": "${ARTIFACT_ROOT}/experts/walk_final.pt",
+    "crouch": "${ARTIFACT_ROOT}/experts/crouch_final.pt"
+  },
+  "actors": [
+    {"name": "h42", "kind": "hierarchy", "horizon": 10, "checkpoint": "${HIERARCHY_RUN_ROOT}/v2_seed42/best.pt"},
+    {"name": "h43", "kind": "hierarchy", "horizon": 10, "checkpoint": "${HIERARCHY_RUN_ROOT}/v2_seed43/best.pt"},
+    {"name": "h44", "kind": "hierarchy", "horizon": 10, "checkpoint": "${HIERARCHY_RUN_ROOT}/v2_seed44/best.pt"},
+    {"name": "wc42", "kind": "policy", "horizon": 4, "checkpoint": "${ARTIFACT_ROOT}/weights/wc_seed42.pt"}
+  ]
+}

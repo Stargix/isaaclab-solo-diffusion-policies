@@ -19,6 +19,12 @@ def parser_with_app_args():
     from isaaclab.app import AppLauncher
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--initialization", choices=("bc", "random"), default="bc",
+                        help="Random weights retain the same BC-derived normalizers and model config.")
+    parser.add_argument("--update_epochs", type=int, default=5)
+    parser.add_argument("--minibatch_size", type=int, default=8192)
+    parser.add_argument("--critic_minibatch_size", type=int, default=4096)
+    parser.add_argument("--critic_warmup_iterations", type=int, default=10)
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--run_name", default="ppo_wc_deterministic_pilot")
     parser.add_argument("--num_envs", type=int, default=4096)
@@ -117,7 +123,8 @@ def main(args, source, policy, cfg, output):
 
 if __name__ == "__main__":
     args = parser_with_app_args().parse_args()
-    for name in ("num_envs", "iterations", "rollout_chunks", "save_interval"):
+    for name in ("num_envs", "iterations", "rollout_chunks", "save_interval", "update_epochs",
+                 "minibatch_size", "critic_minibatch_size"):
         if getattr(args, name) < 1:
             raise ValueError(f"{name} must be positive.")
     output = Path(args.output_dir).resolve()
@@ -131,9 +138,12 @@ if __name__ == "__main__":
     cfg = GaussianPPOConfig(actor_lr=args.actor_lr, initial_std=args.initial_std,
                            clip_ratio=args.clip_ratio, target_kl=args.target_kl,
                            adaptive_actor_lr=args.adaptive_actor_lr, min_actor_lr=args.min_actor_lr,
-                           critic_warmup_iterations=0 if args.smoke else 10)
+                           critic_warmup_iterations=0 if args.smoke else args.critic_warmup_iterations,
+                           update_epochs=args.update_epochs, minibatch_size=args.minibatch_size,
+                           critic_minibatch_size=args.critic_minibatch_size)
     # Validate source and config before expensive simulation startup.
-    source, policy = load_bc_policy(Path(args.checkpoint).resolve(), args.device, cfg)
+    source, policy = load_bc_policy(Path(args.checkpoint).resolve(), "cpu", cfg,
+                                    initialization=args.initialization)
     from isaaclab.app import AppLauncher
     app = AppLauncher(args).app
     try:

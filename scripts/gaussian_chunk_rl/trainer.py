@@ -22,6 +22,8 @@ class GaussianPPOTrainer(DPPOTrainer):
                  if name in source}
         state.update({
             "algorithm": ALGORITHM, "policy_backend": "deterministic_chunk",
+            "initialization": getattr(self.policy, "initialization", "bc"),
+            "normalization_source": "fixed_bc_dataset_statistics",
             "gaussian_ppo_checkpoint_version": 1, "gaussian_ppo_config": self.policy.ppo_cfg.to_dict(),
             # Legacy evaluator names describe the shared task, not the algorithm.
             "dppo_task_contract_version": DPPO_TASK_CONTRACT_VERSION,

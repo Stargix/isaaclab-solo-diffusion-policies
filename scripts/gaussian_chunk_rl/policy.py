@@ -30,7 +30,9 @@ def model_config(config: dict) -> Solo12DeterministicChunkPolicyConfig:
     return Solo12DeterministicChunkPolicyConfig(**values)
 
 
-def load_bc_policy(path, device, cfg: GaussianPPOConfig):
+def load_bc_policy(path, device, cfg: GaussianPPOConfig, *, initialization="bc"):
+    if initialization not in ("bc", "random"):
+        raise ValueError("initialization must be bc or random")
     source = load_training_checkpoint(path, device, expected_policy_kind=POLICY_KIND)
     if source.get("algorithm") != "deterministic_chunk_bc":
         raise ValueError("This pilot must start from pure deterministic BC, not an RL actor.")
@@ -41,7 +43,8 @@ def load_bc_policy(path, device, cfg: GaussianPPOConfig):
     mean = Solo12DeterministicChunkPolicy(model_config(source["config"]))
     if (mean.cfg.proprio_dim, mean.cfg.goal_dim, mean.cfg.action_dim, mean.cfg.action_hist_dim) != (30, 16, 12, 12):
         raise ValueError("Checkpoint observation/action dimensions do not match Solo12.")
-    mean.load_state_dict(source["ema_model_state_dict"], strict=True)
+    if initialization == "bc":
+        mean.load_state_dict(source["ema_model_state_dict"], strict=True)
     mean.set_normalizer_stats(source["normalizer_stats"])
     stats = mean.normalizer_stats
     for array in (stats.proprio.mean, stats.proprio.std, stats.goal.mean, stats.goal.std,
@@ -52,7 +55,9 @@ def load_bc_policy(path, device, cfg: GaussianPPOConfig):
         raise ValueError("Degenerate action normalizer range.")
     if any(not torch.isfinite(p).all() for p in mean.parameters()):
         raise ValueError("Non-finite BC parameters.")
-    return source, GaussianChunkPolicy(mean, cfg).to(device)
+    actor = GaussianChunkPolicy(mean, cfg).to(device)
+    actor.initialization = initialization
+    return source, actor
 
 
 class GaussianChunkPolicy(torch.nn.Module):
