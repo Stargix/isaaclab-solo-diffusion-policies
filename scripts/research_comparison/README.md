@@ -52,7 +52,7 @@ CPU tests cover initialization isolation, RNG pairing, raw Gaussian likelihood a
 python -m pytest scripts/research_comparison scripts/gaussian_chunk_rl/tests scripts/hierarchical_experts/tests scripts/diffusion_policy/evaluation/test_route_bank.py -q
 ```
 
-The new physical GPU smoke was attempted locally on 2026-11-14 but blocked by CUDA OOM and then Windows `System.OutOfMemoryException` before Isaac started. It is **not** recorded as passed. Existing Gaussian/Isaac code has historical smokes; these do not substitute for a smoke of the new branch. Once memory is available, a two-update check for each `--initialization bc|random` is:
+Local checks on 2026-11-14: 55 CPU tests passed. With the actual deterministic prior, the random-initialized arm completed two local CPU-physics updates (256 transitions), actor/critic updates, checkpoint save and reload; learned tensors were finite (attention-mask infinities are intentional). The BC arm executed an actor/critic update in CPU physics but checkpoint saving failed when C: ran out of space. Logs and metrics are preserved locally; redundant smoke weights were removed to free space. GPU PhysX startup failed with allocation/kernel errors while host virtual memory was almost exhausted. A successful minimal CUDA allocation does not certify GPU physics. The GPU smoke and complete BC save/reload are **not** recorded as passed. Do not treat these wiring checks as performance evidence or approval of a full cluster allocation. After freeing disk and virtual memory, finish both checks with fresh outputs:
 
 ```bash
 python -m scripts.gaussian_chunk_rl.train \
